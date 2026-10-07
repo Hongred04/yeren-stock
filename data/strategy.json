@@ -1,0 +1,153 @@
+{
+  "name": "野人原版",
+  "desc": "全能的野人原味体系：缩量做短线题材、审美三要素、退潮清仓",
+  "M1_macro": {
+    "enabled": true,
+    "fear_hawkish": "risk_off",
+    "easing_start": "bull_finance",
+    "hawkish_start": "caution",
+    "manual_override": "auto"
+  },
+  "M2_volume": {
+    "enabled": true,
+    "peak_threshold": 15000,
+    "comfort_threshold": 5000,
+    "shrink_threshold": 12000,
+    "shrink_red_flag": true
+  },
+  "M3_sentiment": {
+    "enabled": true,
+    "ebb_hurt_ratio": 0.3,
+    "ebb_limit_down_ratio": 0.15,
+    "ebb_broken_ratio": 0.5,
+    "clear_on_ebb": true,
+    "probe_board": 1,
+    "cycle_low_probe": true
+  },
+  "M4_aesthetic": {
+    "enabled": true,
+    "price_min": 5.0,
+    "price_max": 10.0,
+    "mv_max": 100.0,
+    "mv_mid_threshold": 500.0,
+    "exclude_boards": [
+      "科创板",
+      "北交所"
+    ],
+    "need_bull_ma": false,
+    "recent_limitup_days": 20,
+    "recent_limitup_min": 1,
+    "history_two_board": true,
+    "min_turnover": 1.0,
+    "max_turnover": 25.0,
+    "exclude_st": true,
+    "weight_graph": 35,
+    "weight_price_mv": 30,
+    "weight_imagination": 35
+  },
+  "M5_position": {
+    "enabled": true,
+    "pick_count": 4,
+    "first_weight": 0.2,
+    "cash_reserve": 0.2,
+    "hold_before_boards": 5,
+    "add_on_strength": true,
+    "max_single_weight": 0.6
+  },
+  "M6_message": {
+    "enabled": true,
+    "no_chase_clear_good": true,
+    "follow_money_not_news": true
+  },
+  "M7_earnings": {
+    "enabled": true,
+    "q3_pre_disclose_start": "10-08",
+    "hold_cash_before_holiday": true,
+    "post_holiday_focus": [
+      "大金融",
+      "大科技"
+    ],
+    "only_with_earnings": true
+  },
+  "M8_discipline": {
+    "enabled": true,
+    "rules": [
+      {
+        "id": "capital",
+        "text": "保住本金是第一原则，单笔风险不超过总资金2%",
+        "on": true
+      },
+      {
+        "id": "ebb_clear",
+        "text": "退潮期无条件清仓，管住手",
+        "on": true
+      },
+      {
+        "id": "cut_weak",
+        "text": "去弱留强不带幻想，砍错不心疼",
+        "on": true
+      },
+      {
+        "id": "no_anti_cycle",
+        "text": "不对抗周期，量能不够不做",
+        "on": true
+      },
+      {
+        "id": "rational",
+        "text": "理性独立思考，不带幻想、不犟",
+        "on": true
+      },
+      {
+        "id": "no_chase",
+        "text": "明牌不追",
+        "on": true
+      },
+      {
+        "id": "no_noearn",
+        "text": "业绩披露期不碰无业绩题材",
+        "on": true
+      },
+      {
+        "id": "holiday_cash",
+        "text": "中长线节假日持币、短线走一步看一步",
+        "on": true
+      },
+      {
+        "id": "volume_only",
+        "text": "缩量市场只信量能，不信任何板块吹嘘",
+        "on": true
+      }
+    ]
+  },
+  "M9_mainline": {
+    "enabled": true,
+    "auto_message": true,
+    "message_level": "auto",
+    "message_note": "",
+    "min_theme_zt": 3,
+    "min_early_seal": 2,
+    "early_deadline": "10:30",
+    "board_volume_surge": 1.3,
+    "midarmy_mv_min": 100.0,
+    "midarmy_pct_min": 3.0,
+    "midarmy_min_count": 1,
+    "old_dragon_min_boards": 3,
+    "old_dragon_pct": 5.0,
+    "dragon_premium_min": 3.0,
+    "firstboard_survive_min": 0.5,
+    "survive_pct_min": 3.0,
+    "midarmy_feedback_max": -2.0
+  },
+  "M10_fundstyle": {
+    "enabled": true,
+    "inst_mv_min": 80.0,
+    "inst_max_zt20": 1,
+    "inst_max_daily_gain": 7.5,
+    "inst_min_pct20": 5.0,
+    "inst_max_pct20": 60.0,
+    "hot_zt10_min": 2,
+    "zhuang_crash_pct": -7.0,
+    "zhuang_chop_amp": 2.8
+  },
+  "preset": "wildman"
+}
