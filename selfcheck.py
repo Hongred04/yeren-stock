@@ -63,11 +63,17 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     if sen.get("trend"):
         print(f"  ⚠ {sen['trend']}")
 
-    # 全市场扫描
+    # 全市场扫描（当日名单复用逻辑与 pipeline 一致）
     t1 = time.time()
-    codes = universe.enumerate_all()
-    snaps = ds.fetch_snapshots(codes, batch=60, workers=16)
-    print(f"\n[扫描] 全市场 {len(snaps)} 只  ({round(time.time()-t1,1)}s)")
+    codes = ds.load_valid_codes()
+    from_enum = not codes
+    if from_enum:
+        codes = universe.enumerate_all()
+    snaps = ds.fetch_snapshots(codes, batch=80, workers=24)
+    if from_enum and snaps:
+        ds.save_valid_codes(sorted(snaps))
+    print(f"\n[扫描] 全市场 {len(snaps)} 只  "
+          f"({'全量枚举' if from_enum else '当日有效名单'})  ({round(time.time()-t1,1)}s)")
 
     # M9 题材主线五信号（消息定级→合力→中军→老龙→次日验证）
     ml = mainline.evaluate(cfg, zt=zt, snaps=snaps, real_date=ds.pool_qdate() or date)
@@ -124,7 +130,7 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     print(f"[粗筛] 候选 {len(pool)} 只 → 取前 {len(pre_codes)} 拉K线")
 
     t2 = time.time()
-    kl = ds.fetch_klines(pre_codes, n=70, workers=12)
+    kl = ds.fetch_klines(pre_codes, n=70, workers=24)
     print(f"[K线] 成功 {len(kl)} 只  ({round(time.time()-t2,1)}s)")
 
     picks = engine.screen(cfg, {c: snaps[c] for c in kl}, kl, zt, mac, vol, sen, top_n=top)

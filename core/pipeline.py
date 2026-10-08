@@ -143,15 +143,22 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth)
 
         # ---- 选股 ----
+        codes = ds.load_valid_codes()
+        from_enum = not codes
+        if from_enum:
+            codes = universe.enumerate_all()
         _prog("扫描全市场快照…", 0, 100)
-        codes = universe.enumerate_all()
-        snaps = ds.fetch_snapshots(codes, batch=60, workers=16,
+        snap_batch = 80
+        snaps = ds.fetch_snapshots(codes, batch=snap_batch, workers=24,
                                    progress=lambda d, t: _prog(
-                                       f"扫描全市场 {d*60}/{t*60} 只…", d, t))
+                                       f"扫描全市场 {d*snap_batch}/{t*snap_batch} 只…", d, t))
+        if from_enum and snaps:
+            # 当日首扫：把真实标的名单落盘，同日重扫少发 ~8 倍请求
+            ds.save_valid_codes(sorted(snaps))
         _prog(f"粗筛候选（已扫 {len(snaps)} 只）…", 0, 100)
         pre = _snapshot_prefilter(snaps, cfg, zt, kline_limit)
         _prog(f"拉取 {len(pre)} 只K线…", 0, len(pre))
-        kl = ds.fetch_klines(pre, n=70, workers=12,
+        kl = ds.fetch_klines(pre, n=70, workers=24,
                              progress=lambda d, t: _prog(
                                  f"拉取K线 {d}/{t}…", d, t))
         _prog("打分选股…", 0, 100)
@@ -187,6 +194,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 "preset_name": cfg.get("name", ""),
                 "elapsed": round(time.time() - t0, 1),
                 "scanned": len(snaps),
+                "scan_list": "全量枚举" if from_enum else "当日有效名单",
                 "kline_ok": len(kl),
                 "candidate": len(pre),
             },

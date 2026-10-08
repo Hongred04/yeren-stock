@@ -9,10 +9,15 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import queue
 import re
+import ssl
+import threading
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -25,15 +30,73 @@ _cache_ts: dict = {}
 _last_td: tuple[str, float] | None = None
 _pool_qdate: dict = {}
 
+# ---------------------------------------------------------------- 连接池
+# 全系统一次扫描要发几百个 HTTPS 请求，纯 urllib 每请求都要完整走一遍
+# DNS + TCP + TLS 握手（占单请求耗时一半以上）—— 这是最大的速度瓶颈。
+# 这里按 host 维护常驻 keep-alive 连接，跨阶段、跨扫描复用。
+
+_SSL_CTX = ssl.create_default_context()
+_SYS_PROXY = urllib.request.getproxies()   # 导入时读一次系统代理
+_conn_pool: dict[str, queue.Queue] = {}
+_POOL_MAX = 32   # 每 host 池上限，防止长驻进程文件句柄膨胀
+
+
+def _new_conn(host: str, timeout: int) -> http.client.HTTPSConnection:
+    px = _SYS_PROXY.get("https") or _SYS_PROXY.get("http")
+    if px:
+        # 走系统代理：连代理端口 + CONNECT 隧道到目标 443，行为与 urllib 一致
+        pu = urllib.parse.urlsplit(px if "//" in px else "//" + px)
+        conn = http.client.HTTPSConnection(pu.hostname, pu.port or 80,
+                                           timeout=timeout, context=_SSL_CTX)
+        conn.set_tunnel(host, 443)
+    else:
+        conn = http.client.HTTPSConnection(host, 443,
+                                           timeout=timeout, context=_SSL_CTX)
+    return conn
+
 
 def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
-    req = urllib.request.Request(url, headers={
+    """HTTPS GET，keep-alive 连接池复用。
+
+    服务端会掐掉闲置连接：第一次请求失败就丢弃旧连接重试一次，自愈。
+    """
+    p = urllib.parse.urlsplit(url)
+    host = p.hostname or ""
+    path = p.path + (("?" + p.query) if p.query else "")
+    headers = {
         "User-Agent": UA,
         "Referer": referer or "https://gu.qq.com/",
         "Accept": "*/*",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        "Accept-Encoding": "identity",
+        "Host": p.netloc,
+    }
+    q = _conn_pool.setdefault(host, queue.Queue())
+    last_err: Exception | None = None
+    for _ in range(2):
+        conn = None
+        try:
+            try:
+                conn = q.get_nowait()
+            except queue.Empty:
+                conn = _new_conn(host, timeout)
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            if q.qsize() < _POOL_MAX:
+                q.put(conn)
+            else:
+                conn.close()
+            return data
+        except Exception as e:
+            last_err = e
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    raise last_err  # type: ignore[misc]
 
 
 def cached(key: str, ttl: int, producer):
@@ -120,7 +183,43 @@ def _parse_tx_line(line: str) -> dict | None:
     }
 
 
-def fetch_snapshots(codes: list[str], batch: int = 60, workers: int = 10,
+# ---------------------------------------------------------------- 有效代码名单
+# enumerate_all() 按号段暴力枚举约 3.6 万码（绝大多数是空号），快照阶段
+# 因此要发约 600 个请求。每天首次扫描后把「真实返回了行情的代码」落盘，
+# 同日重扫只扫这 ~5 千只 —— 请求量降约 8 倍，这是快照阶段最大的提速。
+
+VALID_CODES_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "valid_codes.json")
+
+
+def load_valid_codes() -> list[str] | None:
+    """当日有效代码名单。按自然日失效：每天第一扫仍是全量枚举。
+
+    当日新上市/盘中恢复交易的票要等次日首扫才进名单 —— 涨停池标的
+    本来就逐日全量刷新，影响可忽略。
+    """
+    try:
+        with open(VALID_CODES_PATH, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if obj.get("date") == datetime.now().strftime("%Y%m%d") and obj.get("codes"):
+            return obj["codes"]
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def save_valid_codes(codes: list[str]) -> None:
+    try:
+        os.makedirs(os.path.dirname(VALID_CODES_PATH), exist_ok=True)
+        tmp = VALID_CODES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"date": datetime.now().strftime("%Y%m%d"), "codes": codes}, f)
+        os.replace(tmp, VALID_CODES_PATH)
+    except OSError:
+        pass
+
+
+def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
                     progress=None) -> dict[str, dict]:
     """批量拉取快照。返回 {code: snapshot}。"""
     batches = [codes[i:i + batch] for i in range(0, len(codes), batch)]
