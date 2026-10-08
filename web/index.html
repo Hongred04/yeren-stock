@@ -353,16 +353,8 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div class="grid g4" id="posWrap"></div>
     </div>
 
-    <!-- 折叠区 -->
+    <!-- 折叠区（只保留涨停池：其余为策略背景，收进调策略面板语义，不放主页） -->
     <div class="sec">
-      <details class="fold">
-        <summary>纪律检查 <span class="cnt" id="discCnt"></span></summary>
-        <div class="fbd"><div id="discCard"></div></div>
-      </details>
-      <details class="fold">
-        <summary>业绩期规则 <span class="cnt" id="earnCnt"></span></summary>
-        <div class="fbd"><div id="earnCard"></div></div>
-      </details>
       <details class="fold">
         <summary>涨停池 <span class="cnt" id="ztCnt"></span></summary>
         <div class="fbd"><div class="tbl" style="box-shadow:none;border:none">
@@ -373,20 +365,6 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
             <tbody id="ztBody"></tbody>
           </table></div>
         </div>
-      </details>
-      <details class="fold">
-        <summary>宏观周期时间轴</summary>
-        <div class="fbd"><div class="tbl" style="box-shadow:none;border:none">
-          <table><thead><tr><th>时间</th><th>事件</th><th>对市场的影响</th><th>结论</th></tr></thead>
-          <tbody id="macroBody"></tbody></table></div></div>
-      </details>
-      <details class="fold">
-        <summary>消息面怎么看</summary>
-        <div class="fbd"><div id="msgCard"></div></div>
-      </details>
-      <details class="fold">
-        <summary>保命纪律清单</summary>
-        <div class="fbd"><ul class="ls" id="creedList"></ul></div>
       </details>
     </div>
 
@@ -709,31 +687,6 @@ function render(){
     `<div class="mc r"><div class="t">仓位</div><div class="v">0%</div>
       <div class="s">今天没有符合条件的股票，空仓</div></div>`;
 
-  /* ── 纪律 ── */
-  const dc=mt.checks.map(c=>
-    `<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;
-      border-bottom:1px solid var(--line2)">
-      <span class="pill ${c.level==='red'?'red':(c.level==='yellow'?'org':'grn')}">${
-        c.level==='red'?'禁止':(c.level==='yellow'?'注意':'正常')}</span>
-      <div><div style="font-size:13.5px;font-weight:700">${esc(c.item)}</div>
-      <div style="font-size:12.5px;color:var(--tx2);margin-top:3px;line-height:1.7">${esc(c.action)}</div></div>
-    </div>`).join('');
-  $('discCard').innerHTML=dc;
-  $('discCnt').textContent=mt.status==='green'?'全部正常':
-    (mt.status==='yellow'?mt.checks.filter(c=>c.level!=='green').length+' 项注意':
-      mt.checks.filter(c=>c.level==='red').length+' 项冲突');
-
-  /* ── 业绩期 ── */
-  const e=REPORT.earnings;
-  $('earnCnt').textContent=e.in_window?'窗口开启':'未开启';
-  $('earnCard').innerHTML=
-    `<div style="margin-bottom:10px"><span class="pill ${e.in_window?'org':'gry'}">${
-      e.in_window?'业绩披露期进行中':'当前不在业绩披露期'}</span></div>
-    <ul class="ls" style="margin-bottom:11px">${e.rules.map(r=>
-      `<li class="${r.tag==='bear'?'no':(r.tag==='trap'?'wn':'ok')}">${esc(r.situation)} → ${esc(r.result)}</li>`).join('')}</ul>
-    <div style="font-size:13px;color:var(--tx2);background:#fafbfc;padding:11px 13px;border-radius:9px;line-height:1.7">
-      ${esc(e.advice)}</div>`;
-
   /* ── 涨停池 ── */
   const zp=REPORT.limit_up_pool||[];
   $('ztCnt').textContent=zp.length+' 只';
@@ -746,21 +699,6 @@ function render(){
   document.querySelectorAll('#ztBody tr[data-c]').forEach(tr=>
     tr.onclick=()=>{const p=REPORT.picks.find(x=>x.code===tr.dataset.c);
       if(p)showDetail(tr.dataset.c);});
-
-  /* ── 宏观 ── */
-  $('macroBody').innerHTML=REPORT.macro_events.map(e=>
-    `<tr><td class="fl" style="font-size:12.5px">${esc(e.period)}</td>
-      <td><b>${esc(e.event)}</b></td><td class="fl">${esc(e.market)}</td>
-      <td><span class="pill ${e.tag==='bull'?'red':e.tag==='bear'?'gry':e.tag==='bottom'?'org':'blu'}">${esc(e.conclusion)}</span></td></tr>`).join('');
-
-  /* ── 消息 ── */
-  $('msgCard').innerHTML=`<ul class="ls">${REPORT.message.principles.map(p=>
-    `<li><b style="color:var(--tx)">${esc(p.t)}</b><br><span style="font-size:12.5px">${esc(p.d)}</span></li>`).join('')}</ul>
-    <div style="margin-top:11px;padding:11px 13px;background:var(--red-bg);border-radius:9px;
-      font-size:13px;color:#a02634;line-height:1.7"><b>核心原则：明牌不追</b> —— ${esc(REPORT.message.advice)}</div>`;
-
-  /* ── 保命纪律 ── */
-  $('creedList').innerHTML=mt.rules.map(r=>`<li class="ok">${esc(r.text)}</li>`).join('');
 
   if(SEL) showDetail(SEL);
 }

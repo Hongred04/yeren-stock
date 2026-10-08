@@ -223,10 +223,25 @@ def _signal_consensus(a: dict, top: dict | None) -> dict:
 
     idx_state, idx_note = "unverified", "板块指数未验证（数据源不可用）"
     try:
-        bk = _resolve_bk(top["sector"])
-        if bk:
-            bars = ds.fetch_board_kline(bk, 70)
-            idx_state, idx_note = _index_breakout(bars, _float(a.get("board_volume_surge"), 1.3))
+        bars, src_label = None, ""
+        # 优先：题材 → 中证/国证代理指数（push2his 被拦截的网络环境下的可达源）
+        idx = ds.resolve_sector_index(top["sector"])
+        if idx:
+            idx_code, idx_name = idx
+            bars = ds._kline_from_tx(idx_code, 70)
+            src_label = f"（代理指数 {idx_name}）"
+        # 回退：东财行业板块指数（网络可用时的原口径）
+        if not bars:
+            bk = _resolve_bk(top["sector"])
+            if bk:
+                bars = ds.fetch_board_kline(bk, 70)
+        if bars:
+            # 腾讯日K只有 volume 字段，归一化为 amount —— 带量判定用的是
+            # 量能比值，成交量口径同样成立
+            bars = [{**b, "amount": b.get("amount", b.get("volume", 0))} for b in bars]
+            idx_state, idx_note = _index_breakout(
+                bars, _float(a.get("board_volume_surge"), 1.3))
+            idx_note += src_label
     except Exception:
         pass
 

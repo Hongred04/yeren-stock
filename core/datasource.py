@@ -697,8 +697,35 @@ def pool_history_dates() -> list[str]:
 # ---------------------------------------------------------------- 东财行业板块
 # M9 主线五信号用：板块指数日K（带量新高判定）+ 板块成分股（中军识别）。
 # 取不到时上层一律降级为「未验证」，不硬性否决信号。
+#
+# 注意：push2 / push2his（东财板块接口）在部分网络环境下被 TLS 层拦截，
+# 此时板块指数改走「题材 → 中证/国证主题指数」映射（见 SECTOR_INDEX_MAP，
+# 日K用腾讯 ifzq，实测 399xxx 系列有完整历史），映射不上的题材维持未验证。
 
 EM_REFERER = "https://quote.eastmoney.com/"
+
+# 题材关键词 → 腾讯行情指数代码（代理口径，日K经 ifzq 实测完整）。
+# 只放"验证过有完整日K且语义贴近"的映射，宁缺毋滥 —— 没映射的题材
+# 走东财原路径，再不行就降级「未验证」，与旧行为一致。
+SECTOR_INDEX_MAP: list[tuple[tuple[str, ...], str, str]] = [
+    (("电池", "锂电", "储能", "新能源车", "新能源汽车"), "sz399976", "CS新能车"),
+    (("军工", "国防", "航空航天"), "sz399967", "中证军工"),
+    (("券商", "证券"), "sz399975", "证券公司"),
+    (("银行", "大金融"), "sz399986", "中证银行"),
+    (("白酒", "酿酒"), "sz399997", "中证白酒"),
+    (("房地产", "地产"), "sz399393", "国证地产"),
+    (("新能车", "汽车产业"), "sz399976", "CS新能车"),
+]
+
+
+def resolve_sector_index(sector: str) -> tuple[str, str] | None:
+    """题材名 → (指数代码, 指数名)。双向子串匹配，命中返回 None 表示无映射。"""
+    if not sector:
+        return None
+    for keys, code, name in SECTOR_INDEX_MAP:
+        if any(k in sector or sector in k for k in keys):
+            return code, name
+    return None
 
 
 def _num(v, default: float = 0.0) -> float:
