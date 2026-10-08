@@ -30,5 +30,13 @@
          我的持仓）各挂二级页面，一次只看一页，不再一屏堆十几块；
          一级带角标（温度/候选数/告警数），跨页点个股自动跳到选股页详情；
          持仓与自选拆成两个二级页；当前页记忆到 localStorage
+  1.8.2  修复「加自选后不显示」：POST /api/portfolio 返回的是 {ok, portfolio}，
+         前端却按 view 解析，导致 REPORT.portfolio 被赋成没有 watchlist 的对象
+         —— 自选页/持仓页/管理面板全部空白。统一用 unwrapPort() 兼容 POST 与 GET。
+         另外：详情页按钮改为状态感知（已加显示「✓ 已在自选（点此移除）」，
+         可再点取消），加/删后弹 toast 并带「去看看」直达自选页；
+         pipeline 报告补上 portfolio.raw；一级「我的持仓」无告警时显示自选数；
+         修正 renderSub 不刷新一级角标的问题（改为 renderTopTabs 统一重画）；
+         data/portfolio.json 加入 .gitignore（个人持仓不进 git）
 """
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"

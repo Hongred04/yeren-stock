@@ -237,6 +237,15 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
   .t2{padding:4px 10px;font-size:12px}
 }
 
+/* ── 轻提示 toast ── */
+.toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,16px);z-index:300;
+  display:flex;align-items:center;gap:12px;padding:11px 16px;border-radius:11px;
+  background:#1d2430;color:#fff;font-size:13px;font-weight:600;
+  box-shadow:0 8px 28px rgba(16,24,40,.28);opacity:0;pointer-events:none;transition:.2s}
+.toast.on{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.toast b{cursor:pointer;color:#8fb8ff;font-weight:700;white-space:nowrap}
+.toast b:hover{color:#bcd2f7;text-decoration:underline}
+
 /* ── 策略面板 ── */
 .panel{background:#fff;position:fixed;top:0;right:0;width:min(460px,100vw);height:100vh;
   z-index:100;transform:translateX(100%);transition:.25s;display:flex;flex-direction:column;
@@ -548,16 +557,21 @@ try{ const sv=localStorage.getItem('stockPage');
 
 function buildNav(){
   $('tabs').classList.remove('hide');
-  $('tab1').innerHTML=NAV.map(g=>
-    `<div class="t1" data-g="${g.k}" title="${esc(g.d)}">${g.t}${gBadge(g.k)}</div>`).join('');
-  $('tab1').querySelectorAll('.t1').forEach(el=>el.onclick=()=>{
-    const g=NAV.find(x=>x.k===el.dataset.g);
-    go(NAV.find(x=>x.k===groupOf(CUR)).k===g.k ? CUR : g.subs[0].k);
-  });
   renderSub();
   go(CUR);
 }
+// 一级菜单（每次 renderSub 都重画，角标才会跟着持仓/自选变更实时更新）
+function renderTopTabs(){
+  const gk=groupOf(CUR);
+  $('tab1').innerHTML=NAV.map(g=>
+    `<div class="t1${g.k===gk?' on':''}" data-g="${g.k}" title="${esc(g.d)}">${g.t}${gBadge(g.k)}</div>`).join('');
+  $('tab1').querySelectorAll('.t1').forEach(el=>el.onclick=()=>{
+    const g=NAV.find(x=>x.k===el.dataset.g);
+    go(groupOf(CUR)===g.k ? CUR : g.subs[0].k);
+  });
+}
 function renderSub(){
+  renderTopTabs();
   const g=NAV.find(x=>x.k===groupOf(CUR))||NAV[0];
   $('tab2').innerHTML=g.subs.map(s=>
     `<div class="t2" data-p="${s.k}" title="${esc(s.d||'')}">${s.t}${
@@ -577,8 +591,11 @@ function gBadge(gk){
       return n?`<span class="badge">${n}</span>`:'';
     }
     if(gk==='mine'){
-      const n=((REPORT.portfolio||{}).checks||[]).length;
-      return n?`<span class="badge">${n}</span>`:'';
+      const p=REPORT.portfolio||{};
+      const c=(p.checks||[]).length;
+      if(c) return `<span class="badge">${c}</span>`;          // 有告警：红
+      const w=(p.watchlist||[]).length;                        // 没告警：显示在跟踪的自选数
+      return w?`<span class="badge n">${w}</span>`:'';
     }
   }catch(e){}
   return '';
@@ -605,9 +622,7 @@ function badgeOf(p){
 function go(page){
   if(!page) return;
   CUR=page;
-  const gk=groupOf(page);
-  $('tab1').querySelectorAll('.t1').forEach(el=>el.classList.toggle('on',el.dataset.g===gk));
-  renderSub();
+  renderSub();                       // 同时刷新一级（含角标）与二级
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.dataset.page===page));
   try{ localStorage.setItem('stockPage',page); }catch(e){}
   // 隐藏时 clientWidth=0，切回选股页要重画K线
@@ -1024,10 +1039,9 @@ function showDetail(code,tr){
 
     ${fsHtml}
 
-    <div style="display:flex;gap:8px;margin-bottom:14px">
-      <button class="btn2" id="dWl">＋加自选</button>
-      <button class="btn2" id="dPf">＋记持仓</button>
-      <span class="fl" style="font-size:11.5px;align-self:center">记入后系统用同一套卖出信号帮你盯着</span>
+    <div style="display:flex;gap:8px;margin-bottom:14px;align-items:center" id="dActions">
+      ${detailBtnsHtml(p)}
+      <span class="fl" style="font-size:11.5px">记入后系统用同一套卖出信号帮你盯着</span>
     </div>
 
     <div class="kv">
@@ -1072,12 +1086,37 @@ function showDetail(code,tr){
       <div id="kchart"></div></div>
   </div>`;
   $('detail').querySelector('.close').onclick=()=>{ SEL=null; $('detail').innerHTML=''; };
-  const wl=$('detail').querySelector('#dWl');
-  if(wl) wl.onclick=()=>portCmd({action:'watch_add',code:p.code,name:p.name});
-  const pf=$('detail').querySelector('#dPf');
-  if(pf) pf.onclick=()=>{ $('pfCode').value=p.code; $('pfName').value=p.name; openPort(); };
+  bindDetailBtns(p);
   drawK(p);
   try{ $('detail').scrollIntoView({block:'nearest'}); }catch(e){}
+}
+
+// ── 详情页「加自选 / 记持仓」按钮：显示真实状态，可反复点击 ──
+function detailBtnsHtml(p){
+  const raw=((REPORT.portfolio||{}).raw)||{};
+  const inWl=(raw.watchlist||[]).some(w=>w.code===p.code);
+  const inPf=(raw.holdings||[]).some(h=>h.code===p.code);
+  return `<button class="btn2" id="dWl">${inWl?'✓ 已在自选（点此移除）':'＋加自选'}</button>
+    <button class="btn2" id="dPf">${inPf?'✎ 改持仓（成本/股数）':'＋记持仓'}</button>`;
+}
+function bindDetailBtns(p){
+  const box=$('detail') && $('detail').querySelector('#dActions'); if(!box) return;
+  const wl=box.querySelector('#dWl'), pf=box.querySelector('#dPf');
+  if(wl) wl.onclick=()=>{
+    const raw=((REPORT.portfolio||{}).raw)||{};
+    const inWl=(raw.watchlist||[]).some(w=>w.code===p.code);
+    portCmd(inWl ? {action:'watch_remove',code:p.code,name:p.name}
+                 : {action:'watch_add',   code:p.code,name:p.name});
+  };
+  if(pf) pf.onclick=()=>{ $('pfCode').value=p.code; $('pfName').value=p.name; openPort(); };
+}
+function syncDetailBtns(){
+  if(!SEL || !REPORT) return;
+  const p=(REPORT.picks||[]).find(x=>x.code===SEL); if(!p) return;
+  const box=$('detail') && $('detail').querySelector('#dActions'); if(!box) return;
+  box.innerHTML=detailBtnsHtml(p)
+    +'<span class="fl" style="font-size:11.5px">记入后系统用同一套卖出信号帮你盯着</span>';
+  bindDetailBtns(p);
 }
 
 function drawK(p){
@@ -1318,10 +1357,12 @@ function renderPort(){
 async function openPort(){
   $('portPanel').classList.add('on'); $('mask').classList.add('on');
   const r=await fetch('/api/portfolio',{cache:'no-store'}); const j=await r.json();
-  renderPortMgmt(j);
+  renderPortMgmt(unwrapPort(j));
 }
-function renderPortMgmt(j){
-  const obj=j.raw||{}, hold=obj.holdings||[], watch=obj.watchlist||[];
+// POST 返回 {ok, portfolio:{...}}，GET 直接返回 view —— 统一取出 view
+function unwrapPort(j){ return (j && j.portfolio) ? j.portfolio : (j || {}); }
+function renderPortMgmt(view){
+  const obj=view.raw||{}, hold=obj.holdings||[], watch=obj.watchlist||[];
   $('portMgmt').innerHTML=`<div class="fld"><label>当前持仓</label>
     ${hold.map(h=>`<div class="r2" style="margin-bottom:6px"><span style="flex:1;font-size:13px">${esc(h.name||h.code)} <span class="fl">${h.code}</span></span>
       <button class="btn2" data-rm="${h.code}" style="padding:5px 10px">删</button></div>`).join('')||'<div class="fl" style="font-size:12.5px">暂无</div>'}</div>
@@ -1335,9 +1376,38 @@ async function portCmd(payload){
   const r=await fetch('/api/portfolio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json();
   if(j.error){alert(j.error);return;}
-  renderPortMgmt(j);
-  REPORT.portfolio=j; renderPort(); renderSub();
+  const view=unwrapPort(j);
+  renderPortMgmt(view);
+  REPORT.portfolio=view;
+  renderPort(); renderSub(); syncDetailBtns();
+  const name=(payload.name||payload.code||'');
+  if(payload.action==='watch_add')
+    toast(`已加入自选 · ${name}（共 ${(view.watchlist||[]).length} 只）`, 'mine-watch');
+  else if(payload.action==='watch_remove')
+    toast(`已移出自选 · ${name}`);
+  else if(payload.action==='remove')
+    toast(`已删除持仓 · ${name}`);
+  else
+    toast(`已记录持仓 · ${name}`, 'mine-hold');
 }
+
+// ── 轻提示（toast），可带一个跳转页面 ──
+let _toastT=null;
+function toast(msg, jumpTo){
+  let el=$('toast');
+  if(!el){
+    el=document.createElement('div'); el.id='toast'; el.className='toast';
+    document.body.appendChild(el);
+  }
+  el.innerHTML=`<span>${esc(msg)}</span>`+
+    (jumpTo?`<b data-jump="${jumpTo}">去看看 ›</b>`:'');
+  const jb=el.querySelector('[data-jump]');
+  if(jb) jb.onclick=()=>{ go(jb.dataset.jump); hideToast(); };
+  el.classList.add('on');
+  clearTimeout(_toastT);
+  _toastT=setTimeout(hideToast, jumpTo?5200:2600);
+}
+function hideToast(){ const el=$('toast'); if(el) el.classList.remove('on'); }
 
 // ── 策略面板 ──
 async function loadConfig(){

@@ -223,6 +223,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         hold_codes = [h["code"] for h in port_raw.get("holdings", [])]
         kl_hold = ds.fetch_klines(hold_codes, n=70, workers=8) if hold_codes else {}
         port = portfolio_mod.evaluate(snaps, kl_hold, sentiment, volume, cfg)
+        port["raw"] = port_raw   # 原始记录（代码/成本/股数），前端按钮状态与面板要用
 
         # ---- M8 纪律体检：并入 E1-E3 与持仓的告警 ----
         m8 = engine.evaluate_discipline(cfg, sentiment, volume, macro, m7, ml)

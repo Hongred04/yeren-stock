@@ -15,3 +15,6 @@ desktop.ini
 # 每日再生成（有效代码名单缓存）
 data/valid_codes.json
 data/market_amount.json
+
+# 个人持仓 / 自选（本地私有，别进 git）
+data/portfolio.json
