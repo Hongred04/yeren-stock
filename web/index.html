@@ -520,7 +520,8 @@ function render(){
 
   $('hdPreset').textContent=(CONFIG.name||m.preset_name||m.preset);
   $('hdDate').textContent=m.date;
-  $('hdTime').textContent='扫描'+m.scanned+'只 · 耗时'+m.elapsed+'秒';
+  const ses=m.session;
+  $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')+'扫描'+m.scanned+'只 · 耗时'+m.elapsed+'秒';
 
   /* ── ① 一句话结论 ── */
   const canTrade=sen.can_trade && vol.mode!=='dry';

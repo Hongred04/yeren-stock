@@ -2,10 +2,14 @@
 """买卖点建议 + 仓位操作系统。
 
 买入点体系（按胜率优先级）：
-  B1 首板试错 —— 新周期首板，情绪冰点后的第一板
+  B1 首板试错 —— 新周期首板，情绪冰点后的第一板（次日介入口径）
   B2 龙头回踩 —— 龙头五板前不折腾，回踩5日线/缩量不破
   B3 缩量红盘低吸 —— 极致缩量还红盘，控盘好
-  B4 尾盘博弈 —— 节假日博弈只在尾盘两点左右入场
+  B4 尾盘博弈 —— 仅节前最后交易日的尾盘（14:00后）给出，平时不出现
+
+时间与涨停两条硬门槛：
+  当日已涨停 → B2/B3/B4（当日进场类）全部不出，只留 B1 次日口径 + 「涨停不追」提示；
+  B4 只在节前最后交易日的尾盘窗口出现，其他时段给"尾盘买入"就是假信号。
 
 卖出点体系：
   S1 退潮清仓 —— 无条件清仓，最高优先级
@@ -23,7 +27,59 @@ M10 主导资金分类（fundstyle）：同一趋势主导资金不同离场点�
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from . import indicators as ind
+
+
+# ---------------------------------------------------------------- 交易时段
+
+# 时段是买入建议的执行前提：B1/B2/B3 的进场都写"次日/回踩"，
+# 只有 B4 尾盘博弈是当日定时动作 —— 时段不对就不给。
+def market_session(now: datetime | None = None) -> dict:
+    """A股当日交易时段判定（按本机时间）。"""
+    now = now or datetime.now()
+    t = now.hour * 100 + now.minute
+    if now.weekday() >= 5:
+        phase, label = "rest", "周末休市"
+    elif t < 915:
+        phase, label = "pre_open", "盘前"
+    elif t < 930:
+        phase, label = "auction", "集合竞价"
+    elif t < 1130:
+        phase, label = "morning", "早盘"
+    elif t < 1300:
+        phase, label = "noon", "午间休市"
+    elif t < 1400:
+        phase, label = "afternoon", "午后盘"
+    elif t < 1500:
+        phase, label = "tail", "尾盘"
+    elif t < 1530:
+        phase, label = "just_closed", "刚收盘"
+    else:
+        phase, label = "after_close", "盘后"
+    return {
+        "phase": phase,
+        "label": label,
+        "in_tail": phase == "tail",
+        "after_hours": phase in ("rest", "just_closed", "after_close"),
+        "is_trade_day": phase != "rest",
+    }
+
+
+def pre_holiday_gap(now: datetime | None = None) -> int:
+    """距下一个交易日的自然日差（周末近似节假日：调休日股市同样休市）。
+
+    普通周最大间隔是周五→周一的 3 天；所有 >=3 天的法定假期，
+    最后交易日→恢复日必然 >=4 天。返回 >=4 即处于节前最后交易日。
+    """
+    now = now or datetime.now()
+    d = now.date() + timedelta(days=1)
+    gap = 1
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+        gap += 1
+    return gap
 
 
 # ---------------------------------------------------------------- 买入点
@@ -70,7 +126,12 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         }]
 
     # B1 首板试错：处于首板且情绪非退潮
+    at_limit = stock.get("pct", 0) >= thr or stock.get("zt_boards", 0) >= 1
+    sess = market_session()
     if stock.get("zt_boards", 0) == 1 and sentiment.get("stage") in ("probe", "follow"):
+        note = "新周期一定是首板，二板还属于老周期"
+        if at_limit:
+            note += "；今日已封板，不追当日价，按次日口径执行"
         out.append({
             "type": "B1", "name": "首板试错",
             "priority": "A",
@@ -79,21 +140,46 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "stop": f"跌破首板最低价 {low_of(bars[-1])*0.98:.2f} 止损（试错失败只损失一笔很小的资金）",
             "target": "看二板，三板以上看龙头溢价",
             "position": "单票试错仓位，不超过总资金20%",
-            "note": "新周期一定是首板，二板还属于老周期",
+            "note": note,
         })
 
-    # B2 龙头回踩
-    boards = stock.get("zt_boards", 0)
+    # 当日已涨停：B2/B3/B4 全是"当日进场"口径，涨停板上不成立 ——
+    # 只保留 B1（次日介入口径），再给一条明确的"涨停不追"提示
+    if at_limit:
+        boards_now = stock.get("zt_boards", 0)
+        board_txt = f"，{boards_now}板" if boards_now else ""
+        out.append({
+            "type": "HOLD", "name": "涨停不追", "priority": "A",
+            "trigger": (f"今日已封涨停（+{stock.get('pct',0):.1f}%{board_txt}）"
+                        "，当日不给追买建议"),
+            "entry": "涨停板上买入=追明牌，炸板就是日内大面；次日按回踩/接力口径再看",
+            "stop": "已持仓：次日炸板转弱按卖出信号离场，不恋战",
+            "target": "—",
+            "position": "0%（当日新增）",
+            "note": "封死了买不到，能轻易买到大概率要炸 —— 明牌不追",
+            "blocked": True,
+        })
+        return out
+
+    after = sess["after_hours"]
+    gap = pre_holiday_gap()
+
+    # B2 龙头回踩：连板基因按"截至昨日近5日涨停次数"算 ——
+    # zt_boards 是当日涨停池口径，回踩日必然不在池里，用它判 B2 这条信号永远出不来
+    boards_recent = len(ind.count_limit_ups(bars[:-1], code, lookback=5)) if len(bars) > 1 else 0
     ma5 = ind.ma([b["close"] for b in bars], 5)
     ma10 = ind.ma([b["close"] for b in bars], 10)
     hold_before = cfg.get("M5_position", {}).get("hold_before_boards", 5)
-    if boards >= 2 and boards < hold_before and ma5 and close <= ma5 * 1.03 and close >= ma5 * 0.95:
+    if 2 <= boards_recent < hold_before and ma5 and close <= ma5 * 1.03 and close >= ma5 * 0.95:
         out.append({
             "type": "B2", "name": "龙头回踩",
             "priority": "A",
-            "trigger": f"{boards}连板龙头回踩5日线({ma5:.2f})，缩量不破位",
-            "entry": f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳",
-            "stop": f"有效跌破10日线 {ma10:.2f} 离场",
+            "trigger": f"近5日{boards_recent}次涨停的龙头回踩5日线({ma5:.2f})，缩量不破位",
+            "entry": (f"次日回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳"
+                      if after else
+                      f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳"),
+            "stop": (f"有效跌破10日线 {ma10:.2f} 离场" if ma10
+                     else "跌破回踩低点离场"),
             "target": f"龙头走到{hold_before}板前不折腾，吃主升",
             "position": "可加至 40-60%（去弱留强后最强者）",
             "note": "去弱留强不带幻想，砍错不心疼",
@@ -105,24 +191,28 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "type": "B3", "name": "缩量红盘低吸",
             "priority": "B",
             "trigger": f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 {stock.get('pct',0):.2f}%，控盘好",
-            "entry": f"不追高，等回落后于 {close*0.99:.2f} 附近低吸",
+            "entry": (f"次日开盘后等回落，{close*0.99:.2f} 附近低吸" if after else
+                      f"不追高，等回落后于 {close*0.99:.2f} 附近低吸"),
             "stop": f"跌破 {close*0.95:.2f} 止损",
             "target": "缩量红盘=筹码结构好，博弈反包",
             "position": "小仓位试探，缩量市场只信量能",
             "note": "散户90%套牢躺平，此时不宜重仓接",
         })
 
-    # B4 尾盘博弈
-    if a.get("price_min", 5) <= stock.get("price", 0) <= a.get("price_max", 10):
+    # B4 尾盘博弈：只做节前最后交易日的尾盘窗口 ——
+    # 非尾盘时段、非节前、当日已涨停，都不给（以前只看价格区间，
+    # 涨停票照样推"尾盘买入"，是假信号）
+    if (a.get("price_min", 5) <= stock.get("price", 0) <= a.get("price_max", 10)
+            and sess["in_tail"] and gap >= 4):
         out.append({
             "type": "B4", "name": "尾盘博弈",
             "priority": "C",
-            "trigger": "节假日/节前博弈，缩量市场波动小",
-            "entry": "只在尾盘两点（14:00-14:30）左右入场，避开日内波动",
+            "trigger": f"节前最后交易日（距下一交易日 {gap} 天），已到尾盘窗口（14:00后）",
+            "entry": "现在到 14:30 之间小仓位入场，避开假期消息面的不确定性",
             "stop": "次日低开超3% 走人",
             "target": "节后情绪延续则持有",
             "position": "小仓位",
-            "note": "散户波动最小窗口",
+            "note": "节假日博弈只在尾盘入场，非尾盘时段不出此信号",
         })
 
     return out
