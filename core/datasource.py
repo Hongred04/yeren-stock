@@ -694,6 +694,220 @@ def pool_history_dates() -> list[str]:
         return []
 
 
+# ---------------------------------------------------------------- 市场宽度（涨跌家数）
+# 沪综指/深成指行情附带的统计字段（f104 上涨 / f105 下跌 / f106 平）是
+# 全市场口径，两市相加即全市场涨跌家数 —— 情绪温度计最直接的一根温度柱。
+
+# 东财 push2 有多台镜像，clist 接口偶发 RemoteDisconnected —— 逐台轮换提高成功率
+EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
+                  "82.push2.eastmoney.com"]
+
+
+def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dict:
+    """东财 push2 接口（clist / ulist.np）：镜像主机轮换，返回解析后的 JSON。"""
+    for host in EM_PUSH2_HOSTS:
+        try:
+            raw = _get(f"https://{host}{path}", timeout=12, referer=referer).decode(
+                "utf-8", errors="ignore")
+            return json.loads(raw)
+        except Exception:
+            continue
+    return {}
+
+
+def fetch_breadth() -> dict:
+    """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。"""
+    js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
+                     "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
+    diff = (js.get("data") or {}).get("diff") or []
+    if not diff:
+        return {}
+    up = down = flat = 0
+    for it in diff:
+        up += int(_num(it.get("f104")))
+        down += int(_num(it.get("f105")))
+        flat += int(_num(it.get("f106")))
+    total = up + down + flat
+    if total <= 0:
+        return {}
+    return {"up": up, "down": down, "flat": flat, "total": total,
+            "up_ratio": round(up / total, 3),
+            "up_down_ratio": round(up / down, 2) if down else 0.0}
+
+
+# ---------------------------------------------------------------- 主力资金流
+# 参考 GitHub 项目 a-stock-data / slingshot 的「资金面」口径：
+# 东财 push2 的资金流字段（f62 主力净额、f184 主力净占比、f66/72/78/84 四档）
+# 免鉴权、可批量 —— 给候选股与行业板块各补一条「钱往哪走」的线。
+
+_FLOW_FIELDS = "f2,f3,f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
+
+
+def _meta_of(code: str) -> str:
+    """个股代码 → 东财 secid（0=深/北、1=沪）。"""
+    if code.startswith(("6", "9", "5")) or code.startswith("sh"):
+        return "1." + code[2:] if code.startswith("sh") else "1." + code
+    if code.startswith("sz"):
+        return "0." + code[2:]
+    if code.startswith("bj"):
+        return "0." + code[2:]
+    return "0." + code
+
+
+def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
+    """批量个股主力资金流 {code: {main,main_pct,super,big,mid,small}}，单位元。"""
+    if not codes:
+        return {}
+    out: dict[str, dict] = {}
+    batch = 50
+    chunks = [codes[i:i + batch] for i in range(0, len(codes), batch)]
+
+    def work(chunk):
+        secids = ",".join(_meta_of(c) for c in chunk)
+        js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
+                         f"&secids={secids}&fields={_FLOW_FIELDS}")
+        diff = (js.get("data") or {}).get("diff") or []
+        rows = []
+        for it in diff:
+            code = str(it.get("f12", ""))
+            if not code:
+                continue
+            mkt = "bj" if code.startswith(("43", "83", "87", "88", "92")) else \
+                  ("sh" if code.startswith(("6", "9")) else "sz")
+            rows.append((mkt + code, {
+                "main": _num(it.get("f62")), "main_pct": _num(it.get("f184")),
+                "super": _num(it.get("f66")), "big": _num(it.get("f72")),
+                "mid": _num(it.get("f78")), "small": _num(it.get("f84")),
+            }))
+        return rows
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for rows in pool.map(work, chunks):
+            for code, d in rows:
+                out[code] = d
+    return out
+
+
+def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
+    """行业板块主力资金流排行（按主力净额降序）。
+    返回 [{code,name,pct,main,main_pct,lead,lead_code}]，main 单位元。
+
+    失败不落缓存：接口偶发 RemoteDisconnected，若把空结果缓存 3 分钟，
+    面板会整段时间显示「不可用」—— 这里只在拿到数据时才写缓存。
+    """
+    key = f"board_flow:{limit}"
+    now = time.time()
+    hit = _cache.get(key)
+    if hit and now - _cache_ts.get(key, 0) < 180:
+        return hit
+
+    def producer():
+        js = _push2_json("/api/qt/clist/get?pn=1"
+                         f"&pz={limit}&po=1&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:2"
+                         "&fields=f12,f14,f3,f62,f184,f204,f205")
+        diff = (js.get("data") or {}).get("diff") or []
+        out = []
+        for it in diff:
+            out.append({"code": it.get("f12", ""), "name": it.get("f14", ""),
+                        "pct": _num(it.get("f3")), "main": _num(it.get("f62")),
+                        "main_pct": _num(it.get("f184")),
+                        "lead": it.get("f204", ""), "lead_code": it.get("f205", "")})
+        return out
+
+    rows = producer()
+    if not rows:                       # 单次失败重试一次（接口抖动）
+        rows = producer()
+    if rows:
+        _cache[key] = rows
+        _cache_ts[key] = now
+    return rows
+
+
+# ---------------------------------------------------------------- 龙虎榜
+# 参考 GitHub 项目 a-stock-data / slingshot / aiagents-stock 的「龙虎榜·游资席位」层：
+# 东财 datacenter 报表接口免鉴权，给「谁在买」提供最硬的证据 —— 直接喂给 M10
+# 主导资金分类（机构/游资），是打板体系里判断离场节奏的关键输入。
+
+_DC = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_DC_REFERER = "https://data.eastmoney.com/"
+
+
+def _dc_get(report: str, extra: str = "", page_size: int = 200) -> list[dict]:
+    url = (f"{_DC}?reportName={report}&columns=ALL&pageNumber=1&pageSize={page_size}"
+           f"&source=WEB&client=WEB&{extra}")
+    try:
+        raw = _get(url, timeout=15, referer=_DC_REFERER).decode("utf-8", errors="ignore")
+        js = json.loads(raw)
+    except Exception:
+        return []
+    return ((js.get("result") or {}).get("data")) or []
+
+
+def fetch_lhb(date: str = "") -> list[dict]:
+    """某一交易日的龙虎榜。date 形如 '2026-09-30'；空则取最近一个交易日。"""
+    flt = f"&filter=(TRADE_DATE%3D%27{date}%27)" if date else ""
+    rows = _dc_get("RPT_DAILYBILLBOARD_DETAILSNEW",
+                   "sortColumns=TRADE_DATE&sortTypes=-1" + flt, 500)
+    out = []
+    for r in rows:
+        code = str(r.get("SECURITY_CODE", ""))
+        if not code:
+            continue
+        mk = str(r.get("SECUCODE", "")).split(".")[-1].lower()
+        out.append({
+            "code": (mk if mk in ("sh", "sz", "bj") else "sz") + code,
+            "name": r.get("SECURITY_NAME_ABBR", ""),
+            "date": str(r.get("TRADE_DATE", ""))[:10],
+            "price": _num(r.get("CLOSE_PRICE")),
+            "pct": round(_num(r.get("CHANGE_RATE")), 2),
+            "turnover": round(_num(r.get("TURNOVERRATE")), 2),
+            "buy": _num(r.get("BILLBOARD_BUY_AMT")),
+            "sell": _num(r.get("BILLBOARD_SELL_AMT")),
+            "net": _num(r.get("BILLBOARD_NET_AMT")),
+            "amount": _num(r.get("ACCUM_AMOUNT")),
+            "reason": r.get("EXPLANATION", ""),
+            "free_mv": _num(r.get("FREE_MARKET_CAP")),
+            # 上榜后 1/2/5/10 日涨幅（东财已回填，用于复盘席位胜率）
+            "d1": _num(r.get("D1_CLOSE_ADJCHRATE")) if r.get("D1_CLOSE_ADJCHRATE") is not None else None,
+            "d5": _num(r.get("D5_CLOSE_ADJCHRATE")) if r.get("D5_CLOSE_ADJCHRATE") is not None else None,
+        })
+    return out
+
+
+def fetch_lhb_seats(date: str = "") -> tuple[list[dict], list[dict]]:
+    """某日龙虎榜买卖席位明细 → (买入席位, 卖出席位)。
+
+    每条 {code,name,dept,type,buy,sell,net,reason}，dept 为营业部全称。
+    """
+    flt = f"&filter=(TRADE_DATE%3D%27{date}%27)" if date else ""
+    extra = "sortColumns=TRADE_DATE&sortTypes=-1" + flt
+
+    def parse(rows, side):
+        out = []
+        for r in rows:
+            name = r.get("OPERATEDEPT_NAME", "")
+            if not name:
+                continue
+            mk = str(r.get("SECUCODE", "")).split(".")[-1].lower()
+            code = (mk if mk in ("sh", "sz", "bj") else "sz") + str(r.get("SECURITY_CODE", ""))
+            net = _num(r.get("NET"))
+            # 买入榜的 NET 取正、卖出榜取负，统一为「净买入额（元）」
+            out.append({
+                "code": code,
+                "dept": name,
+                "buy": _num(r.get("BUY")),
+                "sell": _num(r.get("SELL")),
+                "net": abs(net) * (1 if side == "buy" else -1),
+                "reason": r.get("EXPLANATION", ""),
+                "pct": round(_num(r.get("CHANGE_RATE")), 2),
+            })
+        return out
+
+    buys = parse(_dc_get("RPT_BILLBOARD_DAILYDETAILSBUY", extra, 800), "buy")
+    sells = parse(_dc_get("RPT_BILLBOARD_DAILYDETAILSSELL", extra, 800), "sell")
+    return buys, sells
+
+
 # ---------------------------------------------------------------- 东财行业板块
 # M9 主线五信号用：板块指数日K（带量新高判定）+ 板块成分股（中军识别）。
 # 取不到时上层一律降级为「未验证」，不硬性否决信号。
@@ -747,13 +961,8 @@ def _norm_mv_yi(v: float) -> float:
 def fetch_board_list() -> dict[str, str]:
     """东财行业板块列表 {板块名: BK代码}。"""
     def producer():
-        url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=600&po=1&np=1"
-               "&fltt=2&invt=2&fid=f12&fs=m:90+t:2&fields=f12,f14")
-        try:
-            raw = _get(url, timeout=12, referer=EM_REFERER).decode("utf-8", errors="ignore")
-            js = json.loads(raw)
-        except Exception:
-            return {}
+        js = _push2_json("/api/qt/clist/get?pn=1&pz=600&po=1&np=1"
+                         "&fltt=2&invt=2&fid=f12&fs=m:90+t:2&fields=f12,f14", EM_REFERER)
         out: dict[str, str] = {}
         for it in (js.get("data") or {}).get("diff") or []:
             code, name = it.get("f12", ""), it.get("f14", "")
@@ -790,13 +999,9 @@ def fetch_board_kline(bk_code: str, n: int = 70) -> list[dict]:
 def fetch_board_constituents(bk_code: str) -> list[dict]:
     """东财行业板块成分股 [{code,name,pct,float_mv(亿)}]，按涨幅降序。"""
     def producer():
-        url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1000&po=1&np=1"
-               "&fltt=2&invt=2&fid=f3&fs=b:" + bk_code + "&fields=f12,f14,f3,f21")
-        try:
-            raw = _get(url, timeout=12, referer=EM_REFERER).decode("utf-8", errors="ignore")
-            js = json.loads(raw)
-        except Exception:
-            return []
+        js = _push2_json("/api/qt/clist/get?pn=1&pz=1000&po=1&np=1"
+                         "&fltt=2&invt=2&fid=f3&fs=b:" + bk_code + "&fields=f12,f14,f3,f21",
+                         EM_REFERER)
         out = []
         for it in (js.get("data") or {}).get("diff") or []:
             code = str(it.get("f12", ""))

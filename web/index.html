@@ -91,6 +91,7 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
 .g4{grid-template-columns:repeat(4,1fr)}
 @media(max-width:1100px){.g6,.g4{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:700px){.g6,.g4{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:820px){.flow2{grid-template-columns:1fr!important}}
 
 .mc{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 15px;
   box-shadow:var(--sh);position:relative;overflow:hidden}
@@ -307,6 +308,13 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div class="grid g4" id="metrics"></div>
     </div>
 
+    <!-- E1 情绪温度计 -->
+    <div class="sec" id="secMeter">
+      <div class="sh"><h2>情绪温度计</h2>
+        <span class="hint">连板梯队 · 炸板率 · 晋级率 · 涨跌家数 —— 冰点→启动→发酵→高潮→退潮</span></div>
+      <div id="meterWrap"></div>
+    </div>
+
     <!-- ②.5 题材主线五信号 -->
     <div class="sec">
       <div class="sh"><h2>题材主线五信号</h2>
@@ -314,6 +322,14 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div id="mlVerdict"></div>
       <div class="card" style="margin-top:12px"><div class="steps" id="mlSteps"></div></div>
       <div id="mlExtra"></div>
+    </div>
+
+    <!-- E3 主力资金流 + E2 龙虎榜 -->
+    <div class="sec">
+      <div class="sh"><h2>钱往哪走</h2>
+        <span class="hint">主力资金流（板块+个股）· 龙虎榜游资席位 —— 谁在真金白银地买</span></div>
+      <div id="flowWrap"></div>
+      <div id="lhbWrap" style="margin-top:12px"></div>
     </div>
 
     <!-- ③ 选股 -->
@@ -353,6 +369,14 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div class="grid g4" id="posWrap"></div>
     </div>
 
+    <!-- 持仓 / 自选 -->
+    <div class="sec">
+      <div class="sh"><h2>我的持仓 · 自选</h2>
+        <span class="hint">本地记录，用同一套卖出信号给持仓做体检（退潮清仓/破位/A字杀/机构加速/断板/庄股）</span>
+        <button class="btn2" id="btnPort" style="margin-left:auto">管理</button></div>
+      <div id="portWrap"></div>
+    </div>
+
     <!-- 折叠区（只保留涨停池：其余为策略背景，收进调策略面板语义，不放主页） -->
     <div class="sec">
       <details class="fold">
@@ -388,6 +412,33 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <button class="btn" id="btnSave" style="flex:1">保存并重新选股</button>
     <button class="btn2" id="btnReset">恢复默认</button>
   </div>
+</div>
+
+<div class="panel" id="portPanel">
+  <div class="ph"><h3>持仓 / 自选管理</h3>
+    <button class="btn2" id="btnPortClose">关闭</button></div>
+  <div class="pb">
+    <div class="fld"><label>新增 / 更新持仓（同一代码会覆盖成本）</label>
+      <div class="r2">
+        <input type="text" id="pfCode" placeholder="代码 sh600519" style="flex:1.2">
+        <input type="text" id="pfName" placeholder="名称" style="flex:1">
+      </div>
+      <div class="r2" style="margin-top:7px">
+        <input type="number" id="pfCost" placeholder="成本价" step="0.01">
+        <input type="number" id="pfShares" placeholder="股数" step="100">
+      </div>
+      <button class="btn" id="pfAdd" style="width:100%;margin-top:8px">保存持仓</button>
+      <div class="hint">代码格式：沪市 sh600519 / 深市 sz000001 / 北交所 bj430047</div>
+    </div>
+    <div class="fld"><label>自选股（只盯不做，点「加自选」在选股页添加）</label>
+      <div class="r2">
+        <input type="text" id="wlCode" placeholder="代码 sh600519" style="flex:1.2">
+        <button class="btn2" id="wlAdd">加自选</button>
+      </div>
+    </div>
+    <div id="portMgmt"></div>
+  </div>
+  <div class="pf"><button class="btn" id="pfDone" style="flex:1">完成</button></div>
 </div>
 
 <script>
@@ -550,6 +601,8 @@ function render(){
     `<div class="mc ${c.c}"><div class="t">${c.t}</div><div class="v">${c.v}</div>
      <div class="s">${esc(c.s)}</div></div>`).join('');
 
+  renderMeter();
+
   /* ── ②.5 题材主线五信号 ── */
   if(ml.status!=='disabled'&&ml.signals&&ml.signals.length){
     $('mlVerdict').innerHTML=`<div class="verdict ${mlMeta[1]}">
@@ -687,6 +740,11 @@ function render(){
     `<div class="mc r"><div class="t">仓位</div><div class="v">0%</div>
       <div class="s">今天没有符合条件的股票，空仓</div></div>`;
 
+  /* ── E3 资金流 / E2 龙虎榜 / 持仓 ── */
+  renderFlow(ml);
+  renderLhb();
+  renderPort();
+
   /* ── 涨停池 ── */
   const zp=REPORT.limit_up_pool||[];
   $('ztCnt').textContent=zp.length+' 只';
@@ -787,6 +845,7 @@ function showDetail(code,tr){
       <span class="pill gry">${p.board}</span>
       ${p.zt_boards?`<span class="pill red">${p.zt_boards}连板</span>`:''}
       ${p.sector?`<span class="pill blu">${esc(p.sector)}</span>`:''}
+      ${(p.lhb_tags||[]).map(t=>`<span class="pill red">龙虎榜·${esc(t)}</span>`).join('')}
       <span class="sp"></span>
       <span class="sc" style="font-size:24px;color:${p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score}</span>
       <span class="fl" style="font-size:12.5px">综合评分</span>
@@ -796,12 +855,20 @@ function showDetail(code,tr){
 
     ${fsHtml}
 
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="btn2" id="dWl">＋加自选</button>
+      <button class="btn2" id="dPf">＋记持仓</button>
+      <span class="fl" style="font-size:11.5px;align-self:center">记入后系统用同一套卖出信号帮你盯着</span>
+    </div>
+
     <div class="kv">
       <div><div class="k">现价</div><div class="v">${f2(p.price)}</div></div>
       <div><div class="k">涨跌幅</div><div class="v ${pct(p.pct)}">${f2(p.pct)}%</div></div>
       <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
       <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
       <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
+      ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main>=0?'up':'dn'}">${p.moneyflow.main>=0?'+':''}${f2(p.moneyflow.main)}亿</div></div>
+      <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct>=0?'up':'dn'}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
       <div><div class="k">位置（越高越贵）</div><div class="v">${(g.base_pos*100).toFixed(0)}%</div></div>
       <div><div class="k">量能压缩</div><div class="v">${(g.shrink*100).toFixed(0)}%</div></div>
       <div><div class="k">洗盘程度</div><div class="v">${f2(g.washout,1)}</div></div>
@@ -836,6 +903,10 @@ function showDetail(code,tr){
       <div id="kchart"></div></div>
   </div>`;
   $('detail').querySelector('.close').onclick=()=>{ SEL=null; $('detail').innerHTML=''; };
+  const wl=$('detail').querySelector('#dWl');
+  if(wl) wl.onclick=()=>portCmd({action:'watch_add',code:p.code,name:p.name});
+  const pf=$('detail').querySelector('#dPf');
+  if(pf) pf.onclick=()=>{ $('pfCode').value=p.code; $('pfName').value=p.name; openPort(); };
   drawK(p);
   try{ $('detail').scrollIntoView({block:'nearest'}); }catch(e){}
 }
@@ -875,6 +946,205 @@ function drawK(p){
   </svg>`;
 }
 
+// ── E1 情绪温度计 ──
+const STG={ice:['🧊','var(--blu)','冰点'],revive:['🌱','var(--grn)','修复·启动'],
+  ferment:['🔥','var(--org)','发酵'],climax:['🌋','var(--red)','高潮'],ebb:['🌊','var(--grn)','退潮']};
+function renderMeter(){
+  const el=$('meterWrap'); if(!el) return;
+  const m=REPORT.meter||{};
+  if(m.enabled===false||!m.metrics||!Object.keys(m.metrics).length){
+    el.innerHTML='<div class="card fl" style="font-size:13px">情绪温度计已关闭或数据不足</div>'; return;}
+  const mt=m.metrics, t=m.temperature||0, s=STG[m.stage]||STG.revive;
+  const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'° '+(m.delta>=0?'回暖':'降温')+'）';
+  const lad=(m.ladder||[]), mx=Math.max(1,...lad.map(x=>x.count));
+  const ladHtml=lad.map(x=>`<div style="display:flex;align-items:center;gap:9px;margin:5px 0">
+    <span style="min-width:46px;font-weight:700;font-size:12.5px;${x.boards>=4?'color:var(--red)':''}">${x.boards}板</span>
+    <div style="flex:1;background:var(--sk);border-radius:5px;height:20px;position:relative;overflow:hidden;min-width:80px">
+      <div style="height:100%;width:${Math.max(x.count/mx*100,7).toFixed(0)}%;border-radius:5px;background:${x.boards>=4?'linear-gradient(90deg,#f08a3c,#d92d3f)':'linear-gradient(90deg,#8fb8ff,#2563d9)'}"></div>
+      <span style="position:absolute;left:8px;top:1px;font-size:12px;font-weight:700;color:#fff">${x.count}只</span>
+    </div>
+    <span class="fl" style="font-size:11.5px;min-width:132px;max-width:180px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((x.names||[]).join('、'))}">${esc((x.names||[]).join('、'))}</span>
+  </div>`).join('');
+  const hs=(m.heat_series||[]).map(x=>x.temperature);
+  let spark='';
+  if(hs.length>=2){
+    const W=760,H=54,pl=4,pr=4,pt=6,pb=12, iw=W-pl-pr, ih=H-pt-pb;
+    const mn=Math.min(...hs,30), mx2=Math.max(...hs,80), rg=(mx2-mn)||1;
+    const X=i=>pl+i*iw/(hs.length-1), Y=v=>pt+ih-(v-mn)/rg*ih;
+    const line=hs.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
+    spark=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;margin-top:10px">
+      ${[0,0.5,1].map(g=>`<line x1="${pl}" y1="${(pt+ih*g).toFixed(1)}" x2="${W-pr}" y2="${(pt+ih*g).toFixed(1)}" stroke="#eef1f5"/>`).join('')}
+      <path d="${line}" fill="none" stroke="#2563d9" stroke-width="1.7"/>
+      ${hs.map((v,i)=>i===hs.length-1?`<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3" fill="var(--red)"/>`:'').join('')}
+      <text x="${pl}" y="${H-2}" font-size="9.5" fill="#9aa3b2">${esc((m.heat_series[0]||{}).date||'')}</text>
+      <text x="${W-pr}" y="${H-2}" font-size="9.5" fill="#9aa3b2" text-anchor="end">温度曲线（近30个交易日）</text></svg>`;
+  }
+  const f=(v,d=1)=>(v==null?'—':Number(v).toFixed(d));
+  const cards=[
+    ['涨停 / 跌停',mt.limit_up+' / '+mt.limit_down,'炸板 '+mt.broken+' 只',''],
+    ['炸板率',(mt.broken_ratio*100).toFixed(0)+'%','炸板/(涨停+炸板)',mt.broken_ratio>=0.35?'r':(mt.broken_ratio<0.2?'g':'o')],
+    ['封板率',(mt.seal_rate*100).toFixed(0)+'%','封住/尝试封板',mt.seal_rate>=0.7?'g':'o'],
+    ['晋级率',(mt.promote_rate==null?'—':(mt.promote_rate*100).toFixed(0)+'%'),'昨日涨停今日再涨停',mt.promote_rate!=null&&mt.promote_rate>=0.2?'g':'o'],
+    ['赚钱效应',(mt.money_effect==null?'—':(mt.money_effect>=0?'+':'')+f(mt.money_effect)+'%'),'昨日涨停今日平均涨幅',mt.money_effect!=null&&mt.money_effect>0?'g':'r'],
+    ['高度溢价',(mt.height_premium==null?'—':(mt.height_premium>=0?'+':'')+f(mt.height_premium)+'%'),'昨日连板股今日表现',mt.height_premium!=null&&mt.height_premium>0?'g':'o'],
+    ['一字板',mt.one_word+' 只','竞价即封，抢不到',mt.one_word>=3?'o':''],
+    ['涨跌家数',(mt.breadth&&mt.breadth.total?mt.breadth.up+'/'+mt.breadth.down:'—'),mt.breadth&&mt.breadth.total?('涨跌比 '+mt.breadth.up_down_ratio):'数据不可用',mt.breadth&&mt.breadth.total&&mt.breadth.up>mt.breadth.down?'g':'o'],
+  ];
+  el.innerHTML=`<div class="verdict ${t>=62?'go':(t<42?'stop':'hold')}" style="padding:16px 20px">
+    <div class="hd2"><div class="ic" style="font-size:26px">${s[0]}</div>
+      <div><div class="ti" style="font-size:19px">${s[2]} · 温度 ${t}° <span style="font-size:13px;font-weight:600">${dlt}</span></div>
+      <div class="sub" style="font-size:12.5px;margin-top:3px">${esc(m.advice||'')}</div></div></div>
+    <div style="height:9px;background:rgba(255,255,255,.65);border-radius:5px;overflow:hidden;margin-top:12px">
+      <div style="height:100%;width:${t}%;background:linear-gradient(90deg,#2563d9,#0f9d58,#e07c1a,#d92d3f)"></div></div>
+  </div>
+  <div class="grid g4" style="margin-top:12px">${cards.map(c=>`<div class="mc ${c[3]}">
+    <div class="t">${c[0]}</div><div class="v" style="font-size:19px">${c[1]}</div>
+    <div class="s">${esc(c[2])}</div></div>`).join('')}</div>
+  <div class="card" style="margin-top:12px">
+    <div class="pt" style="font-size:12px;font-weight:800;color:var(--tx2);margin-bottom:6px">连板梯队（越往上越是市场焦点）</div>
+    ${ladHtml||'<div class="fl" style="font-size:13px">今日暂无涨停</div>'}
+    ${spark}
+    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(m.note||'')}</div>
+  </div>`;
+}
+
+// ── E3 主力资金流 ──
+function renderFlow(ml){
+  const el=$('flowWrap'); if(!el) return;
+  const f=REPORT.flow||{};
+  if(f.enabled===false||!f.available){
+    el.innerHTML='<div class="card fl" style="font-size:13px">'+esc(f.summary||'主力资金流模块已关闭')+'</div>'; return;}
+  const theme=(ml&&ml.theme)||'';
+  const secIn=(f.sec_in||[]).map((s,i)=>`<tr><td><span class="rk ${i===0?'t1':i===1?'t2':i===2?'t3':''}">${i+1}</span></td>
+    <td><b>${esc(s.sector)}</b>${s.sector===theme?' <span class="pill red">主线</span>':''}</td>
+    <td class="num">${s.n}只</td><td class="num">${s.max_boards}板</td>
+    <td class="num up">+${f2(s.main)}亿</td></tr>`).join('');
+  const secOut=(f.sec_out||[]).map(s=>`<tr><td><b>${esc(s.sector)}</b></td>
+    <td class="num">${s.n}只</td><td class="num dn">${f2(s.main)}亿</td></tr>`).join('');
+  const tin=(f.boards_in||[]).map((b,i)=>`<tr><td><span class="rk ${i===0?'t1':i===1?'t2':i===2?'t3':''}">${i+1}</span></td>
+    <td><b>${esc(b.name)}</b>${b.name===theme?' <span class="pill red">主线</span>':''}</td>
+    <td class="num ${pct(b.pct)}">${f2(b.pct)}%</td>
+    <td class="num up">+${f2(b.main)}亿</td><td class="num">${f2(b.main_pct)}%</td>
+    <td class="fl">${esc(b.lead||'—')}</td></tr>`).join('');
+  const tout=(f.boards_out||[]).map(b=>`<tr><td><b>${esc(b.name)}</b></td>
+    <td class="num ${pct(b.pct)}">${f2(b.pct)}%</td><td class="num dn">${f2(b.main)}亿</td>
+    <td class="num fl">${f2(b.main_pct)}%</td></tr>`).join('');
+  let body='';
+  if((f.sec_in||[]).length||(f.sec_out||[]).length){
+    body+=`<div style="display:grid;grid-template-columns:1.6fr 1fr;gap:12px" class="flow2">
+      <div class="tbl"><table><thead><tr><th style="width:38px">#</th><th>题材（涨停股主力净流入）</th>
+        <th class="num">涨停数</th><th class="num">最高板</th><th class="num">主力净额</th></tr></thead>
+        <tbody>${secIn||'<tr><td colspan="5" class="fl" style="text-align:center;padding:14px">无净流入题材</td></tr>'}</tbody></table></div>
+      <div class="tbl"><table><thead><tr><th>题材（主力净流出）</th><th class="num">涨停数</th>
+        <th class="num">主力净额</th></tr></thead><tbody>${secOut||'<tr><td colspan="3" class="fl" style="text-align:center;padding:14px">无</td></tr>'}</tbody></table></div>
+    </div>`;
+  }
+  if(f.boards_available){
+    body+=`<div style="display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-top:12px" class="flow2">
+      <div class="tbl"><table><thead><tr><th style="width:38px">#</th><th>行业板块（主力净流入）</th>
+        <th class="num">涨幅</th><th class="num">主力净额</th><th class="num">净占比</th><th>领涨股</th></tr></thead>
+        <tbody>${tin||'<tr><td colspan="6" class="fl" style="text-align:center;padding:14px">无数据</td></tr>'}</tbody></table></div>
+      <div class="tbl"><table><thead><tr><th>主力净流出</th><th class="num">涨幅</th>
+        <th class="num">主力净额</th><th class="num">净占比</th></tr></thead>
+        <tbody>${tout||'<tr><td colspan="4" class="fl" style="text-align:center;padding:14px">无数据</td></tr>'}</tbody></table></div>
+    </div>`;
+  }
+  el.innerHTML=`<div style="font-size:13px;color:var(--tx2);margin-bottom:10px">${esc(f.summary||'')}</div>
+    ${body||'<div class="card fl" style="font-size:13px">资金流数据暂不可用</div>'}
+    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(f.note||'')}</div>`;
+}
+
+// ── E2 龙虎榜 · 游资席位 ──
+function renderLhb(){
+  const el=$('lhbWrap'); if(!el) return;
+  const l=REPORT.lhb||{};
+  if(l.enabled===false||!l.available){
+    el.innerHTML='<div class="card fl" style="font-size:13px">'+esc(l.summary||'龙虎榜数据不可用')+'</div>'; return;}
+  const hm=(l.hotmoney||[]).map(h=>`<div class="sig ${h.net>=0?'A':'C'}" style="margin-bottom:8px">
+    <div class="st"><span class="pill ${h.net>=0?'red':'gry'}">${esc(h.tag||'游资')}</span>
+      <b>${esc(h.seat)}</b><span class="fl" style="font-size:12px">${h.net>=0?'净买':'净卖'} ${(h.net/1e4).toFixed(0)}万 · 买${h.n}只</span></div>
+    <div class="ln">${(h.stocks||[]).map(s=>`${esc(s.name)}<span class="fl"> ${f2(s.pct)}%</span>`).join('　')||'—'}</div></div>`).join('');
+  const top=(l.top_net||[]).map(p=>`<tr><td><b>${esc(p.name)}</b> <span class="fl" style="font-size:11px">${p.code}</span>
+    ${p.in_zt?'<span class="pill red">涨停</span>':''}</td>
+    <td class="num ${pct(p.pct)}">${f2(p.pct)}%</td>
+    <td class="num up">${(p.net/1e4).toFixed(0)}万</td>
+    <td class="num">${f2(p.buy,2)} / ${f2(p.sell,2)}亿</td>
+    <td>${(p.tags||[]).map(t=>`<span class="pill ${t==='机构专用'?'blu':t==='北向'?'gry':'red'}">${esc(t)}</span>`).join('')||'<span class="fl">—</span>'}</td>
+    <td class="fl" style="white-space:normal;max-width:240px;font-size:12px">${esc(p.reason||'')}</td></tr>`).join('');
+  const inst=l.institutions||{}, north=l.northbound||{};
+  el.innerHTML=`<div style="background:#f8fafc;border:1px solid var(--line);border-radius:11px;padding:12px 15px;margin-bottom:12px">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+        <b style="font-size:14px">龙虎榜 ${esc(l.date||'')}${l.is_today?'':'（盘中未披露，为最近一期）'}</b>
+        <span class="pill ${inst.net>=0?'red':'grn'}">机构专用 ${inst.net>=0?'+':''}${f2(inst.net)}亿</span>
+        <span class="pill ${north.net>=0?'red':'grn'}">北向 ${north.net>=0?'+':''}${f2(north.net)}亿</span>
+      </div>
+      <div class="fl" style="font-size:12px;margin-top:6px">${esc(l.summary||'')}</div>
+    </div>
+    ${hm?`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin-bottom:12px">${hm}</div>`:''}
+    <div class="tbl"><table><thead><tr><th>净买入榜</th><th class="num">涨幅</th><th class="num">净买额</th>
+      <th class="num">买/卖(亿)</th><th>席位性质</th><th>上榜原因</th></tr></thead>
+      <tbody>${top||'<tr><td colspan="6" class="fl" style="text-align:center;padding:16px">无数据</td></tr>'}</tbody></table></div>
+    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(l.note||'')}</div>`;
+}
+
+// ── 持仓 / 自选 ──
+function renderPort(){
+  const el=$('portWrap'); if(!el) return;
+  const p=REPORT.portfolio||{};
+  const hold=p.holdings||[], watch=p.watchlist||[];
+  if(!hold.length&&!watch.length){
+    el.innerHTML='<div class="card fl" style="font-size:13px">还没有持仓/自选。点右上角「管理」录入你买了的股票，系统会用同一套卖出信号帮你盯。</div>'; return;}
+  const vc={'清仓离场':'red','减仓':'org','观察/减半':'org','持有':'grn'};
+  const rows=hold.map(h=>`<tr data-c="${h.code}">
+    <td><b>${esc(h.name||h.code)}</b> <span class="fl" style="font-size:11px">${h.code}</span></td>
+    <td class="num">${f2(h.cost)}</td><td class="num">${f2(h.price)}</td>
+    <td class="num ${pct(h.pct)}">${f2(h.pct)}%</td>
+    <td class="num ${(h.pnl_pct||0)>=0?'up':'dn'}" style="font-weight:800">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</td>
+    <td class="num">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</td>
+    <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
+    <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}</td>
+  </tr>`).join('');
+  const chips=watch.map(w=>`<span class="pill ${w.pct>0?'red':w.pct<0?'grn':'gry'}" style="margin:3px 5px 3px 0;cursor:pointer" data-w="${w.code}">${esc(w.name||w.code)} ${f2(w.pct)}%</span>`).join('');
+  el.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
+      <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>
+      <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">总盈亏</div><div class="v ${(p.total_pnl||0)>=0?'up':'dn'}">${(p.total_pnl||0)>=0?'+':''}${f2((p.total_pnl||0)/1e4,2)}万</div><div class="s">${p.total_pnl_pct==null?'—':(p.total_pnl_pct>=0?'+':'')+f2(p.total_pnl_pct)+'%'}</div></div>
+      <div class="mc b"><div class="t">持仓数</div><div class="v">${p.n_holdings||0}</div><div class="s">自选 ${p.n_watch||0} 只</div></div>
+      <div class="mc ${(p.checks||[]).some(c=>c.level==='red')?'r':'o'}"><div class="t">体检告警</div><div class="v">${(p.checks||[]).length}</div><div class="s">${(p.checks||[]).length?'有持仓需要处理':'持仓暂无告警'}</div></div>
+    </div>
+    ${hold.length?`<div class="tbl"><table><thead><tr><th>持仓</th><th class="num">成本</th><th class="num">现价</th>
+      <th class="num">今日</th><th class="num">盈亏</th><th class="num">市值</th><th>建议</th><th>为什么</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`:''}
+    ${watch.length?`<div style="margin-top:12px"><div style="font-size:12.5px;color:var(--tx2);font-weight:700;margin-bottom:5px">自选股</div>${chips}</div>`:''}
+    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(p.note||'')}</div>`;
+  el.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>{const q=REPORT.picks.find(x=>x.code===tr.dataset.c); if(q)showDetail(tr.dataset.c); else openPort();});
+  el.querySelectorAll('[data-w]').forEach(c=>c.onclick=()=>{const q=REPORT.picks.find(x=>x.code===c.dataset.w); if(q)showDetail(q.code);});
+}
+
+// ── 持仓管理面板 ──
+async function openPort(){
+  $('portPanel').classList.add('on'); $('mask').classList.add('on');
+  const r=await fetch('/api/portfolio',{cache:'no-store'}); const j=await r.json();
+  renderPortMgmt(j);
+}
+function renderPortMgmt(j){
+  const obj=j.raw||{}, hold=obj.holdings||[], watch=obj.watchlist||[];
+  $('portMgmt').innerHTML=`<div class="fld"><label>当前持仓</label>
+    ${hold.map(h=>`<div class="r2" style="margin-bottom:6px"><span style="flex:1;font-size:13px">${esc(h.name||h.code)} <span class="fl">${h.code}</span></span>
+      <button class="btn2" data-rm="${h.code}" style="padding:5px 10px">删</button></div>`).join('')||'<div class="fl" style="font-size:12.5px">暂无</div>'}</div>
+    <div class="fld"><label>当前自选</label>
+    ${watch.map(w=>`<div class="r2" style="margin-bottom:6px"><span style="flex:1;font-size:13px">${esc(w.name||w.code)} <span class="fl">${w.code}</span></span>
+      <button class="btn2" data-wrm="${w.code}" style="padding:5px 10px">删</button></div>`).join('')||'<div class="fl" style="font-size:12.5px">暂无</div>'}</div>`;
+  $('portMgmt').querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>portCmd({action:'remove',code:b.dataset.rm}));
+  $('portMgmt').querySelectorAll('[data-wrm]').forEach(b=>b.onclick=()=>portCmd({action:'watch_remove',code:b.dataset.wrm}));
+}
+async function portCmd(payload){
+  const r=await fetch('/api/portfolio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await r.json();
+  if(j.error){alert(j.error);return;}
+  renderPortMgmt(j);
+  REPORT.portfolio=j; renderPort();
+}
+
 // ── 策略面板 ──
 async function loadConfig(){
   const r=await fetch('/api/config',{cache:'no-store'}), j=await r.json();
@@ -904,6 +1174,9 @@ function renderModules(){
     ['M8_discipline','M8 纪律清单','保命规则，可逐条开关'],
     ['M9_mainline','M9 题材主线五信号','消息定级→合力→中军→老龙→次日验证；缺一环就是一日游'],
     ['M10_fundstyle','M10 主导资金分类','机构(中军)/游资(龙头)/庄股——分类定离场：加速减仓·断板节奏·庄股回避'],
+    ['E1_meter','E1 情绪温度计','连板梯队/炸板率/晋级率/涨跌家数 → 0-100 温度（扩展模块）'],
+    ['E2_lhb','E2 龙虎榜·游资席位','每日龙虎榜 + 营业部席位，识别机构/游资（扩展模块）'],
+    ['E3_flow','E3 主力资金流','行业板块 + 个股主力净流入（扩展模块）'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -970,6 +1243,12 @@ function renderModules(){
       num(k,'hot_zt10_min','游资票·近10日涨停下限','连板节奏=游资主导',m.hot_zt10_min)+
       num(k,'zhuang_crash_pct','庄股·断崖跌幅(%)','低波动后单日砸到此=闪崩',m.zhuang_crash_pct)+
       num(k,'zhuang_chop_amp','庄股·断崖前日均波动(%)','无声阴跌/横盘的波动上限',m.zhuang_chop_amp);
+    if(k==='E1_meter') body=sw(k,'enabled','启用')+
+      pctf(k,'ebb_hurt_ratio','退潮预警·亏钱面积阈值(%)','亏钱面积超此值+温度骤降→按退潮对待',(m.ebb_hurt_ratio||0.3)*100);
+    if(k==='E2_lhb') body=sw(k,'enabled','启用')+
+      num(k,'top_n','净买入榜展示条数','',m.top_n);
+    if(k==='E3_flow') body=sw(k,'enabled','启用')+
+      num(k,'board_top_n','板块资金流展示条数','',m.board_top_n);
     return `<div class="mb" data-m="${k}">
       <div class="mh"><b>${t}</b>
         <div class="sw ${on?'on':''}" data-sw="${k}"></div>
@@ -1049,8 +1328,18 @@ $('btnRefresh').onclick=async()=>{
 };
 $('btnPanel').onclick=async()=>{ $('panel').classList.add('on'); $('mask').classList.add('on'); await loadConfig();
   $('modules').querySelector('.mb')?.classList.add('open'); };
-$('btnClose').onclick=()=>{$('panel').classList.remove('on');$('mask').classList.remove('on');};
-$('mask').onclick=$('btnClose').onclick;
+function closeAllPanels(){ $('panel').classList.remove('on'); $('portPanel').classList.remove('on'); $('mask').classList.remove('on'); }
+$('btnClose').onclick=closeAllPanels;
+$('mask').onclick=closeAllPanels;
+$('btnPort').onclick=openPort;
+$('btnPortClose').onclick=closeAllPanels;
+$('pfDone').onclick=closeAllPanels;
+$('pfAdd').onclick=()=>{ const c=$('pfCode').value.trim(); if(!c){alert('请填代码');return;}
+  portCmd({action:'add',code:c,name:$('pfName').value.trim(),
+    cost:parseFloat($('pfCost').value)||0,shares:parseFloat($('pfShares').value)||0});
+};
+$('wlAdd').onclick=()=>{ const c=$('wlCode').value.trim(); if(!c){alert('请填代码');return;}
+  portCmd({action:'watch_add',code:c}); };
 $('btnSave').onclick=saveCfg;
 $('btnReset').onclick=async()=>{ if(!confirm('恢复当前策略的默认参数？'))return;
   const p=CONFIG.preset||'wildman';

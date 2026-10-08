@@ -57,6 +57,20 @@ _M10_DEFAULTS = {
     "zhuang_chop_amp": 2.8,           # 庄股：断崖前日均波动上限（无声阴跌）
 }
 
+# ---- 扩展模块（E1-E3，参考 GitHub 同类项目新增，非野人原体系） ----
+_E1_DEFAULTS = {
+    "enabled": True,                  # E1 情绪温度计：连板梯队/炸板率/晋级率/涨跌家数
+    "ebb_hurt_ratio": 0.30,           # 退潮预警用的亏钱面积阈值（与 M3 同口径）
+}
+_E2_DEFAULTS = {
+    "enabled": True,                  # E2 龙虎榜·游资席位
+    "top_n": 12,                      # 净买入榜展示条数
+}
+_E3_DEFAULTS = {
+    "enabled": True,                  # E3 主力资金流
+    "board_top_n": 10,                # 行业板块净流入展示条数
+}
+
 
 PRESETS: dict[str, dict] = {
     # ===== 野人原版：完全按用户提供的体系落地 =====
@@ -138,6 +152,9 @@ PRESETS: dict[str, dict] = {
         },
         "M9_mainline": dict(_M9_DEFAULTS),
         "M10_fundstyle": dict(_M10_DEFAULTS),
+        "E1_meter": dict(_E1_DEFAULTS),
+        "E2_lhb": dict(_E2_DEFAULTS),
+        "E3_flow": dict(_E3_DEFAULTS),
     },
 
     # ===== 激进打板：情绪高位接力 =====
@@ -184,6 +201,9 @@ PRESETS: dict[str, dict] = {
         },
         "M9_mainline": dict(_M9_DEFAULTS),
         "M10_fundstyle": dict(_M10_DEFAULTS),
+        "E1_meter": dict(_E1_DEFAULTS),
+        "E2_lhb": dict(_E2_DEFAULTS),
+        "E3_flow": dict(_E3_DEFAULTS),
     },
 
     # ===== 保守波段：只做有业绩的大票 =====
@@ -231,6 +251,9 @@ PRESETS: dict[str, dict] = {
         },
         "M9_mainline": dict(_M9_DEFAULTS),
         "M10_fundstyle": dict(_M10_DEFAULTS),
+        "E1_meter": dict(_E1_DEFAULTS),
+        "E2_lhb": dict(_E2_DEFAULTS),
+        "E3_flow": dict(_E3_DEFAULTS),
     },
 
     # ===== 超短首板：只做新周期首板试错 =====
@@ -278,6 +301,9 @@ PRESETS: dict[str, dict] = {
         },
         "M9_mainline": dict(_M9_DEFAULTS),
         "M10_fundstyle": dict(_M10_DEFAULTS),
+        "E1_meter": dict(_E1_DEFAULTS),
+        "E2_lhb": dict(_E2_DEFAULTS),
+        "E3_flow": dict(_E3_DEFAULTS),
     },
 }
 

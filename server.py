@@ -13,6 +13,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import pipeline
+from core import datasource as ds
+from core import portfolio as portfolio_mod
 from core import strategy_config as sc
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +118,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # ------------------------------------------------------------ 路由
+    def _portfolio_view(self):
+        """按需体检持仓：仅拉持仓/自选相关快照与K线，不触发全市场重扫。"""
+        obj = portfolio_mod.load()
+        codes = [h["code"] for h in obj.get("holdings", [])] + \
+                [w["code"] for w in obj.get("watchlist", [])]
+        snaps = ds.fetch_snapshots(sorted(set(codes)), batch=60, workers=8) if codes else {}
+        hold_codes = [h["code"] for h in obj.get("holdings", [])]
+        kl = ds.fetch_klines(hold_codes, n=70, workers=8) if hold_codes else {}
+        cached = pipeline.get_cached() or {}
+        sent = cached.get("sentiment") or {}
+        vol = cached.get("volume") or {}
+        view = portfolio_mod.evaluate(snaps, kl, sent, vol, sc.load_config())
+        view["raw"] = obj
+        return view
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -177,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "presets": sc.list_presets()})
             elif path == "/api/presets":
                 self._send_json({"presets": sc.list_presets()})
+            elif path == "/api/portfolio":
+                self._send_json(self._portfolio_view())
             elif path == "/api/health":
                 self._send_json({"ok": True, "job": _job})
             elif path in ("/", "/index.html"):
@@ -230,6 +249,25 @@ class Handler(BaseHTTPRequestHandler):
                 sc.save_config(new)
                 pipeline._result_ts = 0
                 self._send_json({"ok": True, "config": new})
+            elif path == "/api/portfolio":
+                # 增/改持仓、加删自选
+                act = payload.get("action", "add")
+                code = (payload.get("code") or "").strip()
+                if not code:
+                    self._send_json({"error": "缺少 code"}, 400)
+                    return
+                if act == "remove":
+                    portfolio_mod.remove_holding(code)
+                elif act == "watch_add":
+                    portfolio_mod.watch_upsert(code, payload.get("name", ""))
+                elif act == "watch_remove":
+                    portfolio_mod.watch_remove(code)
+                else:
+                    portfolio_mod.upsert_holding(
+                        code, payload.get("name", ""),
+                        payload.get("cost", 0), payload.get("shares", 0),
+                        payload.get("date", ""), payload.get("note", ""))
+                self._send_json({"ok": True, "portfolio": self._portfolio_view()})
             elif path == "/api/refresh":
                 with _job_lock:
                     if _job["running"]:

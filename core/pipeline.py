@@ -8,7 +8,11 @@ from datetime import datetime
 
 from . import datasource as ds
 from . import engine
+from . import lhb as lhb_mod
 from . import mainline
+from . import moneyflow as flow_mod
+from . import portfolio as portfolio_mod
+from . import sentiment_meter
 from . import strategy_config as sc
 from . import trading
 from . import universe
@@ -194,7 +198,46 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         # ---- 业绩披露期 ----
         m7 = engine.evaluate_earnings(cfg)
         m6 = engine.evaluate_message(cfg, zt)
+
+        # ---- E1 情绪温度计（连板梯队/炸板率/晋级率/涨跌家数） ----
+        _prog("构建情绪温度计…", 0, 100)
+        meter = sentiment_meter.build(zt, dt, zb, snaps, real_date, cfg)
+
+        # ---- E2 龙虎榜·游资席位 ----
+        _prog("拉取龙虎榜…", 0, 100)
+        lhb_data = lhb_mod.evaluate(cfg, real_date, zt)
+        seat_hits = lhb_data.get("seat_hits", {})
+        if seat_hits:
+            for p in picks:
+                tags = seat_hits.get(p["code"])
+                if tags:
+                    p["lhb_tags"] = tags
+
+        # ---- E3 主力资金流（板块 + 候选股） ----
+        _prog("拉取主力资金流…", 0, 100)
+        flow = flow_mod.evaluate(cfg, picks, snaps, ml.get("theme", ""), zt)
+
+        # ---- 持仓体检（本地持仓/自选） ----
+        _prog("持仓体检…", 0, 100)
+        port_raw = portfolio_mod.load()
+        hold_codes = [h["code"] for h in port_raw.get("holdings", [])]
+        kl_hold = ds.fetch_klines(hold_codes, n=70, workers=8) if hold_codes else {}
+        port = portfolio_mod.evaluate(snaps, kl_hold, sentiment, volume, cfg)
+
+        # ---- M8 纪律体检：并入 E1-E3 与持仓的告警 ----
         m8 = engine.evaluate_discipline(cfg, sentiment, volume, macro, m7, ml)
+        extra = list(lhb_data.get("checks", [])) + list(flow.get("checks", [])) \
+            + list(port.get("checks", []))
+        if extra:
+            m8["checks"] = m8["checks"] + extra
+            worst = m8.get("status", "green")
+            for c in extra:
+                if c.get("level") == "red":
+                    worst = "red"
+                    break
+                if c.get("level") == "yellow" and worst != "red":
+                    worst = "yellow"
+            m8["status"] = worst
 
         report = {
             "meta": {
@@ -217,7 +260,11 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "volume": volume,
             "volume_history": [{"date": b["date"], "volume": b["volume"]} for b in hist[-20:]],
             "sentiment": sentiment,
+            "meter": meter,
             "mainline": ml,
+            "lhb": lhb_data,
+            "flow": flow,
+            "portfolio": port,
             "picks": picks,
             "position": plan,
             "earnings": m7,
