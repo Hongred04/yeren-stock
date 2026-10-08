@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import http.client
+import http.cookiejar
 import json
 import os
 import queue
@@ -41,6 +42,162 @@ _conn_pool: dict[str, queue.Queue] = {}
 _POOL_MAX = 32   # 每 host 池上限，防止长驻进程文件句柄膨胀
 
 
+# ---------------------------------------------------------------- 东财 Cookie
+# 实测（2026-10-08）东财 push2 的 clist 接口会被**按 URL 路径**风控：请求发出后
+# 服务端直接 RST（RemoteDisconnected），而同一域名、同一时刻的
+# ulist.np / ulist / stock 接口全部 200；东财入口页（www / quote / gridlist）
+# 也一个 Set-Cookie 都不下发。
+#   → 该限流发生在连接层，与 Cookie 无关；带不带 Cookie 都一样被掐。
+# 仍然保留 Cookie 注入能力，因为：
+#   1) 东财部分 datacenter 报表接口对已登录会话的频控阈值更宽；
+#   2) 将来若东财改成校验 Cookie，改配置即可生效，不必改代码。
+# 配置来源（优先级从高到低）：
+#   1) 环境变量 EAST_MONEY_COOKIE
+#   2) 文件 data/eastmoney_cookie.txt（支持热加载：改文件即生效，无需重启进程）
+EM_COOKIE_ENV = "EAST_MONEY_COOKIE"
+EM_COOKIE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "eastmoney_cookie.txt")
+
+_ck_memo: tuple[float, str] | None = None   # (文件 mtime, 拼好的 cookie)
+
+
+def _norm_cookie(txt: str) -> str:
+    """统一 Cookie 文本：既接受单行 `a=b; c=d`，也接受从 DevTools 复制来的多行。
+
+    注意不能把换行直接换成空格 —— 那样 cookie 之间就没有分隔符了。
+    """
+    parts = []
+    for chunk in (txt or "").replace("\r", "\n").split("\n"):
+        for piece in chunk.split(";"):
+            s = piece.strip()
+            if s:
+                parts.append(s)
+    return "; ".join(parts)
+
+
+def em_cookie() -> str:
+    """当前生效的东财 Cookie：环境变量优先，否则读文件（按 mtime 热加载）。"""
+    global _ck_memo
+    env = (os.environ.get(EM_COOKIE_ENV) or "").strip()
+    if env:
+        return _norm_cookie(env)
+    try:
+        mt = os.path.getmtime(EM_COOKIE_FILE)
+    except OSError:
+        _ck_memo = None
+        return ""
+    if _ck_memo is not None and _ck_memo[0] == mt:
+        return _ck_memo[1]
+    try:
+        with open(EM_COOKIE_FILE, encoding="utf-8") as f:
+            txt = f.read()
+    except OSError:
+        return ""
+    txt = _norm_cookie(txt)
+    _ck_memo = (mt, txt)
+    return txt
+
+
+def cookie_status() -> dict:
+    """Cookie 当前状态（给前端/自检看）。"""
+    env = (os.environ.get(EM_COOKIE_ENV) or "").strip()
+    ck = em_cookie()
+    return {
+        "configured": bool(ck),
+        "source": "环境变量" if env else ("文件" if ck else "未配置"),
+        "env_var": EM_COOKIE_ENV,
+        "file": EM_COOKIE_FILE,
+        "length": len(ck),
+        "preview": (ck[:28] + "…") if len(ck) > 28 else ck,
+    }
+
+
+def save_cookie(text: str) -> dict:
+    """把粘贴的 Cookie 落盘（前端「保存」用），立即生效、无需重启。"""
+    global _ck_memo
+    txt = _norm_cookie(text)
+    os.makedirs(os.path.dirname(EM_COOKIE_FILE), exist_ok=True)
+    with open(EM_COOKIE_FILE, "w", encoding="utf-8") as f:
+        f.write(txt)
+    _ck_memo = None
+    return cookie_status()
+
+
+def auto_fetch_cookie(timeout: int = 12) -> dict:
+    """尝试自动获取东财**匿名设备** Cookie（走 CookieJar 收 Set-Cookie）。
+
+    实测当前东财入口页不下发任何 Set-Cookie，所以通常返回 found=False ——
+    登录态 Cookie 没有自动途径，只能手动导出一次。保留此函数是为了东财将来
+    启用设备 Cookie 时能自动接上，不必改数据层。
+    """
+    cj = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cj),
+        urllib.request.HTTPSHandler(context=_SSL_CTX))
+    op.addheaders = [("User-Agent", UA), ("Accept", "text/html,*/*")]
+    for url in ("https://quote.eastmoney.com/center/gridlist.html",
+                "https://www.eastmoney.com/"):
+        try:
+            with op.open(url, timeout=timeout):
+                pass
+        except Exception:
+            continue
+        got = [f"{c.name}={c.value}" for c in cj]
+        if got:
+            return {"found": True, "cookies": got, "header": "; ".join(got),
+                    "from": url}
+    return {"found": False, "cookies": [], "header": "", "from": ""}
+
+
+# ---------------------------------------------------------------- 接口熔断
+# clist 被风控时，每轮扫描都要在 3 台镜像上各撞一次超时才降级（最坏 36s），
+# 既慢、又更容易把频控撞得更狠。这里按「接口路径」记账：一旦确认被掐，冷却期内
+# 直接返回空、走各自降级链路。冷却时长随连续失败轮数指数退避（5→10→20→30 分封顶）。
+
+_em_fail: dict[str, int] = {}          # 接口 -> 连续失败轮数
+_em_down_until: dict[str, float] = {}  # 接口 -> 冷却截止（epoch 秒）
+_em_lock = threading.Lock()
+EM_BLOCK_BASE = 300      # 首次冷却 5 分钟
+EM_BLOCK_MAX = 1800      # 封顶 30 分钟
+EM_BLOCK_MIN_FAILS = 2   # 软失败（超时等）连续几轮才熔断；硬失败（被 RST）立即熔断
+
+
+def _api_key(path: str) -> str:
+    return path.split("?", 1)[0]
+
+
+def _is_hard_block(err: Exception) -> bool:
+    """服务端把我们掐了（RST / 断流）—— 不会自己好，值得立刻熔断。"""
+    return isinstance(err, (http.client.RemoteDisconnected, http.client.BadStatusLine,
+                            ConnectionResetError, ssl.SSLError))
+
+
+def em_blocked() -> list[dict]:
+    """当前处于冷却中的东财接口（过期的顺手清掉）。"""
+    now = time.time()
+    out = []
+    with _em_lock:
+        for k in list(_em_down_until):
+            until = _em_down_until[k]
+            if until > now:
+                out.append({"api": k, "fails": _em_fail.get(k, 0),
+                            "seconds_left": int(until - now)})
+            else:
+                _em_down_until.pop(k, None)
+                _em_fail.pop(k, None)
+    return sorted(out, key=lambda x: -x["seconds_left"])
+
+
+def em_reset_blocks() -> int:
+    """清空熔断记录（例如刚配好 Cookie，想立刻重试）。"""
+    with _em_lock:
+        n = len(_em_down_until)
+        _em_down_until.clear()
+        _em_fail.clear()
+    return n
+
+
 def _new_conn(host: str, timeout: int) -> http.client.HTTPSConnection:
     px = _SYS_PROXY.get("https") or _SYS_PROXY.get("http")
     if px:
@@ -70,6 +227,10 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
         "Accept-Encoding": "identity",
         "Host": p.netloc,
     }
+    if "eastmoney.com" in host:
+        ck = em_cookie()
+        if ck:
+            headers["Cookie"] = ck
     q = _conn_pool.setdefault(host, queue.Queue())
     last_err: Exception | None = None
     for _ in range(2):
@@ -704,14 +865,33 @@ EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
 
 
 def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dict:
-    """东财 push2 接口（clist / ulist.np）：镜像主机轮换，返回解析后的 JSON。"""
+    """东财 push2 接口（clist / ulist.np）：镜像主机轮换 + 接口级熔断。
+
+    熔断命中时直接返回 {}，由调用方走自己的降级链路 —— 不再空等 3 台镜像各自超时。
+    """
+    key = _api_key(path)
+    if time.time() < _em_down_until.get(key, 0):
+        return {}
+    soft = False
     for host in EM_PUSH2_HOSTS:
         try:
             raw = _get(f"https://{host}{path}", timeout=12, referer=referer).decode(
                 "utf-8", errors="ignore")
-            return json.loads(raw)
-        except Exception:
+            js = json.loads(raw)
+            with _em_lock:
+                _em_fail.pop(key, None)
+                _em_down_until.pop(key, None)
+            return js
+        except Exception as e:
+            if not _is_hard_block(e):
+                soft = True          # 有超时类失败 → 可能只是网络抖动，别急着熔断
             continue
+    with _em_lock:
+        n = _em_fail.get(key, 0) + 1
+        _em_fail[key] = n
+        if not soft or n >= EM_BLOCK_MIN_FAILS:
+            _em_down_until[key] = time.time() + min(
+                EM_BLOCK_BASE * (2 ** (n - 1)), EM_BLOCK_MAX)
     return {}
 
 

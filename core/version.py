@@ -38,5 +38,18 @@
          pipeline 报告补上 portfolio.raw；一级「我的持仓」无告警时显示自选数；
          修正 renderSub 不刷新一级角标的问题（改为 renderTopTabs 统一重画）；
          data/portfolio.json 加入 .gitignore（个人持仓不进 git）
+  1.9.0  数据源治理：Cookie 注入 + 接口级熔断
+         - 实测「注入 Cookie 解限流」在 push2 上不成立：东财入口页不下发任何
+           Set-Cookie（无匿名 Cookie 可取），被拦的 clist 是连接层被 RST 掐断，
+           带 Cookie 一样失败；同域名同时刻 ulist.np/ulist/stock 全 200
+           → 拦截按 URL 路径触发，与 Cookie 无关
+         - 真正有效的做法落地：clist 熔断退避（硬失败立即熔断 / 软失败连续 2 轮，
+           冷却 5→10→20→30 分封顶），熔断期内直接走降级不再空等镜像超时；
+           主口径继续走未被拦的 ulist.np
+         - Cookie 能力仍完整保留：环境变量 EAST_MONEY_COOKIE > data/eastmoney_cookie.txt
+           （mtime 热加载，改文件即生效），单行/多行粘贴均可，只注入东财域名
+         - 新增 /api/sources（GET/POST）与顶栏「数据源」面板：粘贴 Cookie、
+           查看熔断接口与剩余冷却、手动解封、尝试自动获取
+         - data/eastmoney_cookie.txt 加入 .gitignore
 """
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.9.0"

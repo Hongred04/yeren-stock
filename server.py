@@ -196,6 +196,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"presets": sc.list_presets()})
             elif path == "/api/portfolio":
                 self._send_json(self._portfolio_view())
+            elif path == "/api/sources":
+                self._send_json({"ok": True, "cookie": ds.cookie_status(),
+                                 "blocked": ds.em_blocked()})
             elif path == "/api/health":
                 self._send_json({"ok": True, "job": _job})
             elif path in ("/", "/index.html"):
@@ -268,6 +271,29 @@ class Handler(BaseHTTPRequestHandler):
                         payload.get("cost", 0), payload.get("shares", 0),
                         payload.get("date", ""), payload.get("note", ""))
                 self._send_json({"ok": True, "portfolio": self._portfolio_view()})
+            elif path == "/api/sources":
+                # 数据源治理：Cookie 配置 / 熔断状态
+                act = payload.get("action", "")
+                if act == "save_cookie":
+                    st = ds.save_cookie(payload.get("cookie", ""))
+                    ds.em_reset_blocks()          # 刚配好 cookie，给接口一次重试机会
+                    self._send_json({"ok": True, "cookie": st,
+                                     "blocked": ds.em_blocked(),
+                                     "msg": "已保存" if st["configured"] else "已清空"})
+                elif act == "unblock":
+                    n = ds.em_reset_blocks()
+                    self._send_json({"ok": True, "msg": f"已清除 {n} 条熔断记录",
+                                     "cookie": ds.cookie_status(),
+                                     "blocked": ds.em_blocked()})
+                elif act == "auto":
+                    r = ds.auto_fetch_cookie()
+                    self._send_json({"ok": True, "auto": r, "cookie": ds.cookie_status(),
+                                     "blocked": ds.em_blocked(),
+                                     "msg": ("自动获取到 %d 个 cookie" % len(r["cookies"]))
+                                            if r["found"] else
+                                            "东财入口页没有下发 Set-Cookie，匿名 Cookie 拿不到"})
+                else:
+                    self._send_json({"error": "未知 action"}, 400)
             elif path == "/api/refresh":
                 with _job_lock:
                     if _job["running"]:

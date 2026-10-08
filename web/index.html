@@ -29,6 +29,12 @@ button{font-family:inherit;cursor:pointer;border:none;border-radius:8px;
 input,select{font-family:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line);
   border-radius:7px;background:#fff;color:var(--tx);width:100%}
 input:focus,select:focus{outline:0;border-color:var(--blu);box-shadow:0 0 0 3px rgba(37,99,217,.1)}
+textarea{width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.6;
+  padding:8px 10px;border:1px solid var(--line);border-radius:7px;resize:vertical;
+  background:#fff;color:var(--tx)}
+textarea:focus{outline:0;border-color:var(--blu);box-shadow:0 0 0 3px rgba(37,99,217,.1)}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
+  background:var(--sk);padding:1px 5px;border-radius:4px}
 
 /* ── 顶栏 ── */
 header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
@@ -39,6 +45,10 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
 .tag{background:var(--sk);color:var(--tx2);padding:4px 10px;border-radius:7px;
   font-size:12px;display:flex;align-items:center;gap:5px}
 .tag b{font-weight:700;color:var(--tx)}
+.tag.clk{cursor:pointer}
+.tag.clk:hover{background:var(--blu-bg);color:var(--blu)}
+.tag.srcwarn{background:var(--org-bg)}
+.tag.srcwarn b,.tag.srcwarn:hover{color:var(--org)}
 .hd .sp{flex:1}
 .btn{background:var(--blu);color:#fff}
 .btn:hover{background:#1d55bd}
@@ -313,6 +323,7 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <div class="tag">日期 <b id="hdDate">—</b></div>
     <div class="tag">版本 <b id="hdVer">—</b></div>
     <div class="tag" id="hdTime">—</div>
+    <div class="tag clk" id="hdSrc" title="数据源状态：Cookie / 接口熔断">数据源 <b>—</b></div>
     <div class="sp"></div>
     <button class="btn2" id="btnPanel">调策略</button>
     <button class="btn" id="btnRefresh">重新扫描</button>
@@ -516,6 +527,45 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
   <div class="pf"><button class="btn" id="pfDone" style="flex:1">完成</button></div>
 </div>
 
+<div class="panel" id="srcPanel">
+  <div class="ph"><h3>数据源</h3>
+    <button class="btn2" id="btnSrcClose">关闭</button></div>
+  <div class="pb">
+    <div class="fld"><label>东方财富 Cookie</label>
+      <div id="srcCookieState"></div>
+      <textarea id="srcCookieInput" rows="4" style="margin-top:8px"
+        placeholder="在此粘贴完整 Cookie（单行 / 多行都行）"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn" id="srcSave" style="flex:1">保存</button>
+        <button class="btn2" id="srcClear">清空</button>
+        <button class="btn2" id="srcAuto">自动获取</button>
+      </div>
+      <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
+        保存后立即生效，不用重启。也可设环境变量 <code>EAST_MONEY_COOKIE</code>（优先级更高），
+        或直接编辑 <code>data/eastmoney_cookie.txt</code>（改文件即热加载）。
+      </div>
+    </div>
+    <div class="fld"><label>接口熔断状态</label>
+      <div id="srcBlocked"></div>
+      <button class="btn2" id="srcUnblock" style="margin-top:8px;width:100%">清除熔断记录（立即重试）</button>
+    </div>
+    <div class="fld"><label>关于限流，实测结论</label>
+      <div style="font-size:12px;color:var(--tx2);line-height:1.85;background:#fafbfc;
+        border:1px solid var(--line2);border-radius:9px;padding:11px 13px">
+        <b>Cookie 解决不了 push2 的限流。</b>东财入口页（www / quote / gridlist）
+        <b>不下发任何 Set-Cookie</b>，且被拦的接口是<b>连接层被 RST 掐断</b>——
+        请求头里带什么都不会被读到，带 Cookie 实测一样失败。<br>
+        真正的原因是 <b>按 URL 路径风控</b>：同一域名同一时刻，<code>clist/get</code> 被掐，
+        而 <code>ulist.np/get</code>、<code>stock/get</code> 全部正常。<br>
+        所以本系统的做法是：<b>主口径走没被拦的接口</b>（ulist.np），
+        被拦接口<b>熔断退避</b>并自动降级，不再空等超时。
+        Cookie 能力保留，是为了将来东财改成校验 Cookie 时改配置即可生效。
+      </div>
+    </div>
+  </div>
+  <div class="pf"><button class="btn" id="srcDone" style="flex:1">完成</button></div>
+</div>
+
 <script>
 let REPORT=null, CONFIG=null, SEL=null;
 const $=id=>document.getElementById(id);
@@ -716,6 +766,7 @@ function finish(j){
   $('loading').classList.add('hide'); $('main').classList.remove('hide');
   render();
   buildNav();
+  loadSrc();          // 数据源状态（Cookie / 熔断）
 }
 
 // ── 主渲染 ──
@@ -1355,6 +1406,7 @@ function renderPort(){
 
 // ── 持仓管理面板 ──
 async function openPort(){
+  closeAllPanels();
   $('portPanel').classList.add('on'); $('mask').classList.add('on');
   const r=await fetch('/api/portfolio',{cache:'no-store'}); const j=await r.json();
   renderPortMgmt(unwrapPort(j));
@@ -1408,6 +1460,54 @@ function toast(msg, jumpTo){
   _toastT=setTimeout(hideToast, jumpTo?5200:2600);
 }
 function hideToast(){ const el=$('toast'); if(el) el.classList.remove('on'); }
+
+// ── 数据源面板（Cookie / 接口熔断） ──
+let SRC=null;
+async function loadSrc(){
+  try{
+    const j=await (await fetch('/api/sources',{cache:'no-store'})).json();
+    SRC={cookie:j.cookie||{}, blocked:j.blocked||[]};
+    renderSrc();
+  }catch(e){}
+}
+function renderSrc(){
+  if(!SRC) return;
+  const c=SRC.cookie||{}, b=SRC.blocked||[];
+  const tag=$('hdSrc');
+  if(tag){
+    tag.innerHTML='数据源 <b>'+(b.length? b.length+' 个接口受限':'正常')+'</b>';
+    tag.className='tag clk'+(b.length?' srcwarn':'');
+  }
+  const st=$('srcCookieState');
+  if(st) st.innerHTML = c.configured
+    ? `<span class="pill grn">已配置</span>
+       <span class="fl" style="font-size:12px">来源：${esc(c.source)} · ${c.length} 字符</span>
+       <div style="font-size:11.5px;color:var(--tx3);margin-top:5px;word-break:break-all;
+         font-family:ui-monospace,Consolas,monospace">${esc(c.preview||'')}</div>`
+    : `<span class="pill gry">未配置</span>
+       <span class="fl" style="font-size:12px">环境变量和文件都没有 Cookie</span>`;
+  const bd=$('srcBlocked');
+  if(bd) bd.innerHTML = b.length
+    ? b.map(x=>`<div class="r2" style="margin-bottom:7px;align-items:flex-start">
+        <span style="flex:1;font-size:12.5px"><code>${esc(x.api)}</code>
+        <div class="fl" style="font-size:11px;margin-top:2px">连续失败 ${x.fails} 轮 ·
+        冷却剩余约 ${Math.ceil(x.seconds_left/60)} 分钟</div></span></div>`).join('')
+    : `<div class="fl" style="font-size:12.5px;line-height:1.7">
+        当前没有接口处于熔断状态 —— 东财接口都正常。</div>`;
+}
+async function srcCmd(payload){
+  const j=await (await fetch('/api/sources',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  if(j.error){ alert(j.error); return; }
+  SRC={cookie:j.cookie||{}, blocked:j.blocked||[]};
+  renderSrc();
+  if(j.msg) toast(j.msg);
+}
+async function openSrc(){
+  closeAllPanels();
+  $('srcPanel').classList.add('on'); $('mask').classList.add('on');
+  await loadSrc();
+}
 
 // ── 策略面板 ──
 async function loadConfig(){
@@ -1590,11 +1690,20 @@ $('btnRefresh').onclick=async()=>{
   await load(true);
   b.disabled=false; b.textContent='重新扫描';
 };
-$('btnPanel').onclick=async()=>{ $('panel').classList.add('on'); $('mask').classList.add('on'); await loadConfig();
+$('btnPanel').onclick=async()=>{ closeAllPanels(); $('panel').classList.add('on'); $('mask').classList.add('on'); await loadConfig();
   $('modules').querySelector('.mb')?.classList.add('open'); };
-function closeAllPanels(){ $('panel').classList.remove('on'); $('portPanel').classList.remove('on'); $('mask').classList.remove('on'); }
+function closeAllPanels(){ $('panel').classList.remove('on'); $('portPanel').classList.remove('on');
+  $('srcPanel').classList.remove('on'); $('mask').classList.remove('on'); }
 $('btnClose').onclick=closeAllPanels;
 $('mask').onclick=closeAllPanels;
+$('hdSrc').onclick=openSrc;
+$('btnSrcClose').onclick=closeAllPanels;
+$('srcDone').onclick=closeAllPanels;
+$('srcSave').onclick=()=>srcCmd({action:'save_cookie',cookie:$('srcCookieInput').value});
+$('srcClear').onclick=()=>{ if(!confirm('清空已保存的 Cookie？'))return;
+  $('srcCookieInput').value=''; srcCmd({action:'save_cookie',cookie:''}); };
+$('srcAuto').onclick=()=>srcCmd({action:'auto'});
+$('srcUnblock').onclick=()=>srcCmd({action:'unblock'});
 document.querySelectorAll('.btnPort').forEach(b=>b.onclick=openPort);
 $('btnPortClose').onclick=closeAllPanels;
 $('pfDone').onclick=closeAllPanels;

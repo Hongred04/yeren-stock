@@ -18,3 +18,6 @@ data/market_amount.json
 
 # 个人持仓 / 自选（本地私有，别进 git）
 data/portfolio.json
+
+# 东财 Cookie（凭证，绝不进 git）
+data/eastmoney_cookie.txt
