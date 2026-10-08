@@ -532,7 +532,16 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
 
         total = (g * wg + p * wp + i * wi) / wsum
         reasons = greasons + preasons + ireasons
-        warns = pwarns
+        warns = list(pwarns)
+
+        # 量比：当日放量程度 —— 短线最直接的确认信号。不参与打分（避免动选股口径），
+        # 只作为理由/警示呈现，详情页也会单独显示。
+        vr = snap.get("volume_ratio")
+        if vr is not None and vr > 0:
+            if vr >= 2.0:
+                reasons = reasons + [f"量比 {vr:.2f}，显著放量"]
+            elif vr < 0.8:
+                warns = warns + [f"量比 {vr:.2f}，量能偏冷（缩量）"]
 
         results.append({
             "code": code,
@@ -543,6 +552,8 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
             "turnover": to,
             "float_mv": snap.get("float_mv", 0) / 1e8,
             "amount": snap.get("amount", 0),
+            "volume_ratio": snap.get("volume_ratio"),   # 量比
+            "avg_price": snap.get("avg_price"),         # 日内均价
             "score": round(total * 100, 1),
             "scores": {
                 "graph": round(g * 100, 1),

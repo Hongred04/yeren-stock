@@ -285,6 +285,13 @@ SNAP_FIELDS = {
     "high": 33, "low": 34, "amount": 37, "turnover": 38, "pe": 39,
     "amplitude": 43, "float_mv": 44, "total_mv": 45, "pb": 46,
     "limit_up": 47, "limit_down": 48,
+    # 49 起这几个字段腾讯一直在返回，之前没解析（参考 easyquotation 的字段表补齐）。
+    # 注意：ETF/部分品种字段数不足 54，取值必须容错。
+    "volume_ratio": 49,   # 量比
+    "bid_ask_diff": 50,   # 委差
+    "avg_price": 51,      # 日内均价（VWAP）
+    "pe_ttm": 52,         # 市盈(动)
+    "pe_static": 53,      # 市盈(静)
 }
 
 
@@ -309,6 +316,13 @@ def _parse_tx_line(line: str) -> dict | None:
             return float(parts[SNAP_FIELDS[key]])
         except (ValueError, IndexError):
             return default
+
+    def f_opt(key):
+        """字段不存在/取不到时返回 None（ETF 等品种字段数不足，别当成 0）。"""
+        try:
+            return float(parts[SNAP_FIELDS[key]])
+        except (ValueError, IndexError):
+            return None
 
     def s(key, default=""):
         try:
@@ -341,6 +355,12 @@ def _parse_tx_line(line: str) -> dict | None:
         "limit_up": f("limit_up"),
         "limit_down": f("limit_down"),
         "time": s("time"),
+        # 短线口径补充字段（取不到为 None，不参与计算时各自判空）
+        "volume_ratio": f_opt("volume_ratio"),   # 量比
+        "avg_price": f_opt("avg_price"),         # 日内均价 VWAP
+        "bid_ask_diff": f_opt("bid_ask_diff"),   # 委差
+        "pe_ttm": f_opt("pe_ttm"),               # 市盈(动)
+        "pe_static": f_opt("pe_static"),         # 市盈(静)
     }
 
 

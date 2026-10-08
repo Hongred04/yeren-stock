@@ -921,7 +921,8 @@ function render(){
         ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}</td>
       <td class="num">${f2(p.price)}</td>
       <td class="num ${pct(p.pct)}">${f2(p.pct)}%</td>
-      <td class="num">${f2(p.turnover,1)}%</td>
+      <td class="num">${f2(p.turnover,1)}%${p.volume_ratio!=null
+        ?`<div class="fl" style="font-size:10.5px;font-weight:600">量比${f2(p.volume_ratio)}</div>`:''}</td>
       <td class="num">${f2(p.float_mv,1)}亿</td>
       <td>${p.zt_boards?`<span class="pill red">${p.zt_boards}板</span>`
         :(!p.tradable?'<span class="pill gry">观察</span>':'<span class="pill blu">备选</span>')}
@@ -1101,6 +1102,10 @@ function showDetail(code,tr){
       <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
       <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
       <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
+      ${p.volume_ratio!=null?`<div><div class="k">量比</div><div class="v" style="color:${
+        p.volume_ratio>=2?'var(--red)':(p.volume_ratio<0.8?'var(--tx3)':'var(--tx)')}">${f2(p.volume_ratio)}</div></div>`:''}
+      ${p.avg_price!=null&&p.avg_price>0?`<div><div class="k">日内均价</div><div class="v ${
+        p.price>=p.avg_price?'up':'dn'}">${f2(p.avg_price)}</div></div>`:''}
       ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main>=0?'up':'dn'}">${p.moneyflow.main>=0?'+':''}${f2(p.moneyflow.main)}亿</div></div>
       <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct>=0?'up':'dn'}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
       <div><div class="k">位置（越高越贵）</div><div class="v">${(g.base_pos*100).toFixed(0)}%</div></div>
