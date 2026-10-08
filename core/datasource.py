@@ -219,6 +219,56 @@ def save_valid_codes(codes: list[str]) -> None:
         pass
 
 
+# ---------------------------------------------------------------- 两市成交额档案
+# 量能阈值是"全天成交额"口径。盘前/集合竞价时当日累计额约等于 0，
+# 必须退回上一完整交易日的全天额 —— 这个数只能靠本地逐日积累。
+
+MARKET_AMOUNT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "market_amount.json")
+
+
+def save_market_amount(date: str, amount_yi: float) -> None:
+    """记录完整交易日两市成交额（亿）。同日多次扫描取最大值。"""
+    if not date or amount_yi <= 0:
+        return
+    try:
+        with open(MARKET_AMOUNT_PATH, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        entries = []
+    for e in entries:
+        if e.get("date") == date:
+            if amount_yi > e.get("amount", 0):
+                e["amount"] = round(amount_yi, 1)
+            break
+    else:
+        entries.append({"date": date, "amount": round(amount_yi, 1)})
+    entries.sort(key=lambda x: x["date"])
+    entries = entries[-60:]
+    try:
+        os.makedirs(os.path.dirname(MARKET_AMOUNT_PATH), exist_ok=True)
+        tmp = MARKET_AMOUNT_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        os.replace(tmp, MARKET_AMOUNT_PATH)
+    except OSError:
+        pass
+
+
+def load_last_complete_amount(date_limit: str) -> float:
+    """<= date_limit 的最近一个完整交易日两市成交额（亿）。无记录返回 0。"""
+    try:
+        with open(MARKET_AMOUNT_PATH, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return 0.0
+    best = 0.0
+    for e in entries:
+        if str(e.get("date", "")) <= (date_limit or "99999999"):
+            best = e.get("amount", 0.0)
+    return best
+
+
 def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
                     progress=None) -> dict[str, dict]:
     """批量拉取快照。返回 {code: snapshot}。"""

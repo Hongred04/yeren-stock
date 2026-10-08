@@ -421,7 +421,7 @@ const pct=v=>v>0?'up':(v<0?'dn':'fl');
 const STAGE_CN={probe:'新周期刚起步',climax:'情绪高潮，主升阶段',follow:'扩散跟风阶段',
   ebb:'退潮期',unknown:'数据不足',disabled:'已关闭',idle:'待命'};
 const VOL_CN={peak_swing:'量能充沛',comfort_short:'量能舒适',shrink_short:'量能偏小',
-  shrink_red:'极度缩量但红盘',dry:'极度缩量',disabled:'已关闭'};
+  shrink_red:'极度缩量但红盘',dry:'极度缩量',pending:'量能未就绪（盘前）',disabled:'已关闭'};
 
 // ── 载入：先探缓存（毫秒级）→ 命中秒开；否则后台跑 + 轮询 ──
 async function load(force){
@@ -553,8 +553,9 @@ function render(){
     {t:'今天能买吗',v:canTrade?'能':'不能',
       s:!canTrade?'退潮期或极度缩量':(pos.chain_stage==='probe'?'可以试错':'按计划操作'),
       c:canTrade?'g':'r'},
-    {t:'两市成交额',v:Math.round(vol.amount).toLocaleString()+'亿',
-      s:VOL_CN[vol.mode]||vol.label,c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
+    {t:'两市成交额',v:vol.mode==='pending'?'—':Math.round(vol.amount).toLocaleString()+'亿',
+      s:(VOL_CN[vol.mode]||vol.label)+(vol.basis?' · '+vol.basis:''),
+      c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
     {t:'涨停 / 跌停',v:mm.limit_up+' / '+mm.limit_down,
       s:'炸板 '+mm.broken+' 只',c:''},
     {t:'亏钱的股票占比',v:(mm.hurt_area*100).toFixed(0)+'%',

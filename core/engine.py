@@ -88,17 +88,79 @@ VOLUME_MODES = {
     "shrink_short": "缩量存量 · 只做短线中小题材",
     "shrink_red": "极致缩量还红盘 · 筹码结构好",
     "dry": "极度缩量 · 空仓等待",
+    "pending": "量能未就绪 · 盘前/非交易时段",
 }
 
+# A股成交额日内累计占比经验曲线：开盘急、午间缓、尾盘回升。
+# 量能阈值都是"全天成交额"口径，盘中拿累计值直接比阈值，
+# 早盘必然误判成极度缩量 —— 按已交易分钟折算成预估全天额再比。
+_DAY_PROFILE = [(0, 0.02), (15, 0.10), (30, 0.18), (60, 0.28),
+                (120, 0.45), (180, 0.68), (210, 0.85), (240, 1.0)]
 
-def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict]) -> dict:
-    """M2 量能定模式 —— 整个体系的模式总开关。"""
+
+def _traded_fraction(tmin: int) -> float:
+    tmin = max(0, min(240, int(tmin)))
+    for (t1, f1), (t2, f2) in zip(_DAY_PROFILE, _DAY_PROFILE[1:]):
+        if tmin <= t2:
+            return f1 + (f2 - f1) * (tmin - t1) / (t2 - t1)
+    return 1.0
+
+
+def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
+                    session: dict | None = None,
+                    fallback_amount: float = 0.0) -> dict:
+    """M2 量能定模式 —— 整个体系的模式总开关。
+
+    session/fallback_amount：量能阈值是「全天成交额」口径，而快照里的
+    成交额是当日累计值 —— 集合竞价时约等于 0，早盘也只有两三成。
+    盘前/非交易时段改用上一完整交易日的全天额（本地持久化），
+    盘中按日内占比折算成预估全天额，收盘后直读。口径写进 basis，
+    界面上跟着显示，杜绝"没开盘就说极度缩量"这类假结论。
+    """
     v = cfg.get("M2_volume", {})
     if not v.get("enabled", True):
         return {"mode": "disabled", "label": "量能模块已关闭", "advice": "自行判断",
                 "short_only": False, "amount": market_amount}
 
-    amt = market_amount / 1e8 if market_amount > 1e5 else market_amount  # 亿
+    amt_raw = market_amount / 1e8 if market_amount > 1e5 else market_amount
+    phase = (session or {}).get("phase", "")
+    tmin = (session or {}).get("tmin", 240)
+
+    if phase in ("pre_open", "auction", "rest"):
+        if fallback_amount and fallback_amount > 0:
+            amt = fallback_amount
+            basis = "上一完整交易日全天"
+        else:
+            return {
+                "mode": "pending", "label": VOLUME_MODES["pending"],
+                "advice": ("当前是盘前/非交易时段，当日量能还没形成 —— "
+                           "别急着定模式，开盘半小时后再看量能"),
+                "short_only": False,
+                "amount": 0, "raw_amount": round(amt_raw, 0),
+                "basis": "无（当日数据未形成）", "red_flag": "",
+            }
+    elif phase in ("just_closed", "after_close"):
+        amt = amt_raw
+        basis = "当日全天（已收盘）"
+    elif phase in ("morning", "noon", "afternoon", "tail"):
+        if amt_raw <= 0:
+            # 盘中但累计额为 0：数据未就绪（接口异常/刚开盘第一分钟）
+            return {
+                "mode": "pending", "label": VOLUME_MODES["pending"],
+                "advice": ("盘中但成交额数据未形成 —— 等数据就绪后再定模式，"
+                           "先不动手"),
+                "short_only": False,
+                "amount": 0, "raw_amount": 0,
+                "basis": "无（盘中数据未就绪）", "red_flag": "",
+            }
+        frac = max(_traded_fraction(tmin), 0.02)
+        est = amt_raw / frac if amt_raw > 0 else 0.0
+        amt = min(max(est, amt_raw), amt_raw * 6) if amt_raw > 0 else 0.0
+        basis = f"盘中预估全天（已成交{amt_raw:.0f}亿）"
+    else:
+        amt = amt_raw
+        basis = "当日实时"
+
     peak = v.get("peak_threshold", 15000)
     comfort = v.get("comfort_threshold", 5000)
     shrink = v.get("shrink_threshold", 12000)
@@ -134,9 +196,11 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict]) -> dict:
     return {
         "mode": mode,
         "label": VOLUME_MODES.get(mode, mode),
-        "advice": advice,
+        "advice": f"{advice}（量能口径：{basis}）",
         "short_only": short_only,
         "amount": round(amt, 0),
+        "raw_amount": round(amt_raw, 0),
+        "basis": basis,
         "red_flag": red_flag,
     }
 
@@ -424,8 +488,12 @@ def _price_mv_score(snap: dict, cfg_a: dict) -> tuple[float, list[str], list[str
 
 def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
            zt: list[dict], macro: dict, volume: dict, sentiment: dict,
-           top_n: int = 20, progress=None) -> list[dict]:
-    """M4+M5 选股主流程：审美三要素打分 + 仓位建议。"""
+           top_n: int = 20, progress=None, preopen: bool = False) -> list[dict]:
+    """M4+M5 选股主流程：审美三要素打分 + 仓位建议。
+
+    preopen：盘前/竞价/休市时段全市场换手、成交额均为 0（当日数据
+    未形成），放开流动性门槛，名单按昨收状态作观察名单。
+    """
     a = cfg.get("M4_aesthetic", {})
     if not a.get("enabled", True):
         return []
@@ -462,11 +530,12 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
         if universe.board_of(code) in ex_boards:
             continue
         to = snap.get("turnover", 0)
-        if to < min_to or to > max_to:
-            continue
-        # 无成交（停牌/一字无换手）跳过
-        if snap.get("amount", 0) <= 0:
-            continue
+        if not preopen:
+            if to < min_to or to > max_to:
+                continue
+            # 无成交（停牌/一字无换手）跳过；盘前换手未形成，跳过该门槛
+            if snap.get("amount", 0) <= 0:
+                continue
 
         bars = kl.get(code) or []
         if len(bars) < 25:

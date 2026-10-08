@@ -38,7 +38,9 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     print(f"\n[数据] 涨停{len(zt)} 跌停{len(dt)} 炸板{len(zb)}  两市成交{amount/1e8:.0f}亿  ({round(time.time()-t0,1)}s)")
 
     mac = engine.evaluate_macro(cfg)
-    vol = engine.evaluate_volume(cfg, amount, hist)
+    sess = trading.market_session()
+    preopen = sess["phase"] in ("pre_open", "auction", "rest")
+    vol = engine.evaluate_volume(cfg, amount, hist, session=sess)
     sen = engine.evaluate_sentiment(cfg, zt, dt, zb, zth)
 
     print(f"\n[指数]")
@@ -101,9 +103,9 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
         if universe.board_of(code) in ex:
             continue
         to = s.get("turnover", 0)
-        if to < a.get("min_turnover", 1.0) or to > a.get("max_turnover", 25.0):
+        if not preopen and (to < a.get("min_turnover", 1.0) or to > a.get("max_turnover", 25.0)):
             continue
-        if s.get("amount", 0) <= 0:
+        if not preopen and s.get("amount", 0) <= 0:
             continue
         mv = s.get("float_mv", 0) / 1e8
         if mv > mv_mid:
@@ -133,7 +135,8 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     kl = ds.fetch_klines(pre_codes, n=70, workers=24)
     print(f"[K线] 成功 {len(kl)} 只  ({round(time.time()-t2,1)}s)")
 
-    picks = engine.screen(cfg, {c: snaps[c] for c in kl}, kl, zt, mac, vol, sen, top_n=top)
+    picks = engine.screen(cfg, {c: snaps[c] for c in kl}, kl, zt, mac, vol, sen,
+                          top_n=top, preopen=preopen)
     plan = trading.position_plan(cfg, picks, sen, vol, mac)
 
     print(f"\n{'='*78}")

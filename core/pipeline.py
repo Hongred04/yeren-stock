@@ -56,8 +56,14 @@ def invalidate():
     _result_ts = 0
 
 
-def _snapshot_prefilter(snaps: dict, cfg: dict, zt: list[dict], limit: int) -> list[str]:
-    """快照层预筛 + 排序，返回优先拉K线的候选。"""
+def _snapshot_prefilter(snaps: dict, cfg: dict, zt: list[dict], limit: int,
+                        preopen: bool = False) -> list[str]:
+    """快照层预筛 + 排序，返回优先拉K线的候选。
+
+    preopen：盘前/集合竞价/休市时全市场换手与成交额都是 0（当日数据
+    未形成），流动性门槛会让候选清空 —— 放开这两道门槛，名单按
+    昨收状态作观察名单。
+    """
     a = cfg.get("M4_aesthetic", {})
     ex = set(a.get("exclude_boards", []))
     pmin, pmax = a.get("price_min", 5.0), a.get("price_max", 10.0)
@@ -71,9 +77,9 @@ def _snapshot_prefilter(snaps: dict, cfg: dict, zt: list[dict], limit: int) -> l
         if universe.board_of(code) in ex:
             continue
         to = s.get("turnover", 0)
-        if to < a.get("min_turnover", 1.0) or to > a.get("max_turnover", 25.0):
+        if not preopen and (to < a.get("min_turnover", 1.0) or to > a.get("max_turnover", 25.0)):
             continue
-        if s.get("amount", 0) <= 0:
+        if not preopen and s.get("amount", 0) <= 0:
             continue
         mv = s.get("float_mv", 0) / 1e8
         if mv > mv_mid:
@@ -138,8 +144,14 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
 
         # ---- 决策链 ----
         _prog("评估宏观/量能/情绪…", 0, 100)
+        sess = trading.market_session()
+        preopen = sess["phase"] in ("pre_open", "auction", "rest")
         macro = engine.evaluate_macro(cfg)
-        volume = engine.evaluate_volume(cfg, amount, hist)
+        amt_yi = amount / 1e8 if amount > 1e5 else amount
+        volume = engine.evaluate_volume(cfg, amount, hist, session=sess,
+                                        fallback_amount=ds.load_last_complete_amount(real_date))
+        if sess["phase"] in ("just_closed", "after_close", "rest") and amt_yi > 0:
+            ds.save_market_amount(real_date, amt_yi)
         sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth)
 
         # ---- 选股 ----
@@ -156,14 +168,15 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             # 当日首扫：把真实标的名单落盘，同日重扫少发 ~8 倍请求
             ds.save_valid_codes(sorted(snaps))
         _prog(f"粗筛候选（已扫 {len(snaps)} 只）…", 0, 100)
-        pre = _snapshot_prefilter(snaps, cfg, zt, kline_limit)
+        pre = _snapshot_prefilter(snaps, cfg, zt, kline_limit, preopen=preopen)
         _prog(f"拉取 {len(pre)} 只K线…", 0, len(pre))
         kl = ds.fetch_klines(pre, n=70, workers=24,
                              progress=lambda d, t: _prog(
                                  f"拉取K线 {d}/{t}…", d, t))
         _prog("打分选股…", 0, 100)
         picks = engine.screen(cfg, {c: snaps[c] for c in kl if c in snaps}, kl,
-                              zt, macro, volume, sentiment, top_n=top_n)
+                              zt, macro, volume, sentiment, top_n=top_n,
+                              preopen=preopen)
 
         # ---- 买卖点 ----
         for p in picks:
@@ -189,7 +202,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 "date": real_date,
                 "requested_date": date,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "session": trading.market_session(),
+                "session": sess,
                 "preset": cfg.get("preset"),
                 "preset_name": cfg.get("name", ""),
                 "elapsed": round(time.time() - t0, 1),

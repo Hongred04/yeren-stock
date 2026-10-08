@@ -58,9 +58,23 @@ def market_session(now: datetime | None = None) -> dict:
         phase, label = "just_closed", "刚收盘"
     else:
         phase, label = "after_close", "盘后"
+    # 当日已交易分钟数（9:30 起算、剔除午休，0..240）—— 量能日内折算用
+    if phase == "morning":
+        tmin = t - 930
+    elif phase == "noon":
+        tmin = 120
+    elif phase == "afternoon":
+        tmin = 120 + (t - 1300)
+    elif phase == "tail":
+        tmin = min(240, 180 + (t - 1400))
+    elif phase in ("just_closed", "after_close"):
+        tmin = 240
+    else:
+        tmin = 0
     return {
         "phase": phase,
         "label": label,
+        "tmin": tmin,
         "in_tail": phase == "tail",
         "after_hours": phase in ("rest", "just_closed", "after_close"),
         "is_trade_day": phase != "rest",
@@ -126,8 +140,13 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         }]
 
     # B1 首板试错：处于首板且情绪非退潮
-    at_limit = stock.get("pct", 0) >= thr or stock.get("zt_boards", 0) >= 1
     sess = market_session()
+    premarket = sess["phase"] in ("pre_open", "auction", "rest")
+    # 盘前/竞价/休市时当日涨停还没发生，涨停池里的 boards 是上一交易
+    # 日的 —— 只按实时涨幅判"今日已涨停"，否则盘前满屏假"涨停不追"
+    at_limit = (stock.get("pct", 0) >= thr
+                or (stock.get("zt_boards", 0) >= 1 and not premarket))
+    open_prefix = "今日" if premarket else "次日"
     if stock.get("zt_boards", 0) == 1 and sentiment.get("stage") in ("probe", "follow"):
         note = "新周期一定是首板，二板还属于老周期"
         if at_limit:
@@ -136,7 +155,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "type": "B1", "name": "首板试错",
             "priority": "A",
             "trigger": f"新周期首板，{stock.get('sector','题材内')}启动信号",
-            "entry": f"次日开盘不追高，回踩不破 {close*0.98:.2f} 介入；或竞价小幅低开介入",
+            "entry": f"{open_prefix}开盘不追高，回踩不破 {close*0.98:.2f} 介入；或竞价小幅低开介入",
             "stop": f"跌破首板最低价 {low_of(bars[-1])*0.98:.2f} 止损（试错失败只损失一笔很小的资金）",
             "target": "看二板，三板以上看龙头溢价",
             "position": "单票试错仓位，不超过总资金20%",
