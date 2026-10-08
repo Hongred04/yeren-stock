@@ -30,6 +30,10 @@ EM_FASTNEWS = ("https://np-listapi.eastmoney.com/comm/web/getFastNewsList"
 # 新浪滚动财经（标准新闻流）：比 7x24 快讯留存久得多，部委政策类标题覆盖好
 SINA_ROLL = ("https://feed.mix.sina.com.cn/api/roll/get?"
              "pageid=153&lid=2516&num={n}&page={page}")
+# 央视新闻「中国」频道（jsonp 接口，80条/页）：部委联合发文类报道覆盖好，
+# 关键信息常在摘要（brief）里而非标题 —— title+brief 拼接参与匹配
+CCTV_PAGE = ("https://news.cctv.com/2019/07/gaiban/cmsdatainterface/page/"
+             "china_{page}.jsonp?cb=news")
 
 
 def _news_from_sina(n: int, page: int = 1) -> list[dict]:
@@ -92,6 +96,31 @@ def _news_from_sina_roll(n: int, page: int = 1) -> list[dict]:
     return out
 
 
+def _news_from_cctv(n: int, page: int = 1) -> list[dict]:
+    """央视新闻「中国」频道。text = 标题 + 摘要（部委发文的关键词常在
+    摘要里，如「工信部等七部门印发《新型电池产业发展十五五规划》」
+    这条，标题只提产业规模、定级全靠摘要）。"""
+    url = CCTV_PAGE.format(page=page)
+    raw = ds._get(url, timeout=10, referer="https://news.cctv.com/china/").decode(
+        "utf-8", errors="ignore")
+    body = raw[raw.index("(") + 1: raw.rindex(")")]
+    lst = ((json.loads(body).get("data") or {}).get("list")) or []
+    out = []
+    for it in lst:
+        title = (it.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            tstr = datetime.strptime(str(it.get("focus_date"))[:19],
+                                     "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            continue   # 无可靠时间的条目不收，避免污染定级窗口
+        brief = (it.get("brief") or "").strip()
+        text = f"{title}。{brief[:80]}" if brief else title
+        out.append({"time": tstr, "text": text, "tags": [], "source": "央视新闻"})
+    return out[:n]
+
+
 def _news_from_em(n: int) -> list[dict]:
     url = EM_FASTNEWS.format(n=min(n, 50), ts=int(datetime.now().timestamp() * 1000))
     raw = ds._get(url, timeout=10, referer="https://kuaixun.eastmoney.com/").decode(
@@ -110,14 +139,14 @@ def _news_from_em(n: int) -> list[dict]:
     return out
 
 
-def fetch_news(n: int = 650) -> list[dict]:
-    """近 N 条快讯/新闻。四源多页合并去重（按正文），时间倒序，5 分钟缓存。
+def fetch_news(n: int = 950) -> list[dict]:
+    """近 N 条快讯/新闻。五源多页合并去重（按正文），时间倒序，5 分钟缓存。
 
     旧版「取到第一个源就返回」且只拉第一页 80 条 —— 热闹时段只覆盖一两个
     小时，隔夜部委政策（如工信部印发产业规划）早被挤出窗口，S1 因此漏定级。
     现在新浪7x24两页 + 新浪滚动八页（实测第5页回溯到昨日下午、第8页到前日
-    晚上，配合交易日窗口覆盖假期）+ 同花顺两页 + 东财一页全部合并；
-    单源失败只丢该源，stderr 留痕便于排查。
+    晚上，配合交易日窗口覆盖假期）+ 央视新闻两页 + 同花顺两页 + 东财一页
+    全部合并；单源失败只丢该源，stderr 留痕便于排查。
     """
     def producer():
         merged: dict[str, dict] = {}
@@ -133,6 +162,12 @@ def fetch_news(n: int = 650) -> list[dict]:
                     merged.setdefault(it["text"], it)
             except Exception as e:
                 print(f"[news] 新浪滚动 第{pg}页抓取失败: {e}", file=sys.stderr)
+        for pg in (1, 2):
+            try:
+                for it in _news_from_cctv(80, pg):
+                    merged.setdefault(it["text"], it)
+            except Exception as e:
+                print(f"[news] 央视新闻 第{pg}页抓取失败: {e}", file=sys.stderr)
         for pg in (1, 2):
             try:
                 for it in _news_from_ths(50, pg):
