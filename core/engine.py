@@ -468,6 +468,101 @@ def _price_mv_score(snap: dict, cfg_a: dict) -> tuple[float, list[str], list[str
     return min(score, 1.0), reasons, warns
 
 
+def _vr_tags(snap: dict) -> tuple[list[str], list[str]]:
+    """量比标签：≥2.0 放量 / <0.8 缩量。不参与打分，只做提示。"""
+    vr = snap.get("volume_ratio")
+    if vr is None or vr <= 0:
+        return [], []
+    if vr >= 2.0:
+        return [f"量比 {vr:.2f}，显著放量"], []
+    if vr < 0.8:
+        return [], [f"量比 {vr:.2f}，量能偏冷（缩量）"]
+    return [], []
+
+
+def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
+              zt: list[dict], preopen: bool = False) -> dict:
+    """对**单只**股票按候选股同一套口径打分，并列出「它为什么没进今天的候选」。
+
+    用于自选 / 持仓里点开一只不在当日候选名单里的股票 —— 让「点不开」变成
+    「能打开，而且知道差在哪」。只负责打分与过滤判定，买卖点由 pipeline 附加。
+    """
+    a = cfg.get("M4_aesthetic", {})
+    zt_map = {r["code"]: r for r in zt}
+    rec = zt_map.get(code, {})
+    bars = bars or []
+
+    g, gdetail, greasons = _graph_score(bars, code, a) if bars else (0.0, {}, [])
+    p_sc, preasons, pwarns = _price_mv_score(snap, a)
+    i_sc, ireasons = _imagination_score(snap, bars, zt_map)
+
+    wg = a.get("weight_graph", 35)
+    wp = a.get("weight_price_mv", 30)
+    wi = a.get("weight_imagination", 35)
+    wsum = max(wg + wp + wi, 1)
+    total = (g * wg + p_sc * wp + i_sc * wi) / wsum
+
+    reasons = list(greasons) + list(preasons) + list(ireasons)
+    warns = list(pwarns)
+    vr_r, vr_w = _vr_tags(snap)
+    reasons += vr_r
+    warns += vr_w
+
+    # 逐条复现 screen() 里的 continue 条件 —— 这就是「为什么没进候选」的答案
+    filters: list[str] = []
+    name = snap.get("name", "") or ""
+    to = snap.get("turnover", 0) or 0
+    if not a.get("enabled", True):
+        filters.append("M4 审美三要素已关闭，今天不选股")
+    if a.get("exclude_st", True) and ("ST" in name.upper() or "退" in name):
+        filters.append("名字含 ST / 退，被排除")
+    bd = universe.board_of(code)
+    if bd in set(a.get("exclude_boards", [])):
+        filters.append(f"{bd}板块被排除")
+    if len(bars) < 25:
+        filters.append(f"日K线不足 25 根（只有 {len(bars)} 根），判不了形态")
+    else:
+        if not preopen:
+            lo, hi = a.get("min_turnover", 1.0), a.get("max_turnover", 25.0)
+            if to < lo:
+                filters.append(f"换手 {to:.2f}% 低于下限 {lo}%")
+            elif to > hi:
+                filters.append(f"换手 {to:.2f}% 高于上限 {hi}%")
+            if snap.get("amount", 0) <= 0:
+                filters.append("当日无成交额（停牌或一字未开板）")
+        if a.get("need_bull_ma") and not gdetail.get("ma_aligned"):
+            filters.append("未形成均线多头排列（策略要求必须多头）")
+
+    return {
+        "code": code,
+        "name": name,
+        "board": bd,
+        "price": snap.get("price", 0),
+        "pct": snap.get("pct", 0),
+        "turnover": to,
+        "float_mv": snap.get("float_mv", 0) / 1e8,
+        "amount": snap.get("amount", 0),
+        "volume_ratio": snap.get("volume_ratio"),
+        "avg_price": snap.get("avg_price"),
+        "pe": snap.get("pe"),
+        "amplitude": snap.get("amplitude"),
+        "score": round(total * 100, 1),
+        "scores": {
+            "graph": round(g * 100, 1),
+            "price_mv": round(p_sc * 100, 1),
+            "imagination": round(i_sc * 100, 1),
+        },
+        "graph_detail": gdetail,
+        "reasons": reasons,
+        "warnings": warns,
+        "in_zt": code in zt_map,
+        "zt_boards": rec.get("boards", 0),
+        "sector": rec.get("sector", ""),
+        "filters": filters,          # 非空 = 今天进不了候选，原因在此
+        "in_pick": False,
+    }
+
+
 def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
            zt: list[dict], macro: dict, volume: dict, sentiment: dict,
            top_n: int = 20, progress=None, preopen: bool = False) -> list[dict]:
@@ -536,12 +631,9 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
 
         # 量比：当日放量程度 —— 短线最直接的确认信号。不参与打分（避免动选股口径），
         # 只作为理由/警示呈现，详情页也会单独显示。
-        vr = snap.get("volume_ratio")
-        if vr is not None and vr > 0:
-            if vr >= 2.0:
-                reasons = reasons + [f"量比 {vr:.2f}，显著放量"]
-            elif vr < 0.8:
-                warns = warns + [f"量比 {vr:.2f}，量能偏冷（缩量）"]
+        vr_r, vr_w = _vr_tags(snap)
+        reasons = reasons + vr_r
+        warns = warns + vr_w
 
         results.append({
             "code": code,

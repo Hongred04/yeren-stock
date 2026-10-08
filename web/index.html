@@ -677,7 +677,7 @@ function go(page){
   try{ localStorage.setItem('stockPage',page); }catch(e){}
   // 隐藏时 clientWidth=0，切回选股页要重画K线
   if(page==='pick-list' && SEL && REPORT){
-    const q=(REPORT.picks||[]).find(x=>x.code===SEL);
+    const q=pickByCode(SEL)||DETAILS[SEL];
     if(q) requestAnimationFrame(()=>drawK(q));
   }
   window.scrollTo(0,0);
@@ -981,7 +981,7 @@ function render(){
 
   /* ── 涨停池 ── */
   const zp=REPORT.limit_up_pool||[];
-  $('ztHint').textContent='共 '+zp.length+' 只 · 点行查看详情（仅候选股有详情）';
+  $('ztHint').textContent='共 '+zp.length+' 只 · 点任意一行看详情';
   $('ztBody').innerHTML=zp.map(z=>
     `<tr data-c="${z.code}"><td><b>${esc(z.name)}</b> <span class="fl" style="font-size:11.5px">${z.code}</span></td>
       <td class="num">${z.boards?`<span class="pill red">${z.boards}板</span>`:'<span class="pill gry">首板</span>'}</td>
@@ -989,8 +989,7 @@ function render(){
       <td class="num">${f2(z.turnover,1)}%</td><td class="num">${f2(z.float_mv/1e8,1)}亿</td>
       <td class="fl">${esc(z.sector||'—')}</td><td class="fl">${fbt(z.first_time)}</td></tr>`).join('');
   document.querySelectorAll('#ztBody tr[data-c]').forEach(tr=>
-    tr.onclick=()=>{const p=REPORT.picks.find(x=>x.code===tr.dataset.c);
-      if(p)showDetail(tr.dataset.c);});
+    tr.onclick=()=>showDetail(tr.dataset.c));
 
   if(SEL) showDetail(SEL);
   if(!$('tabs').classList.contains('hide')) renderSub();
@@ -1010,13 +1009,52 @@ function fbt(v){
 }
 
 // ── 详情 ──
-function showDetail(code,tr){
-  const p=REPORT.picks.find(x=>x.code===code);
-  if(!p) return;
+// 自选 / 持仓 / 涨停池里的股票大多不在当日候选名单里，不能只查 REPORT.picks。
+// 查不到就按代码向后端要一份「同口径体检结果」，并缓存起来避免重复请求。
+const DETAILS={};
+function pickByCode(code){ return (REPORT.picks||[]).find(x=>x.code===code); }
+async function resolveStock(code){
+  const hit=pickByCode(code);
+  if(hit) return hit;
+  if(DETAILS[code]) return DETAILS[code];
+  if(DETAILS['!'+code]) return null;
+  try{
+    const r=await fetch('/api/stock?code='+encodeURIComponent(code),{cache:'no-store'});
+    const j=await r.json();
+    if(j && j.ok && j.stock){ DETAILS[code]=j.stock; return j.stock; }
+    DETAILS['!'+code]=j.error||'没取到该股详情';
+  }catch(e){ DETAILS['!'+code]='请求失败：'+e.message; }
+  return null;
+}
+
+async function showDetail(code,tr){
   if(CUR!=='pick-list') go('pick-list');   // 详情在选股页，自动跳过去
   SEL=code;
   document.querySelectorAll('#pickBody tr').forEach(x=>x.classList.remove('sel'));
   if(tr) tr.classList.add('sel');
+
+  const box=$('detail');
+  if(!pickByCode(code)){      // 非候选股：先给个加载态，别让用户以为点空了
+    box.innerHTML=`<div class="detail"><div class="dh"><span class="nm">${esc(code)}</span>
+      <span class="sp"></span><span class="close">×</span></div>
+      <div class="fl" style="font-size:13px;padding:18px 0;text-align:center">
+        正在拉取行情与K线…</div></div>`;
+    box.querySelector('.close').onclick=()=>{ SEL=null; box.innerHTML=''; };
+  }
+  const p=await resolveStock(code);
+  if(SEL!==code) return;                       // 期间用户又点了别的股票
+  if(!p){
+    box.innerHTML=`<div class="detail"><div class="dh"><span class="nm">${esc(code)}</span>
+      <span class="sp"></span><span class="close">×</span></div>
+      <div style="font-size:13px;color:var(--org);line-height:1.8;padding:6px 0">
+        ${esc(DETAILS['!'+code]||'没取到该股详情')}</div></div>`;
+    box.querySelector('.close').onclick=()=>{ SEL=null; box.innerHTML=''; };
+    return;
+  }
+  renderDetail(p);
+}
+
+function renderDetail(p){
   const g=p.graph_detail, cfg=CONFIG.M4_aesthetic;
   const blocked=!p.tradable;
   const buy=(p.buy_signals||[])[0];
@@ -1076,6 +1114,18 @@ function showDetail(code,tr){
     <div class="ln">${(fs.evidence||[]).map(e=>esc(e)).join('<br>')}</div>
     <div class="ln fl" style="margin-top:5px">速度即分类：同样五个板，游资一周走完吃情绪溢价，机构一月走完吃波段收益</div></div>`:'';
 
+  // 非候选股（自选/持仓/涨停池点进来的）：说清它跟今天候选的关系
+  const filters=p.filters||[];
+  const notPickHtml=(p.in_pick===false)?`<div class="card" style="margin-bottom:14px;
+      border-left:4px solid var(--org);background:#fffdf8">
+    <div style="font-size:13.5px;font-weight:800;color:var(--org);margin-bottom:6px">
+      这不是今天的候选股 —— 下面是按候选股同一套标准给它做的体检</div>
+    <div style="font-size:12.5px;color:var(--tx2);line-height:1.85">
+      按当前策略它值 <b>${p.score}</b> 分。${filters.length
+        ? '今天进不了候选，被这些硬条件挡下：<b>'+filters.map(esc).join('；')+'</b>'
+        : '没有被硬条件挡下，只是总分没排进候选名单。'}</div>
+  </div>`:'';
+
   $('detail').innerHTML=`<div class="detail">
     <div class="dh"><span class="nm">${esc(p.name)}</span><span class="cd">${p.code}</span>
       <span class="pill gry">${p.board}</span>
@@ -1084,8 +1134,11 @@ function showDetail(code,tr){
       ${(p.lhb_tags||[]).map(t=>`<span class="pill red">龙虎榜·${esc(t)}</span>`).join('')}
       <span class="sp"></span>
       <span class="sc" style="font-size:24px;color:${p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score}</span>
-      <span class="fl" style="font-size:12.5px">综合评分</span>
+      <span class="fl" style="font-size:12.5px">综合评分${
+        p.in_pick===false?'<br><span style="font-size:11px">（非今日候选）</span>':''}</span>
       <span class="close" title="关闭">×</span></div>
+
+    ${notPickHtml}
 
     ${planHtml}
 
@@ -1168,7 +1221,7 @@ function bindDetailBtns(p){
 }
 function syncDetailBtns(){
   if(!SEL || !REPORT) return;
-  const p=(REPORT.picks||[]).find(x=>x.code===SEL); if(!p) return;
+  const p=pickByCode(SEL)||DETAILS[SEL]; if(!p) return;
   const box=$('detail') && $('detail').querySelector('#dActions'); if(!box) return;
   box.innerHTML=detailBtnsHtml(p)
     +'<span class="fl" style="font-size:11.5px">记入后系统用同一套卖出信号帮你盯着</span>';
@@ -1384,8 +1437,7 @@ function renderPort(){
           <tbody>${rows}</tbody></table></div>
         <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(p.note||'')}</div>`;
     }
-    hp.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>{
-      const q=REPORT.picks.find(x=>x.code===tr.dataset.c); if(q)showDetail(tr.dataset.c); else openPort();});
+    hp.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>showDetail(tr.dataset.c));
   }
 
   if(wp){
@@ -1402,10 +1454,9 @@ function renderPort(){
       </tr>`).join('');
       wp.innerHTML=`<div class="tbl"><table><thead><tr><th>自选股</th><th class="num">现价</th>
         <th class="num">今日</th><th>状态</th></tr></thead><tbody>${chips}</tbody></table></div>
-        <div class="fl" style="font-size:11.5px;margin-top:8px">点任意一行看详情（仅当天入选候选股的才有）</div>`;
+        <div class="fl" style="font-size:11.5px;margin-top:8px">点任意一行看详情（不在今日候选里的也能看，会按同一套标准给它打分）</div>`;
     }
-    wp.querySelectorAll('tr[data-w]').forEach(tr=>tr.onclick=()=>{
-      const q=REPORT.picks.find(x=>x.code===tr.dataset.w); if(q)showDetail(q.code);});
+    wp.querySelectorAll('tr[data-w]').forEach(tr=>tr.onclick=()=>showDetail(tr.dataset.w));
   }
 }
 
@@ -1723,7 +1774,8 @@ $('btnReset').onclick=async()=>{ if(!confirm('恢复当前策略的默认参数�
   const p=CONFIG.preset||'wildman';
   await fetch('/api/preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({preset:p})});
   $('panel').classList.remove('on');$('mask').classList.remove('on'); load(true); };
-window.addEventListener('resize',()=>{ if(SEL&&CUR==='pick-list') drawK(REPORT.picks.find(x=>x.code===SEL)); });
+window.addEventListener('resize',()=>{ if(SEL&&CUR==='pick-list'){
+  const q=pickByCode(SEL)||DETAILS[SEL]; if(q) drawK(q); } });
 
 load();
 </script>

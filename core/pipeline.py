@@ -2,12 +2,14 @@
 """分析管线：编排数据 → 策略判定 → 选股 → 买卖点，输出统一 JSON。"""
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
 
 from . import datasource as ds
 from . import engine
+from . import fundstyle
 from . import lhb as lhb_mod
 from . import mainline
 from . import moneyflow as flow_mod
@@ -58,6 +60,57 @@ def invalidate():
     """使结果缓存失效。"""
     global _result_ts
     _result_ts = 0
+
+
+# ---------------------------------------------------------------- 单只股票详情
+# 自选 / 持仓里点开一只股票时用。它多半不在当日候选名单里，所以不能靠报告里的
+# picks —— 这里现拉该股快照 + K线，按与候选股**完全相同**的口径打分，
+# 并把它为什么没进候选逐条列出来。
+
+_CODE_RE = re.compile(r"^(sh|sz|bj)\d{6}$")
+
+
+def stock_detail(code: str) -> dict:
+    """单只股票完整详情。返回 {ok, stock, error}。"""
+    code = (code or "").strip().lower()
+    if not _CODE_RE.match(code):
+        return {"ok": False, "error": f"代码格式不对：{code or '(空)'}"
+                                       "（应为 sh600519 / sz000001 / bj430047）"}
+
+    cfg = sc.load_config()
+    try:
+        snaps = ds.fetch_snapshots([code], batch=1, workers=1)
+    except Exception as e:
+        return {"ok": False, "error": f"取行情失败：{type(e).__name__}"}
+    snap = snaps.get(code)
+    if not snap:
+        return {"ok": False, "error": f"没取到 {code} 的行情（代码可能不存在或已退市）"}
+
+    try:
+        kl = ds.fetch_klines([code], n=70, workers=1)
+    except Exception:
+        kl = {}
+    bars = kl.get(code) or []
+
+    zt = ds.fetch_limit_up_pool()
+    sess = trading.market_session()
+    preopen = sess["phase"] in ("pre_open", "auction", "rest")
+    cached = get_cached() or {}
+    sentiment = cached.get("sentiment") or {"can_trade": True}
+    volume = cached.get("volume") or {"mode": "unknown"}
+
+    p = engine.score_one(cfg, code, snap, bars, zt, preopen=preopen)
+    p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
+    p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
+    p["kline_tail"] = bars[-30:]
+    p["tradable"] = bool(sentiment.get("can_trade", True)) and volume.get("mode") != "dry"
+    p["block_note"] = ""
+    if not p["tradable"]:
+        p["block_note"] = ("情绪退潮期，今天不新开仓" if not sentiment.get("can_trade", True)
+                           else "量能极度萎缩，今天不新开仓")
+    if cfg.get("M10_fundstyle", {}).get("enabled", True) and bars:
+        p["fund_style"] = fundstyle.classify(bars, code, p.get("float_mv", 0.0), cfg)
+    return {"ok": True, "stock": p, "date": datetime.now().strftime("%Y-%m-%d")}
 
 
 def _snapshot_prefilter(snaps: dict, cfg: dict, zt: list[dict], limit: int,
