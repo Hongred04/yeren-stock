@@ -12,6 +12,7 @@ from . import mainline
 from . import strategy_config as sc
 from . import trading
 from . import universe
+from .version import APP_VERSION
 
 _lock = threading.Lock()          # 仅保护结果缓存的读写
 _compute_lock = threading.Lock()  # 防止重复计算（后台任务串行）
@@ -177,6 +178,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
 
         report = {
             "meta": {
+                "version": APP_VERSION,
                 "date": real_date,
                 "requested_date": date,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

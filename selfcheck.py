@@ -14,6 +14,7 @@ from core import mainline
 from core import strategy_config as sc
 from core import trading
 from core import universe
+from core.version import APP_VERSION
 
 
 def main(date: str = "", preset: str = "wildman", top: int = 12):
@@ -24,7 +25,7 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     t0 = time.time()
     date = date or ds.last_trade_date()
     print("=" * 78)
-    print(f"  智能股票监控系统 · 自检报告   数据日期 {date}   策略 {cfg['preset']}")
+    print(f"  智能股票监控系统 v{APP_VERSION} · 自检报告   数据日期 {date}   策略 {cfg['preset']}")
     print("=" * 78)
 
     zt = ds.fetch_limit_up_pool(date)

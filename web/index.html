@@ -269,6 +269,7 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <div class="logo"><span class="dot"></span>股票监控</div>
     <div class="tag">策略 <b id="hdPreset">—</b></div>
     <div class="tag">日期 <b id="hdDate">—</b></div>
+    <div class="tag">版本 <b id="hdVer">—</b></div>
     <div class="tag" id="hdTime">—</div>
     <div class="sp"></div>
     <button class="btn2" id="btnPanel">调策略</button>
@@ -520,6 +521,7 @@ function render(){
 
   $('hdPreset').textContent=(CONFIG.name||m.preset_name||m.preset);
   $('hdDate').textContent=m.date;
+  $('hdVer').textContent='v'+(m.version||'?');
   const ses=m.session;
   $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')+'扫描'+m.scanned+'只 · 耗时'+m.elapsed+'秒';
 
