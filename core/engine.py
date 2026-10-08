@@ -218,7 +218,16 @@ SENTIMENT_STAGES = {
 
 def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
                        broken: list[dict], zt_hist: list[dict]) -> dict:
-    """M3 情绪周期定进退时点 —— 决定「能不能出手」。"""
+    """M3 情绪周期定进退时点 —— 决定「能不能出手」。
+
+    退潮期判定严格按「全能的野人」9月28日视频原话口径，四个现象
+    任一成立即判退潮，不做任何额外加固：
+      ① 亏钱效应扩散：亏钱面积（跌停+炸板占三分池比例）≥ 30%
+      ② 中位股成排跌停：跌停/涨停 ≥ 0.15
+      ③ A字杀不反包：炸板/涨停 ≥ 0.50
+      ④ 高度标的被闷杀：跌停 ≥ 5 只
+    判定成立 → 无条件清仓，停止一切低吸和打板，管住手。
+    """
     s = cfg.get("M3_sentiment", {})
     n_zt = len(limit_up)
     n_dt = len(limit_down)
@@ -235,27 +244,17 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
     total = n_zt + n_dt + n_zb
     hurt_area = (n_dt + n_zb) / total if total else 0.0
 
-    # 退潮四要素（用户的量化定义）
-    structural = []   # 结构信号：闷杀/A字杀/中位股跌停
-    area_signal = []  # 面积信号：亏钱效应扩散
-
-    if hurt_area >= hurt_ratio:
-        area_signal.append(f"亏钱效应扩散 {hurt_area*100:.0f}% ≥ {hurt_ratio*100:.0f}%")
+    signals = []
+    if total and hurt_area >= hurt_ratio:
+        signals.append(f"亏钱效应扩散 {hurt_area*100:.0f}% ≥ {hurt_ratio*100:.0f}%")
     if n_zt and n_dt / n_zt >= dt_ratio_th:
-        structural.append(f"跌停/涨停比 {n_dt/n_zt:.2f} ≥ {dt_ratio_th}（中位股成排跌停）")
+        signals.append(f"中位股成排跌停：跌停/涨停比 {n_dt/n_zt:.2f} ≥ {dt_ratio_th}")
     if n_zt and n_zb / n_zt >= zb_ratio_th:
-        structural.append(f"炸板/涨停比 {n_zb/n_zt:.2f} ≥ {zb_ratio_th}（A字杀不反包）")
+        signals.append(f"A字杀不反包：炸板/涨停比 {n_zb/n_zt:.2f} ≥ {zb_ratio_th}")
     if n_dt >= 5:
-        structural.append(f"高度标的被闷杀 {n_dt} 只")
-    # 封板率崩塌 = 高位票接不住
-    seal = n_zt / (n_zt + n_zb) if (n_zt + n_zb) else 0
-    if n_zt + n_zb >= 10 and seal < 0.55:
-        structural.append(f"封板率仅 {seal*100:.0f}%，资金接力意愿下滑")
+        signals.append(f"高度标的被闷杀 {n_dt} 只")
 
-    # 判定：必须同时满足「亏钱面积达标」+「至少一条结构信号」才认定退潮，
-    # 避免单日节前效应被误判为周期退潮。
-    is_ebb = bool(area_signal) and len(structural) >= 1
-    signals = area_signal + structural
+    is_ebb = bool(signals)
 
     # 最高连板（龙头高度）
     max_boards = max((r.get("boards", 1) for r in limit_up), default=0)
@@ -268,30 +267,13 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
     elif n_zt > 0 and max_boards <= probe:
         stage = "probe"
     elif n_zt == 0:
-        stage = "ebb" if n_dt > 5 else "unknown"
+        stage = "unknown"
     else:
         stage = "follow"
 
-    # 阶段判定的补充逻辑：连续涨停家数下滑
-    trend = ""
-    if len(zt_hist) >= 3:
-        recent3 = [x["limit_up"] for x in zt_hist[-3:]]
-        if len(recent3) == 3:
-            if recent3[0] > recent3[1] > recent3[2] and recent3[2] < recent3[0] * 0.6:
-                trend = "涨停家数连续萎缩，情绪走弱"
-                if stage in ("climax", "follow") and n_zt < 40:
-                    stage = "ebb"
-                    signals.append(trend)
-
     can_trade = stage != "ebb" or not s.get("clear_on_ebb", True)
 
-    # 接近退潮的预警（面积未达标但结构已坏）
-    warn = ""
-    if stage != "ebb" and len(structural) >= 2:
-        warn = ("结构信号已出现但亏钱面积未扩散到阈值 —— 处于退潮酝酿期，"
-                "降低仓位、不加新周期以外的开仓")
-    if stage == "ebb" and not area_signal:
-        warn = "结构信号恶化但面积未达标，仍按退潮处理（宁可错过，不可做错）"
+    seal = n_zt / (n_zt + n_zb) if (n_zt + n_zb) else 0
 
     return {
         "stage": stage,
@@ -299,10 +281,10 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
         "can_trade": can_trade,
         "max_boards": max_boards,
         "signals": signals,
-        "structural_signals": structural,
-        "area_signals": area_signal,
-        "warn": warn,
-        "trend": trend,
+        "structural_signals": [],
+        "area_signals": [],
+        "warn": "",
+        "trend": "",
         "note": ("退潮期：无条件清仓，停止一切低吸和打板，管住手" if stage == "ebb"
                  else "可按周期节奏操作"),
         "metrics": {
