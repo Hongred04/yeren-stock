@@ -614,7 +614,7 @@ function render(){
     const d2=ml.day2||{};
     if(d2.available){
       extra+=`<div class="tbl" style="margin-top:12px"><table>
-        <thead><tr><th>次日定生死（${esc(d2.yesterday_date)} 涨停池 → 今日开盘检验）</th><th class="num">数值</th></tr></thead>
+        <thead><tr><th>次日定生死（${d2.return_day?'回归基准 '+esc(d2.base_date||'')+' 该题材涨停池':esc(d2.yesterday_date||'')+' 涨停池'} → 今日检验）</th><th class="num">数值</th></tr></thead>
         <tbody>
         <tr><td>空间龙候选平均高开溢价</td>
           <td class="num">${d2.dragon_premium==null?'—':f2(d2.dragon_premium)+'%'}</td></tr>
@@ -625,7 +625,9 @@ function render(){
           <td class="num ${d2.midarmy_worst?pct(d2.midarmy_worst.pct):''}">${
             d2.midarmy_worst?esc(d2.midarmy_worst.name)+' '+f2(d2.midarmy_worst.pct)+'%':'—'}</td></tr>
         </tbody></table>
-        ${d2.theme_match?'':'<div style="font-size:12px;color:var(--tx3);margin-top:6px">昨日热点与今日主线不同属一个题材 —— 今日为新题材首日，以上数据仅供参考，主线明日验证</div>'}
+        ${d2.theme_match?'':(d2.return_day
+          ?`<div style="font-size:12px;color:var(--org);margin-top:6px">「${esc(d2.yesterday_theme||'昨日热点')}」非今日主线，但该题材近期领衔过 ${d2.times_in_window||1} 次（上次 ${esc(d2.base_date||'')}）—— 今日为<b>主线回归日</b>，上表检验基准是该题材上次领衔日的涨停池，承接今日盘中即可验证</div>`
+          :'<div style="font-size:12px;color:var(--tx3);margin-top:6px">昨日热点与今日主线不同属一个题材 —— 今日为新题材首日，以上数据仅供参考，主线明日验证</div>')}
         </div>`;
     }
     $('mlExtra').innerHTML=extra;

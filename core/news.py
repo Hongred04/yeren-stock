@@ -13,23 +13,27 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta
 
 from . import datasource as ds
 
 # ---------------------------------------------------------------- 多源抓取
 
-SINA_7X24 = ("https://zhibo.sina.com.cn/api/zhibo/feed?page=1&page_size={n}"
+SINA_7X24 = ("https://zhibo.sina.com.cn/api/zhibo/feed?page={page}&page_size={n}"
              "&zhibo_id=152&tag_id=0")
 THS_NEWS = ("https://news.10jqka.com.cn/tapp/news/push/stock/"
-            "?page=1&tag=&track=website&pagesize={n}")
+            "?page={page}&tag=&track=website&pagesize={n}")
 EM_FASTNEWS = ("https://np-listapi.eastmoney.com/comm/web/getFastNewsList"
                "?client=web&biz=web_724&fastColumn=102&sortEnd=&pageSize={n}"
                "&req_trace={ts}")
+# 新浪滚动财经（标准新闻流）：比 7x24 快讯留存久得多，部委政策类标题覆盖好
+SINA_ROLL = ("https://feed.mix.sina.com.cn/api/roll/get?"
+             "pageid=153&lid=2516&num={n}&page={page}")
 
 
-def _news_from_sina(n: int) -> list[dict]:
-    url = SINA_7X24.format(n=min(n, 100))
+def _news_from_sina(n: int, page: int = 1) -> list[dict]:
+    url = SINA_7X24.format(page=page, n=min(n, 100))
     raw = ds._get(url, timeout=10, referer="https://finance.sina.com.cn/7x24/").decode(
         "utf-8", errors="ignore")
     js = json.loads(raw)
@@ -46,8 +50,8 @@ def _news_from_sina(n: int) -> list[dict]:
     return out
 
 
-def _news_from_ths(n: int) -> list[dict]:
-    url = THS_NEWS.format(n=min(n, 50))
+def _news_from_ths(n: int, page: int = 1) -> list[dict]:
+    url = THS_NEWS.format(page=page, n=min(n, 50))
     raw = ds._get(url, timeout=10, referer="https://news.10jqka.com.cn/").decode(
         "utf-8", errors="ignore")
     js = json.loads(raw)
@@ -64,6 +68,27 @@ def _news_from_ths(n: int) -> list[dict]:
         except (TypeError, ValueError, OSError):
             pass
         out.append({"time": tstr, "text": text, "tags": [], "source": "同花顺"})
+    return out
+
+
+def _news_from_sina_roll(n: int, page: int = 1) -> list[dict]:
+    """新浪滚动财经新闻流（标题 + 时间戳）。"""
+    url = SINA_ROLL.format(n=min(n, 50), page=page)
+    raw = ds._get(url, timeout=10, referer="https://finance.sina.com.cn/roll/").decode(
+        "utf-8", errors="ignore")
+    js = json.loads(raw)
+    lst = ((js.get("result") or {}).get("data")) or []
+    out = []
+    for it in lst:
+        text = (it.get("title") or "").strip()
+        if not text:
+            continue
+        try:
+            tstr = datetime.fromtimestamp(int(it.get("ctime"))).strftime(
+                "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            tstr = (it.get("intime") or "")[:19]
+        out.append({"time": tstr, "text": text, "tags": [], "source": "新浪滚动"})
     return out
 
 
@@ -85,18 +110,42 @@ def _news_from_em(n: int) -> list[dict]:
     return out
 
 
-def fetch_news(n: int = 80) -> list[dict]:
-    """近 N 条 7x24 快讯，多源降级，按时间倒序。5 分钟缓存。"""
+def fetch_news(n: int = 650) -> list[dict]:
+    """近 N 条快讯/新闻。四源多页合并去重（按正文），时间倒序，5 分钟缓存。
+
+    旧版「取到第一个源就返回」且只拉第一页 80 条 —— 热闹时段只覆盖一两个
+    小时，隔夜部委政策（如工信部印发产业规划）早被挤出窗口，S1 因此漏定级。
+    现在新浪7x24两页 + 新浪滚动八页（实测第5页回溯到昨日下午、第8页到前日
+    晚上，配合交易日窗口覆盖假期）+ 同花顺两页 + 东财一页全部合并；
+    单源失败只丢该源，stderr 留痕便于排查。
+    """
     def producer():
-        for src in (_news_from_sina, _news_from_ths, _news_from_em):
+        merged: dict[str, dict] = {}
+        for pg in (1, 2):
             try:
-                items = src(n)
-            except Exception:
-                items = []
-            if items:
-                items.sort(key=lambda x: x["time"], reverse=True)
-                return items
-        return []
+                for it in _news_from_sina(100, pg):
+                    merged.setdefault(it["text"], it)
+            except Exception as e:
+                print(f"[news] 新浪7x24 第{pg}页抓取失败: {e}", file=sys.stderr)
+        for pg in (1, 2, 3, 4, 5, 6, 7, 8):
+            try:
+                for it in _news_from_sina_roll(50, pg):
+                    merged.setdefault(it["text"], it)
+            except Exception as e:
+                print(f"[news] 新浪滚动 第{pg}页抓取失败: {e}", file=sys.stderr)
+        for pg in (1, 2):
+            try:
+                for it in _news_from_ths(50, pg):
+                    merged.setdefault(it["text"], it)
+            except Exception as e:
+                print(f"[news] 同花顺 第{pg}页抓取失败: {e}", file=sys.stderr)
+        try:
+            for it in _news_from_em(50):
+                merged.setdefault(it["text"], it)
+        except Exception as e:
+            print(f"[news] 东财快讯抓取失败: {e}", file=sys.stderr)
+        items = sorted(merged.values(), key=lambda x: x["time"], reverse=True)
+        return items[:n]
     return ds.cached("news:flash", 300, producer)
 
 
@@ -150,7 +199,7 @@ LEVEL_RULES: list[tuple[str, list[str]]] = [
            "财政部", "金融监管总局", "能源局", "商务部", "住建部", "农业农村部",
            "国家数据局", "网信办", "民航局", "药监局", "印发", "实施方案", "行动计划",
            "指导意见", "管理条例", "试点方案", "批复", "降准", "降息", "专项债",
-           "产业规划", "规划纲要", "重磅政策"]),
+           "产业规划", "规划纲要", "十五五", "重磅政策"]),
     ("B", ["涨价", "提价", "上调价格", "价格上调", "缺货", "供不应求", "满产", "满销",
            "订单", "签约", "中标", "扩产", "投产", "量产", "出货量", "创新高", "超预期",
            "重大突破", "全球首发", "景气", "里程碑", "价格翻倍"]),
@@ -167,13 +216,20 @@ def _grade_text(text: str) -> str:
     return ""
 
 
-def grade(news: list[dict], theme_name: str, lookback_h: int = 36) -> dict:
+def grade(news: list[dict], theme_name: str, lookback_h: int = 36,
+          window_start: datetime | None = None) -> dict:
     """把快讯与主题材关联并定级。
 
-    返回 {found, level, theme_matched, scanned, window_h, evidence:[{time,text,source,level}]}
+    窗口：默认近 36 小时；window_start（上上个交易日 00:00，由 mainline 传
+    入）会更宽地展开 —— 长假/周末期间部委密集发文，开市首日的题材定级
+    必须能吃到假期消息，按自然小时算会漏。
+
+    返回 {found, level, theme_matched, scanned, window_h, since, evidence:[...]}
     """
     now = datetime.now()
     cutoff = now - timedelta(hours=lookback_h)
+    if window_start is not None:
+        cutoff = min(cutoff, window_start)
     recent = []
     for it in news:
         t = it.get("time", "")
@@ -203,9 +259,11 @@ def grade(news: list[dict], theme_name: str, lookback_h: int = 36) -> dict:
 
     if not hits:
         return {"found": False, "level": "", "theme_matched": bool(theme_name),
-                "scanned": len(recent), "window_h": lookback_h, "evidence": []}
+                "scanned": len(recent), "window_h": lookback_h,
+                "since": cutoff.strftime("%m-%d %H:%M"), "evidence": []}
     top = hits[0]["level"]
     return {"found": True, "level": top, "theme_matched": True,
             "scanned": len(recent), "window_h": lookback_h,
+            "since": cutoff.strftime("%m-%d %H:%M"),
             "evidence": [{"time": h["time"], "text": h["text"][:80], "source": h["source"],
                           "level": h["level"]} for h in hits[:3]]}

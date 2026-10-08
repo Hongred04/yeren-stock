@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from . import datasource as ds
 from . import news as news_mod
 
@@ -87,6 +89,30 @@ def _resolve_bk(sector: str) -> str:
     return ""
 
 
+def _fmt_date(d: str) -> str:
+    """'20261002' → '10-02'。"""
+    return f"{d[4:6]}-{d[6:8]}" if len(d) == 8 else d
+
+
+def _theme_recent_history(real_date: str, lookback: int = 10) -> list[tuple[str, str]]:
+    """近 N 个已归档交易日的每日最强题材 [(date, top_sector)]，旧→新。
+
+    用涨停池本地归档按当日同口径重放聚类 —— 这是「主线回归」识别的依据：
+    题材前几天领衔过、今天二次登场，不是新题材首日。
+    """
+    out: list[tuple[str, str]] = []
+    for d in ds.pool_history_dates():
+        if real_date and d >= real_date:
+            continue
+        pool = ds.load_pool_history(d)
+        if not pool:
+            continue
+        th = _cluster_themes(pool, 103000)
+        if th:
+            out.append((d, th[0]["sector"]))
+    return out[-max(2, lookback):]
+
+
 # ---------------------------------------------------------------- 题材聚类
 
 def _cluster_themes(zt: list[dict], deadline: int) -> list[dict]:
@@ -140,8 +166,9 @@ def _signal_message(a: dict, theme_name: str = "",
         if a.get("auto_message", True) and suggestion and suggestion.get("found"):
             s_info = MESSAGE_LEVELS.get(suggestion["level"], MESSAGE_LEVELS["auto"])
             state = "pass" if s_info["gate_ok"] else "fail"
-            ev = (f"自动定级 {s_info['name']}（依据近{suggestion.get('window_h', 36)}小时"
-                  f"{suggestion.get('scanned', 0)}条快讯与主题材的关联匹配）"
+            since = suggestion.get("since") or ""
+            ev = (f"自动定级 {s_info['name']}（依据{suggestion.get('scanned', 0)}条快讯"
+                  f"与主题材的关联匹配，覆盖至 {since}）"
                   + (f"：{ev_str}" if ev_str else ""))
             detail = rules + ["自动定级按关键词规则：国家战略S → 部委政策A → 行业事件B → "
                               "个股公告C；只统计与主题材相关的快讯，如有出入请手动录入覆盖"]
@@ -337,11 +364,82 @@ def _signal_old_dragon(a: dict, real_date: str, snaps: dict[str, dict],
             "detail": detail, "dragons": movers[:8], "archive_size": len(archive)}
 
 
+def _trio_checks(base_pool: list[dict], snaps: dict[str, dict],
+                 today_zt: dict[str, dict], mv_min: float, prem_min: float,
+                 surv_min: float, surv_pct: float, fb_max: float) -> dict:
+    """三项次日检验（空间龙溢价 / 首板留存 / 中军反馈）。
+
+    base_pool 为基准日涨停池：昨日全池，或主线回归时该题材上次领衔日的池。
+    """
+    # ① 空间龙候选高溢价：基准日最高连板（≥2板）前5，今日平均高开幅度
+    cands = sorted([r for r in base_pool if _int(r.get("boards"), 1) >= 2],
+                   key=lambda r: -_int(r.get("boards"), 1))[:5]
+    premiums: list[float] = []
+    cand_rows = []
+    for r in cands:
+        snap = snaps.get(r.get("code", ""))
+        if not snap or not snap.get("prev_close"):
+            continue
+        prem = (snap["open"] - snap["prev_close"]) / snap["prev_close"] * 100
+        premiums.append(prem)
+        cand_rows.append({"code": r.get("code", ""), "name": r.get("name", ""),
+                          "boards": _int(r.get("boards"), 1),
+                          "premium": round(prem, 2), "promoted": r.get("code") in today_zt,
+                          "now_pct": _float(snap.get("pct"))})
+    avg_prem = sum(premiums) / len(premiums) if premiums else None
+    prem_ok = avg_prem is not None and avg_prem >= prem_min
+
+    # ② 首板活口留存率：今日再涨停或涨幅达标
+    fb = [r for r in base_pool if _int(r.get("boards"), 1) <= 1]
+    alive = 0
+    for r in fb:
+        snap = snaps.get(r.get("code", ""))
+        if r.get("code") in today_zt or (snap and _float(snap.get("pct")) >= surv_pct):
+            alive += 1
+    surv_rate = (alive / len(fb)) if fb else None
+    surv_ok = surv_rate is not None and surv_rate >= surv_min
+
+    # ③ 中军无负反馈：基准日百亿大票今日最弱表现不破线
+    army = [r for r in base_pool if _float(r.get("float_mv")) / 1e8 >= mv_min]
+    worst: tuple[str, float] | None = None
+    for r in army:
+        snap = snaps.get(r.get("code", ""))
+        if not snap:
+            continue
+        p = _float(snap.get("pct"))
+        if worst is None or p < worst[1]:
+            worst = (r.get("name", ""), p)
+    army_ok = worst is None or worst[1] >= fb_max
+
+    parts = []
+    if avg_prem is not None:
+        parts.append(f"空间龙平均高开 {avg_prem:+.1f}%（线 {prem_min:.0f}%）"
+                     f"{'✓' if prem_ok else '✗'}")
+    if surv_rate is not None:
+        parts.append(f"首板留存 {surv_rate * 100:.0f}%（线 {surv_min * 100:.0f}%）"
+                     f"{'✓' if surv_ok else '✗'}")
+    if worst is not None:
+        parts.append(f"中军最弱 {worst[0]} {worst[1]:+.1f}%（线 {fb_max:+.0f}%）"
+                     f"{'✓' if army_ok else '✗'}")
+
+    return {"avg_prem": avg_prem, "prem_ok": prem_ok,
+            "surv_rate": surv_rate, "surv_ok": surv_ok,
+            "worst": worst, "army_ok": army_ok,
+            "fb_total": len(fb), "alive": alive,
+            "cand_rows": cand_rows, "parts": parts,
+            "any_data": avg_prem is not None or surv_rate is not None
+                        or worst is not None}
+
+
 def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
                      zt: list[dict], theme_name: str) -> tuple[dict, dict]:
-    """S5 次日定生死：昨日涨停池 → 今日开盘的三项真金白银检验。
+    """S5 次日定生死：基准日涨停池 → 今日的三项真金白银检验。
 
-    返回 (信号, day2数据)。day2.available=False 表示无昨日存档（首日/冷启动）。
+    基准日的选取（题材不是凭空来的）：
+      昨日最强题材 = 今日主线   → 基准 = 昨日全池（标准次日语径）
+      今日主线近 N 日领衔过      → 基准 = 该题材上次领衔日的池 —— 主线回归日
+                                   （二波），承接今日盘中即可检验，不必等明日
+      其他                      → 新题材首日，昨日池数据仅供参考
     """
     mv_min = _float(a.get("midarmy_mv_min"), 100.0)
     prem_min = _float(a.get("dragon_premium_min"), 3.0)
@@ -365,86 +463,82 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
         return pending(f"{ydate} 涨停池存档为空，无法做次日检验",
                        ["明日看三件事：空间龙候选高溢价、昨日首板活口留存率、中军无负反馈"])
 
-    # ① 空间龙候选高溢价：昨日最高连板（≥2板）前5，今日平均高开幅度
-    cands = sorted([r for r in yp if _int(r.get("boards"), 1) >= 2],
-                   key=lambda r: -_int(r.get("boards"), 1))[:5]
-    premiums: list[float] = []
-    cand_rows = []
-    for r in cands:
-        snap = snaps.get(r.get("code", ""))
-        if not snap or not snap.get("prev_close"):
-            continue
-        prem = (snap["open"] - snap["prev_close"]) / snap["prev_close"] * 100
-        premiums.append(prem)
-        cand_rows.append({"code": r.get("code", ""), "name": r.get("name", ""),
-                          "boards": _int(r.get("boards"), 1),
-                          "premium": round(prem, 2), "promoted": r.get("code") in today_zt,
-                          "now_pct": _float(snap.get("pct"))})
-    avg_prem = sum(premiums) / len(premiums) if premiums else None
-    prem_ok = avg_prem is not None and avg_prem >= prem_min
-
-    # ② 昨日首板活口留存率：今日再涨停或涨幅达标
-    fb = [r for r in yp if _int(r.get("boards"), 1) <= 1]
-    alive = 0
-    for r in fb:
-        snap = snaps.get(r.get("code", ""))
-        if r.get("code") in today_zt or (snap and _float(snap.get("pct")) >= surv_pct):
-            alive += 1
-    surv_rate = (alive / len(fb)) if fb else None
-    surv_ok = surv_rate is not None and surv_rate >= surv_min
-
-    # ③ 中军无负反馈：昨日百亿大票今日最弱表现不破线
-    yarmy = [r for r in yp if _float(r.get("float_mv")) / 1e8 >= mv_min]
-    worst: tuple[str, float] | None = None
-    for r in yarmy:
-        snap = snaps.get(r.get("code", ""))
-        if not snap:
-            continue
-        p = _float(snap.get("pct"))
-        if worst is None or p < worst[1]:
-            worst = (r.get("name", ""), p)
-    army_ok = worst is None or worst[1] >= fb_max
-
-    # 昨日最强题材是否就是今日主线题材
     ythemes = _cluster_themes(yp, 103000)
     ytop = ythemes[0]["sector"] if ythemes else ""
     theme_match = bool(theme_name) and ytop == theme_name
 
-    day2 = {"available": True, "yesterday_date": ydate, "yesterday_theme": ytop,
-            "theme_match": theme_match,
-            "dragon_premium": None if avg_prem is None else round(avg_prem, 2),
-            "survive_rate": None if surv_rate is None else round(surv_rate, 3),
-            "firstboard_total": len(fb), "firstboard_alive": alive,
-            "midarmy_worst": None if worst is None else {"name": worst[0], "pct": worst[1]},
-            "candidates": cand_rows}
+    # 主线回归识别：近 N 日内该题材领衔过涨停池（当过主线）
+    lookback = max(2, _int(a.get("theme_lookback_days"), 10))
+    hist = _theme_recent_history(real_date, lookback)
+    seen = [d for d, s in hist if s == theme_name]
+    return_day = bool(theme_name) and not theme_match and bool(seen)
 
-    if avg_prem is None and surv_rate is None and worst is None:
-        return pending("昨日涨停池个股今日快照缺失（停牌/代码变更），待验证",
+    base_date, base_pool = ydate, yp
+    if return_day:
+        base_date = seen[-1]
+        bp = [r for r in ds.load_pool_history(base_date)
+              if (r.get("sector") or "") == theme_name]
+        if bp:
+            base_pool = bp
+        else:   # 该日归档损坏/无该题材记录，退回昨日口径
+            base_date, base_pool = ydate, yp
+            return_day = False
+
+    t = _trio_checks(base_pool, snaps, today_zt, mv_min, prem_min,
+                     surv_min, surv_pct, fb_max)
+    if not t["any_data"]:
+        return pending("基准日涨停池个股今日快照缺失（停牌/代码变更），待验证",
                        ["主线不是当天确认的：明日开盘再看空间龙溢价、首板留存、中军反馈"])
 
-    parts = []
-    if avg_prem is not None:
-        parts.append(f"空间龙平均高开 {avg_prem:+.1f}%（线 {prem_min:.0f}%）"
-                     f"{'✓' if prem_ok else '✗'}")
-    if surv_rate is not None:
-        parts.append(f"首板留存 {surv_rate * 100:.0f}%（线 {surv_min * 100:.0f}%）"
-                     f"{'✓' if surv_ok else '✗'}")
-    if worst is not None:
-        parts.append(f"昨日中军最弱 {worst[0]} {worst[1]:+.1f}%（线 {fb_max:+.0f}%）"
-                     f"{'✓' if army_ok else '✗'}")
+    day2 = {"available": True, "yesterday_date": ydate, "yesterday_theme": ytop,
+            "theme_match": theme_match, "return_day": return_day,
+            "base_date": base_date, "times_in_window": len(seen),
+            "theme_history": [(d, s) for d, s in hist[-6:]],
+            "dragon_premium": None if t["avg_prem"] is None else round(t["avg_prem"], 2),
+            "survive_rate": None if t["surv_rate"] is None else round(t["surv_rate"], 3),
+            "firstboard_total": t["fb_total"], "firstboard_alive": t["alive"],
+            "midarmy_worst": None if t["worst"] is None else {"name": t["worst"][0],
+                                                              "pct": t["worst"][1]},
+            "candidates": t["cand_rows"]}
 
-    if not theme_match:
-        state = "pending"
-        ev = (f"今日主线「{theme_name}」与昨日热点「{ytop}」不同 —— 新题材首日，明日开盘验证")
-        detail = ["主线不是当天确认的：明日看该题材的空间龙高开溢价、首板留存、中军反馈",
-                  "（参考）昨日热点次日承接：" + ("；".join(parts) if parts else "数据不足")]
-    else:
-        ok_cnt = sum([prem_ok, surv_ok, army_ok])
+    parts = t["parts"]
+
+    if theme_match:
+        ok_cnt = sum([t["prem_ok"], t["surv_ok"], t["army_ok"]])
         state = "pass" if ok_cnt == 3 else "fail"
         ev = "；".join(parts) if parts else "数据不足"
         detail = (["三者齐备，主线地位成立 —— 空间龙高溢价、首板留得住、中军不砸盘"]
                   if state == "pass" else
                   ["三项检验未全过 —— 高开不能兑现就是坑，主线地位不成立，按一日游处理"])
+    elif return_day:
+        present = [x for x in (t["avg_prem"], t["surv_rate"], t["worst"])
+                   if x is not None]
+        ok_cnt = sum([t["prem_ok"], t["surv_ok"], t["army_ok"]])
+        base_txt = f"基准 {_fmt_date(base_date)} 该题材涨停池"
+        if len(present) >= 2 and ok_cnt == len(present):
+            state = "pass"
+            ev = (f"主线回归承接成立（{base_txt}，近{lookback}日第{len(seen)}次登场）："
+                  + "；".join(parts))
+            detail = ["回归日的检验基准是「该题材上次领衔日」的涨停池，不是昨日热点",
+                      "三项齐备 = 二波承接成立，按主线节奏对待；老龙/中军高位注意随时切换口径"]
+        elif len(present) >= 2:
+            state = "fail"
+            ev = (f"主线回归承接不成立（{base_txt}）：" + "；".join(parts)
+                  + " —— 二波接不住就是坑")
+            detail = ["回归检验未全过：上次买这个题材的人今天不赚钱，接力意愿会二次衰减",
+                      "二波比首波更挑承接，接不住别硬做"]
+        else:
+            state = "weak"
+            ev = (f"主线回归（上次领衔 {_fmt_date(base_date)}，近{lookback}日第{len(seen)}次），"
+                  "承接数据不足：" + ("；".join(parts) if parts else "快照缺失")
+                  + "，先按观察处理")
+            detail = ["回归日承接数据不足 —— 盘中看老龙能否新高，有承接再定性"]
+    else:
+        state = "pending"
+        ev = (f"今日主线「{theme_name}」与昨日热点「{ytop}」不同，"
+              f"且近{lookback}日未曾领衔 —— 新题材首日，明日开盘验证")
+        detail = ["主线不是当天确认的：明日看该题材的空间龙高开溢价、首板留存、中军反馈",
+                  "（参考）昨日热点次日承接：" + ("；".join(parts) if parts else "数据不足")]
 
     return ({"id": "S5", "name": "次日定生死", "state": state, "evidence": ev,
              "detail": detail}, day2)
@@ -452,7 +546,8 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
 
 # ---------------------------------------------------------------- 综合判定
 
-def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict) -> tuple[str, str]:
+def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
+             day2: dict | None = None) -> tuple[str, str]:
     """按用户的规则收敛为四种状态。缺一环就是一日游。"""
     s1v, s2v, s3v, s4v, s5v = s1["state"], s2["state"], s3["state"], s4["state"], s5["state"]
 
@@ -463,18 +558,25 @@ def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict) -> tuple[str, str
     if s3v == "fail":
         return "one_day", "无中军：百亿大票没参与 = 游资脉冲行情，容量不够，当天冲高就结束"
     if s5v == "fail":
+        if day2 and day2.get("return_day"):
+            return "one_day", ("主线回归承接不成立：空间龙溢价 / 首板留存 / 中军反馈未过线 —— "
+                               "二波接不住，按一日游处理")
         return "one_day", ("次日检验未通过：空间龙溢价 / 首板留存 / 中军反馈至少一项不合格 —— "
                            "主线地位不成立，按一日游处理")
 
     if s5v == "pass" and s2v == "pass" and s4v != "weak":
         if s1v == "unknown":
             return "watch", "五环基本齐但消息级别未录入 —— 先按观察对待，在「调策略 → M9」录入后再定性"
-        return "confirmed", "五个信号依次共振，主线地位成立：按主线节奏做龙头与中军"
+        return "confirmed", ("五个信号依次共振，主线地位成立：按主线节奏做龙头与中军"
+                             + ("（主线回归日，承接已过检验）" if day2 and day2.get("return_day") else ""))
 
     if s2v in ("pass", "weak") and s5v == "pending" and s4v != "weak":
         if s1v == "unknown":
             return "day1_pending", ("首日启动成立（合力+中军），主线明日开盘验证；"
                                     "另请在「调策略 → M9」录入今日消息级别")
+        if day2 and day2.get("return_day"):
+            return "day1_pending", ("主线回归日启动成立（合力+中军）—— 今日盘中检验承接："
+                                    "空间龙高溢价、首板留存、中军无负反馈，接不住就是一日游")
         return "day1_pending", ("首日启动成立（合力+中军），但主线是次日确认的 —— 明日开盘看："
                                 "空间龙高溢价、首板活口留存、中军无负反馈")
 
@@ -504,10 +606,20 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
     theme_name = top["sector"] if top else ""
 
     # S1 消息定级别：手动录入优先；未录入且开启 auto_message 时自动抓快讯定级
+    # 窗口按交易日展开：上上个交易日 00:00 起 —— 长假/周末部委发文，
+    # 开市首日的题材定级必须能吃到假期消息（自然小时口径会漏）
     suggestion = None
     if a.get("auto_message", True):
         try:
-            suggestion = news_mod.grade(news_mod.fetch_news(), theme_name)
+            window_start = None
+            hist_dates = [d for d in ds.pool_history_dates()
+                          if not real_date or d < real_date]
+            base_d = hist_dates[-2] if len(hist_dates) >= 2 else (
+                hist_dates[-1] if hist_dates else "")
+            if base_d:
+                window_start = datetime.strptime(base_d, "%Y%m%d")
+            suggestion = news_mod.grade(news_mod.fetch_news(), theme_name,
+                                        window_start=window_start)
         except Exception:
             suggestion = None
     s1 = _signal_message(a, theme_name, suggestion)
@@ -517,16 +629,21 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
     s5, day2 = _signal_next_day(a, real_date, snaps, zt, theme_name)
     signals = [s1, s2, s3, s4, s5]
 
-    status, note = _verdict(s1, s2, s3, s4, s5)
+    status, note = _verdict(s1, s2, s3, s4, s5, day2)
 
     checks = []
     if status == "one_day":
         checks.append({"level": "yellow", "item": "题材主线一日游特征",
                        "action": f"{note}；题材内不接力，只看不动"})
     elif status == "day1_pending":
-        checks.append({"level": "yellow", "item": "题材主线待次日验证",
-                       "action": "首日启动成立但主线未确认 —— 明日开盘检验空间龙溢价/"
-                                 "首板留存/中军反馈后再定性"})
+        if day2.get("return_day"):
+            checks.append({"level": "yellow", "item": "题材主线回归日",
+                           "action": "该题材近日领衔过、今天二波登场 —— 今日盘中检验承接："
+                                     "空间龙溢价、首板留存、中军反馈，接不住就是一日游"})
+        else:
+            checks.append({"level": "yellow", "item": "题材主线待次日验证",
+                           "action": "首日启动成立但主线未确认 —— 明日开盘检验空间龙溢价/"
+                                     "首板留存/中军反馈后再定性"})
     elif status == "confirmed":
         checks.append({"level": "green", "item": "题材主线已确认",
                        "action": f"主线题材「{theme_name}」五信号共振，可按主线节奏参与"})

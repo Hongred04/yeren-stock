@@ -41,6 +41,7 @@ _M9_DEFAULTS = {
     "firstboard_survive_min": 0.5,    # 次日：昨日首板活口留存率线
     "survive_pct_min": 3.0,           # 次日：活口判定涨幅（%）
     "midarmy_feedback_max": -2.0,     # 次日：中军负反馈线（%）
+    "theme_lookback_days": 10,        # 主线回归：近N日内领衔过=回归日（非新题材首日）
 }
 
 # M10 主导资金分类：机构/游资/庄股，离场口径完全不同
