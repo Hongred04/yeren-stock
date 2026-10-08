@@ -205,6 +205,38 @@ details.fold .fbd{padding:0 17px 16px;border-top:1px solid var(--line2);padding-
 details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-radius:20px;
   font-size:11.5px;font-weight:700}
 
+/* ── 二级菜单导航 ── */
+.tabs{max-width:1180px;margin:11px auto 0;display:flex;flex-direction:column;gap:7px}
+.tabrow{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.tabrow.sub{gap:6px;padding-top:1px}
+.t1{font-size:13.5px;font-weight:700;color:var(--tx2);padding:7px 14px;border-radius:9px;
+  cursor:pointer;transition:.15s;white-space:nowrap;user-select:none}
+.t1:hover{background:var(--sk);color:var(--tx)}
+.t1.on{background:var(--blu);color:#fff;box-shadow:0 2px 8px rgba(37,99,217,.25)}
+.t2{font-size:12.5px;font-weight:600;color:var(--tx2);padding:5px 12px;border-radius:20px;
+  cursor:pointer;transition:.15s;background:#fff;border:1px solid var(--line);white-space:nowrap;
+  user-select:none}
+.t2:hover{border-color:var(--blu);color:var(--blu);background:#fafcff}
+.t2.on{background:var(--blu-bg);color:var(--blu);border-color:#b9d0f6;font-weight:700}
+.t2 .badge{display:inline-block;margin-left:5px;padding:0 6px;border-radius:20px;
+  background:var(--red);color:#fff;font-size:10.5px;font-weight:800;line-height:15px}
+.t1 .badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:20px;
+  background:var(--red);color:#fff;font-size:10.5px;font-weight:800;line-height:15px;
+  vertical-align:1px}
+.t1 .badge.n{background:rgba(255,255,255,.25);color:#fff}
+.t1:not(.on) .badge.n{background:var(--blu-bg);color:var(--blu)}
+.t2 .badge.n{background:var(--sk);color:var(--tx2)}
+
+/* ── 分页 ── */
+.page{display:none}
+.page.on{display:block;animation:pg .18s ease}
+@keyframes pg{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media(max-width:700px){
+  .tabs{margin-top:9px}
+  .t1{padding:6px 11px;font-size:13px}
+  .t2{padding:4px 10px;font-size:12px}
+}
+
 /* ── 策略面板 ── */
 .panel{background:#fff;position:fixed;top:0;right:0;width:min(460px,100vw);height:100vh;
   z-index:100;transform:translateX(100%);transition:.25s;display:flex;flex-direction:column;
@@ -276,6 +308,10 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <button class="btn2" id="btnPanel">调策略</button>
     <button class="btn" id="btnRefresh">重新扫描</button>
   </div>
+  <div class="tabs hide" id="tabs">
+    <div class="tabrow" id="tab1"></div>
+    <div class="tabrow sub" id="tab2"></div>
+  </div>
 </header>
 
 <div class="wrap">
@@ -298,98 +334,128 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
 
   <div id="main" class="hide">
 
-    <!-- ① 今天该干什么 -->
-    <div class="sec">
-      <div id="verdict"></div>
-    </div>
-
-    <!-- ② 三问 -->
-    <div class="sec">
-      <div class="grid g4" id="metrics"></div>
-    </div>
-
-    <!-- E1 情绪温度计 -->
-    <div class="sec" id="secMeter">
-      <div class="sh"><h2>情绪温度计</h2>
-        <span class="hint">连板梯队 · 炸板率 · 晋级率 · 涨跌家数 —— 冰点→启动→发酵→高潮→退潮</span></div>
-      <div id="meterWrap"></div>
-    </div>
-
-    <!-- ②.5 题材主线五信号 -->
-    <div class="sec">
-      <div class="sh"><h2>题材主线五信号</h2>
-        <span class="hint">消息定级 → 首日合力 → 中军容量 → 老龙引信 → 次日验证 · 缺一环就是一日游</span></div>
-      <div id="mlVerdict"></div>
-      <div class="card" style="margin-top:12px"><div class="steps" id="mlSteps"></div></div>
-      <div id="mlExtra"></div>
-    </div>
-
-    <!-- E3 主力资金流 + E2 龙虎榜 -->
-    <div class="sec">
-      <div class="sh"><h2>钱往哪走</h2>
-        <span class="hint">主力资金流（板块+个股）· 龙虎榜游资席位 —— 谁在真金白银地买</span></div>
-      <div id="flowWrap"></div>
-      <div id="lhbWrap" style="margin-top:12px"></div>
-    </div>
-
-    <!-- ③ 选股 -->
-    <div class="sec">
-      <div class="sh"><h2>可以买的股票</h2>
-        <span class="hint" id="pickHint"></span></div>
-      <div id="warnCard" class="warnb hide"></div>
-      <div class="tbl">
-        <table>
-          <thead><tr>
-            <th style="width:44px">#</th><th>股票</th><th class="num">评分</th>
-            <th>为什么它符合</th>
-            <th class="num">现价</th><th class="num">涨幅</th>
-            <th class="num">换手</th><th class="num">流通盘</th><th>状态</th>
-          </tr></thead>
-          <tbody id="pickBody"></tbody>
-        </table>
+    <!-- ══════════ 今日总览 ▸ 今日结论 ══════════ -->
+    <div class="page" data-page="home-main">
+      <div class="sec">
+        <div id="verdict"></div>
       </div>
-      <div style="font-size:12px;color:var(--tx3);margin-top:9px">
-        👆 点任意一行，看它的买入价、止损价、该买多少
+      <div class="sec">
+        <div class="sh"><h2>三问速览</h2>
+          <span class="hint">能买吗 · 钱够不够 · 大家抢还是跑</span></div>
+        <div class="grid g4" id="metrics"></div>
       </div>
     </div>
 
-    <div id="detail"></div>
-
-    <!-- ④ 该怎么做决定（决策链，大白话） -->
-    <div class="sec">
-      <div class="sh"><h2>这些结论是怎么来的</h2>
-        <span class="hint">5 步推演，从大势到你的仓位</span></div>
-      <div class="card"><div class="steps" id="steps"></div></div>
+    <!-- ══════════ 今日总览 ▸ 仓位计划 ══════════ -->
+    <div class="page" data-page="home-pos">
+      <div class="sec">
+        <div class="sh"><h2>今天该拿多少仓位</h2>
+          <span class="hint">试错 → 加仓 → 推仓 → 锁仓 → 清仓</span></div>
+        <div class="grid g4" id="posWrap"></div>
+      </div>
+      <div class="sec">
+        <div class="sh"><h2>这些结论是怎么来的</h2>
+          <span class="hint">5 步推演，从大势到你的仓位</span></div>
+        <div class="card"><div class="steps" id="steps"></div></div>
+      </div>
     </div>
 
-    <!-- ⑤ 仓位 -->
-    <div class="sec">
-      <div class="sh"><h2>今天该拿多少仓位</h2>
-        <span class="hint">试错 → 加仓 → 推仓 → 锁仓 → 清仓</span></div>
-      <div class="grid g4" id="posWrap"></div>
+    <!-- ══════════ 市场情绪 ▸ 情绪温度计 ══════════ -->
+    <div class="page" data-page="mood-meter">
+      <div class="sec" id="secMeter">
+        <div class="sh"><h2>情绪温度计</h2>
+          <span class="hint">连板梯队 · 炸板率 · 晋级率 · 涨跌家数 —— 冰点→启动→发酵→高潮→退潮</span></div>
+        <div id="meterWrap"></div>
+      </div>
     </div>
 
-    <!-- 持仓 / 自选 -->
-    <div class="sec">
-      <div class="sh"><h2>我的持仓 · 自选</h2>
-        <span class="hint">本地记录，用同一套卖出信号给持仓做体检（退潮清仓/破位/A字杀/机构加速/断板/庄股）</span>
-        <button class="btn2" id="btnPort" style="margin-left:auto">管理</button></div>
-      <div id="portWrap"></div>
+    <!-- ══════════ 市场情绪 ▸ 题材主线 ══════════ -->
+    <div class="page" data-page="mood-line">
+      <div class="sec">
+        <div class="sh"><h2>题材主线五信号</h2>
+          <span class="hint">消息定级 → 首日合力 → 中军容量 → 老龙引信 → 次日验证 · 缺一环就是一日游</span></div>
+        <div id="mlVerdict"></div>
+        <div class="card" style="margin-top:12px"><div class="steps" id="mlSteps"></div></div>
+        <div id="mlExtra"></div>
+      </div>
     </div>
 
-    <!-- 折叠区（只保留涨停池：其余为策略背景，收进调策略面板语义，不放主页） -->
-    <div class="sec">
-      <details class="fold">
-        <summary>涨停池 <span class="cnt" id="ztCnt"></span></summary>
-        <div class="fbd"><div class="tbl" style="box-shadow:none;border:none">
+    <!-- ══════════ 市场情绪 ▸ 涨停梯队 ══════════ -->
+    <div class="page" data-page="mood-zt">
+      <div class="sec">
+        <div class="sh"><h2>今日涨停池</h2>
+          <span class="hint" id="ztHint"></span></div>
+        <div class="tbl">
           <table>
             <thead><tr><th>股票</th><th class="num">连板</th><th class="num">现价</th>
               <th class="num">涨幅</th><th class="num">换手</th>
               <th class="num">流通盘</th><th>题材</th><th>封板时间</th></tr></thead>
             <tbody id="ztBody"></tbody>
-          </table></div>
+          </table>
         </div>
-      </details>
+      </div>
+    </div>
+
+    <!-- ══════════ 资金动向 ▸ 主力资金流 ══════════ -->
+    <div class="page" data-page="money-flow">
+      <div class="sec">
+        <div class="sh"><h2>主力资金流</h2>
+          <span class="hint">涨停股按题材聚合 · 行业板块主力净流入 —— 钱往哪个方向砸</span></div>
+        <div id="flowWrap"></div>
+      </div>
+    </div>
+
+    <!-- ══════════ 资金动向 ▸ 龙虎榜席位 ══════════ -->
+    <div class="page" data-page="money-lhb">
+      <div class="sec">
+        <div class="sh"><h2>龙虎榜 · 游资席位</h2>
+          <span class="hint">机构专用 / 北向 / 知名游资 —— 谁在真金白银地买</span></div>
+        <div id="lhbWrap"></div>
+      </div>
+    </div>
+
+    <!-- ══════════ 选股决策 ▸ 候选股票 ══════════ -->
+    <div class="page" data-page="pick-list">
+      <div class="sec">
+        <div class="sh"><h2>可以买的股票</h2>
+          <span class="hint" id="pickHint"></span></div>
+        <div id="warnCard" class="warnb hide"></div>
+        <div class="tbl">
+          <table>
+            <thead><tr>
+              <th style="width:44px">#</th><th>股票</th><th class="num">评分</th>
+              <th>为什么它符合</th>
+              <th class="num">现价</th><th class="num">涨幅</th>
+              <th class="num">换手</th><th class="num">流通盘</th><th>状态</th>
+            </tr></thead>
+            <tbody id="pickBody"></tbody>
+          </table>
+        </div>
+        <div style="font-size:12px;color:var(--tx3);margin-top:9px">
+          👆 点任意一行，看它的买入价、止损价、该买多少
+        </div>
+      </div>
+      <div id="detail"></div>
+    </div>
+
+    <!-- ══════════ 我的持仓 ▸ 持仓体检 ══════════ -->
+    <div class="page" data-page="mine-hold">
+      <div class="sec">
+        <div class="sh"><h2>持仓体检</h2>
+          <span class="hint">本地记录，复用同一套卖出信号（退潮清仓/破位/A字杀/机构加速/断板/庄股）</span>
+          <button class="btn2 btnPort" style="margin-left:auto">管理</button></div>
+        <div id="portWrap"></div>
+      </div>
+    </div>
+
+    <!-- ══════════ 我的持仓 ▸ 自选观察 ══════════ -->
+    <div class="page" data-page="mine-watch">
+      <div class="sec">
+        <div class="sh"><h2>自选观察</h2>
+          <span class="hint">只盯不做，点任意一只有详情</span>
+          <button class="btn2 btnPort" style="margin-left:auto">管理</button></div>
+        <div id="watchWrap"></div>
+      </div>
     </div>
 
     <div class="foot">
@@ -451,6 +517,106 @@ const STAGE_CN={probe:'新周期刚起步',climax:'情绪高潮，主升阶段',
   ebb:'退潮期',unknown:'数据不足',disabled:'已关闭',idle:'待命'};
 const VOL_CN={peak_swing:'量能充沛',comfort_short:'量能舒适',shrink_short:'量能偏小',
   shrink_red:'极度缩量但红盘',dry:'极度缩量',pending:'量能未就绪（盘前）',disabled:'已关闭'};
+
+// ── 二级菜单：一级=大板块，二级=具体页面（一次只看一页） ──
+const NAV=[
+  {k:'home',t:'今日总览',d:'今天能不能出手',subs:[
+    {k:'home-main',t:'今日结论',d:'一句话结论 + 三问速览'},
+    {k:'home-pos', t:'仓位计划',d:'该拿多少仓位 + 推演过程'},
+  ]},
+  {k:'mood',t:'市场情绪',d:'市场热不热',subs:[
+    {k:'mood-meter',t:'情绪温度计',d:'0-100 温度 + 连板梯队'},
+    {k:'mood-line', t:'题材主线',  d:'五信号判定题材持续性'},
+    {k:'mood-zt',   t:'涨停梯队',  d:'今日涨停池明细'},
+  ]},
+  {k:'money',t:'资金动向',d:'钱去哪了',subs:[
+    {k:'money-flow',t:'主力资金流',d:'题材/板块主力净流入'},
+    {k:'money-lhb', t:'龙虎榜席位',d:'机构/北向/游资席位'},
+  ]},
+  {k:'pick',t:'选股决策',d:'买什么',subs:[
+    {k:'pick-list',t:'候选股票',d:'打分清单 + 买卖点 + 详情'},
+  ]},
+  {k:'mine',t:'我的持仓',d:'自己的票',subs:[
+    {k:'mine-hold', t:'持仓体检',d:'卖出信号体检 + 盈亏'},
+    {k:'mine-watch',t:'自选观察',d:'只盯不做'},
+  ]},
+];
+function groupOf(p){ for(const g of NAV) if(g.subs.some(s=>s.k===p)) return g.k; return NAV[0].k; }
+let CUR='home-main';
+try{ const sv=localStorage.getItem('stockPage');
+     if(sv && document.querySelector('.page[data-page="'+sv+'"]')) CUR=sv; }catch(e){}
+
+function buildNav(){
+  $('tabs').classList.remove('hide');
+  $('tab1').innerHTML=NAV.map(g=>
+    `<div class="t1" data-g="${g.k}" title="${esc(g.d)}">${g.t}${gBadge(g.k)}</div>`).join('');
+  $('tab1').querySelectorAll('.t1').forEach(el=>el.onclick=()=>{
+    const g=NAV.find(x=>x.k===el.dataset.g);
+    go(NAV.find(x=>x.k===groupOf(CUR)).k===g.k ? CUR : g.subs[0].k);
+  });
+  renderSub();
+  go(CUR);
+}
+function renderSub(){
+  const g=NAV.find(x=>x.k===groupOf(CUR))||NAV[0];
+  $('tab2').innerHTML=g.subs.map(s=>
+    `<div class="t2" data-p="${s.k}" title="${esc(s.d||'')}">${s.t}${
+      s.k===CUR?'':badgeOf(s.k)}</div>`).join('');
+  $('tab2').querySelectorAll('.t2').forEach(el=>el.onclick=()=>go(el.dataset.p));
+}
+// 一级菜单上的角标：不用点进去就知道值不值得看
+function gBadge(gk){
+  if(!REPORT) return '';
+  try{
+    if(gk==='mood'){
+      const t=REPORT.meter&&REPORT.meter.temperature;
+      return (t==null)?'':`<span class="badge n">${t}°</span>`;
+    }
+    if(gk==='pick'){
+      const n=(REPORT.picks||[]).length;
+      return n?`<span class="badge">${n}</span>`:'';
+    }
+    if(gk==='mine'){
+      const n=((REPORT.portfolio||{}).checks||[]).length;
+      return n?`<span class="badge">${n}</span>`:'';
+    }
+  }catch(e){}
+  return '';
+}
+// 二级菜单上的小红点：这一页有需要留意的东西
+function badgeOf(p){
+  if(!REPORT) return '';
+  try{
+    if(p==='mine-hold'){
+      const n=((REPORT.portfolio||{}).checks||[]).length;
+      return n?`<span class="badge">${n}</span>`:'';
+    }
+    if(p==='mood-line'){
+      const st=REPORT.mainline&&REPORT.mainline.status;
+      return (st==='confirmed'||st==='one_day')?'<span class="badge">!</span>':'';
+    }
+    if(p==='mood-zt'){
+      const n=(REPORT.limit_up_pool||[]).length;
+      return n?`<span class="badge n">${n}</span>`:'';
+    }
+  }catch(e){}
+  return '';
+}
+function go(page){
+  if(!page) return;
+  CUR=page;
+  const gk=groupOf(page);
+  $('tab1').querySelectorAll('.t1').forEach(el=>el.classList.toggle('on',el.dataset.g===gk));
+  renderSub();
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.dataset.page===page));
+  try{ localStorage.setItem('stockPage',page); }catch(e){}
+  // 隐藏时 clientWidth=0，切回选股页要重画K线
+  if(page==='pick-list' && SEL && REPORT){
+    const q=(REPORT.picks||[]).find(x=>x.code===SEL);
+    if(q) requestAnimationFrame(()=>drawK(q));
+  }
+  window.scrollTo(0,0);
+}
 
 // ── 载入：先探缓存（毫秒级）→ 命中秒开；否则后台跑 + 轮询 ──
 async function load(force){
@@ -534,6 +700,7 @@ function finish(j){
   REPORT=j; CONFIG=j.config;
   $('loading').classList.add('hide'); $('main').classList.remove('hide');
   render();
+  buildNav();
 }
 
 // ── 主渲染 ──
@@ -747,7 +914,7 @@ function render(){
 
   /* ── 涨停池 ── */
   const zp=REPORT.limit_up_pool||[];
-  $('ztCnt').textContent=zp.length+' 只';
+  $('ztHint').textContent='共 '+zp.length+' 只 · 点行查看详情（仅候选股有详情）';
   $('ztBody').innerHTML=zp.map(z=>
     `<tr data-c="${z.code}"><td><b>${esc(z.name)}</b> <span class="fl" style="font-size:11.5px">${z.code}</span></td>
       <td class="num">${z.boards?`<span class="pill red">${z.boards}板</span>`:'<span class="pill gry">首板</span>'}</td>
@@ -759,6 +926,7 @@ function render(){
       if(p)showDetail(tr.dataset.c);});
 
   if(SEL) showDetail(SEL);
+  if(!$('tabs').classList.contains('hide')) renderSub();
 }
 
 function scoreLine(lb,v){
@@ -778,6 +946,7 @@ function fbt(v){
 function showDetail(code,tr){
   const p=REPORT.picks.find(x=>x.code===code);
   if(!p) return;
+  if(CUR!=='pick-list') go('pick-list');   // 详情在选股页，自动跳过去
   SEL=code;
   document.querySelectorAll('#pickBody tr').forEach(x=>x.classList.remove('sel'));
   if(tr) tr.classList.add('sel');
@@ -1087,37 +1256,62 @@ function renderLhb(){
     <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(l.note||'')}</div>`;
 }
 
-// ── 持仓 / 自选 ──
+// ── 持仓 / 自选（分成两页：#portWrap 持仓体检 / #watchWrap 自选观察） ──
 function renderPort(){
-  const el=$('portWrap'); if(!el) return;
+  const hp=$('portWrap'), wp=$('watchWrap');
   const p=REPORT.portfolio||{};
   const hold=p.holdings||[], watch=p.watchlist||[];
-  if(!hold.length&&!watch.length){
-    el.innerHTML='<div class="card fl" style="font-size:13px">还没有持仓/自选。点右上角「管理」录入你买了的股票，系统会用同一套卖出信号帮你盯。</div>'; return;}
-  const vc={'清仓离场':'red','减仓':'org','观察/减半':'org','持有':'grn'};
-  const rows=hold.map(h=>`<tr data-c="${h.code}">
-    <td><b>${esc(h.name||h.code)}</b> <span class="fl" style="font-size:11px">${h.code}</span></td>
-    <td class="num">${f2(h.cost)}</td><td class="num">${f2(h.price)}</td>
-    <td class="num ${pct(h.pct)}">${f2(h.pct)}%</td>
-    <td class="num ${(h.pnl_pct||0)>=0?'up':'dn'}" style="font-weight:800">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</td>
-    <td class="num">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</td>
-    <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
-    <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}</td>
-  </tr>`).join('');
-  const chips=watch.map(w=>`<span class="pill ${w.pct>0?'red':w.pct<0?'grn':'gry'}" style="margin:3px 5px 3px 0;cursor:pointer" data-w="${w.code}">${esc(w.name||w.code)} ${f2(w.pct)}%</span>`).join('');
-  el.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
-      <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>
-      <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">总盈亏</div><div class="v ${(p.total_pnl||0)>=0?'up':'dn'}">${(p.total_pnl||0)>=0?'+':''}${f2((p.total_pnl||0)/1e4,2)}万</div><div class="s">${p.total_pnl_pct==null?'—':(p.total_pnl_pct>=0?'+':'')+f2(p.total_pnl_pct)+'%'}</div></div>
-      <div class="mc b"><div class="t">持仓数</div><div class="v">${p.n_holdings||0}</div><div class="s">自选 ${p.n_watch||0} 只</div></div>
-      <div class="mc ${(p.checks||[]).some(c=>c.level==='red')?'r':'o'}"><div class="t">体检告警</div><div class="v">${(p.checks||[]).length}</div><div class="s">${(p.checks||[]).length?'有持仓需要处理':'持仓暂无告警'}</div></div>
-    </div>
-    ${hold.length?`<div class="tbl"><table><thead><tr><th>持仓</th><th class="num">成本</th><th class="num">现价</th>
-      <th class="num">今日</th><th class="num">盈亏</th><th class="num">市值</th><th>建议</th><th>为什么</th></tr></thead>
-      <tbody>${rows}</tbody></table></div>`:''}
-    ${watch.length?`<div style="margin-top:12px"><div style="font-size:12.5px;color:var(--tx2);font-weight:700;margin-bottom:5px">自选股</div>${chips}</div>`:''}
-    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(p.note||'')}</div>`;
-  el.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>{const q=REPORT.picks.find(x=>x.code===tr.dataset.c); if(q)showDetail(tr.dataset.c); else openPort();});
-  el.querySelectorAll('[data-w]').forEach(c=>c.onclick=()=>{const q=REPORT.picks.find(x=>x.code===c.dataset.w); if(q)showDetail(q.code);});
+
+  if(hp){
+    if(!hold.length){
+      hp.innerHTML=`<div class="card" style="font-size:13px;color:var(--tx2);line-height:1.8">
+        还没有持仓记录。点右上角<b>「管理」</b>，或在选股页点开个股后按<b>「＋记持仓」</b>录入，<br>
+        系统会用同一套卖出信号（退潮清仓/破位/A字杀/机构加速/断板/庄股）帮你每天盯一遍。</div>`;
+    } else {
+      const vc={'清仓离场':'red','减仓':'org','观察/减半':'org','持有':'grn'};
+      const rows=hold.map(h=>`<tr data-c="${h.code}">
+        <td><b>${esc(h.name||h.code)}</b> <span class="fl" style="font-size:11px">${h.code}</span></td>
+        <td class="num">${f2(h.cost)}</td><td class="num">${f2(h.price)}</td>
+        <td class="num ${pct(h.pct)}">${f2(h.pct)}%</td>
+        <td class="num ${(h.pnl_pct||0)>=0?'up':'dn'}" style="font-weight:800">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</td>
+        <td class="num">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</td>
+        <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
+        <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}</td>
+      </tr>`).join('');
+      hp.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
+          <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>
+          <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">总盈亏</div><div class="v ${(p.total_pnl||0)>=0?'up':'dn'}">${(p.total_pnl||0)>=0?'+':''}${f2((p.total_pnl||0)/1e4,2)}万</div><div class="s">${p.total_pnl_pct==null?'—':(p.total_pnl_pct>=0?'+':'')+f2(p.total_pnl_pct)+'%'}</div></div>
+          <div class="mc b"><div class="t">持仓数</div><div class="v">${p.n_holdings||0}</div><div class="s">自选 ${p.n_watch||0} 只</div></div>
+          <div class="mc ${(p.checks||[]).some(c=>c.level==='red')?'r':'o'}"><div class="t">体检告警</div><div class="v">${(p.checks||[]).length}</div><div class="s">${(p.checks||[]).length?'有持仓需要处理':'持仓暂无告警'}</div></div>
+        </div>
+        <div class="tbl"><table><thead><tr><th>持仓</th><th class="num">成本</th><th class="num">现价</th>
+          <th class="num">今日</th><th class="num">盈亏</th><th class="num">市值</th><th>建议</th><th>为什么</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(p.note||'')}</div>`;
+    }
+    hp.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>{
+      const q=REPORT.picks.find(x=>x.code===tr.dataset.c); if(q)showDetail(tr.dataset.c); else openPort();});
+  }
+
+  if(wp){
+    if(!watch.length){
+      wp.innerHTML=`<div class="card" style="font-size:13px;color:var(--tx2);line-height:1.8">
+        还没有自选股。在选股页点开个股后按<b>「＋加自选」</b>，或在右上角<b>「管理」</b>里直接输代码添加。</div>`;
+    } else {
+      const chips=watch.map(w=>`<tr data-w="${w.code}">
+        <td><b>${esc(w.name||w.code)}</b> <span class="fl" style="font-size:11px">${w.code}</span></td>
+        <td class="num">${f2(w.price)}</td>
+        <td class="num ${pct(w.pct)}" style="font-weight:700">${f2(w.pct)}%</td>
+        <td>${REPORT.picks.some(x=>x.code===w.code)
+              ?'<span class="pill red">今天入选候选</span>':'<span class="pill gry">仅观察</span>'}</td>
+      </tr>`).join('');
+      wp.innerHTML=`<div class="tbl"><table><thead><tr><th>自选股</th><th class="num">现价</th>
+        <th class="num">今日</th><th>状态</th></tr></thead><tbody>${chips}</tbody></table></div>
+        <div class="fl" style="font-size:11.5px;margin-top:8px">点任意一行看详情（仅当天入选候选股的才有）</div>`;
+    }
+    wp.querySelectorAll('tr[data-w]').forEach(tr=>tr.onclick=()=>{
+      const q=REPORT.picks.find(x=>x.code===tr.dataset.w); if(q)showDetail(q.code);});
+  }
 }
 
 // ── 持仓管理面板 ──
@@ -1142,7 +1336,7 @@ async function portCmd(payload){
   const j=await r.json();
   if(j.error){alert(j.error);return;}
   renderPortMgmt(j);
-  REPORT.portfolio=j; renderPort();
+  REPORT.portfolio=j; renderPort(); renderSub();
 }
 
 // ── 策略面板 ──
@@ -1331,7 +1525,7 @@ $('btnPanel').onclick=async()=>{ $('panel').classList.add('on'); $('mask').class
 function closeAllPanels(){ $('panel').classList.remove('on'); $('portPanel').classList.remove('on'); $('mask').classList.remove('on'); }
 $('btnClose').onclick=closeAllPanels;
 $('mask').onclick=closeAllPanels;
-$('btnPort').onclick=openPort;
+document.querySelectorAll('.btnPort').forEach(b=>b.onclick=openPort);
 $('btnPortClose').onclick=closeAllPanels;
 $('pfDone').onclick=closeAllPanels;
 $('pfAdd').onclick=()=>{ const c=$('pfCode').value.trim(); if(!c){alert('请填代码');return;}
@@ -1345,7 +1539,7 @@ $('btnReset').onclick=async()=>{ if(!confirm('恢复当前策略的默认参数�
   const p=CONFIG.preset||'wildman';
   await fetch('/api/preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({preset:p})});
   $('panel').classList.remove('on');$('mask').classList.remove('on'); load(true); };
-window.addEventListener('resize',()=>{ if(SEL) drawK(REPORT.picks.find(x=>x.code===SEL)); });
+window.addEventListener('resize',()=>{ if(SEL&&CUR==='pick-list') drawK(REPORT.picks.find(x=>x.code===SEL)); });
 
 load();
 </script>
