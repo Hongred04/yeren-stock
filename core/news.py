@@ -1,22 +1,36 @@
 # -*- coding: utf-8 -*-
-"""M9-S1 自动消息抓取与定级。
+"""M9-S1 自动消息抓取、定级与**消息记忆**。
 
 解决「消息定级别」需要手动录入的麻烦：
-  1. 多源抓取 7x24 快讯（新浪财经直播 → 同花顺 → 东财快讯，逐级降级）；
+  1. 多源抓取 7x24 快讯（财联社电报 → 新浪财经直播 → 央视 → 同花顺 →
+     东财快讯，逐源容错）；财联社「重要」电报是编辑人工筛选的政策/宏观
+     大事，精度与速度均优于通达式快讯；
   2. 用关键词规则给消息定级（S 国家级 / A 部委政策 / B 行业事件 / C 个股公告）；
   3. 与 M9 聚类出的主题材做关联匹配（题材名 + 常用别名），只让
-     「与主题材相关」的消息参与定级 —— 别的题材的大消息不能给本题材抬轿。
+     「与主题材相关」的消息参与定级 —— 别的题材的大消息不能给本题材抬轿；
+  4. **消息记忆**：S/A/B 级结果逐日归档，在有效期内（S 20天 / A 10天 / B 5天）
+     继续参与定级 —— 大级别政策不会因为日历翻页就失效。
+
+为什么必须有第 4 条（实测教训）：快讯池只能往前翻两三天
+（新浪滚动约 50 条/页、央视约 80 条/页，再深就没了），而
+「工信部等七部门印发《新型电池产业发展"十五五"规划》」这种消息
+发布三天后就翻不到了 —— 没有记忆的话，主线明明有国家级政策背书，
+S1 却只能看到当天几条「公司澄清公告」（C级），把题材判成一日游。
 
 产出是「系统建议级别」：手动录入（M9 面板 message_level）永远优先；
-未录入时建议级别参与 S1 门槛判定，证据（命中新闻）随信号输出供人工复核。
+未录入时建议级别（含记忆）参与 S1 门槛判定，证据随信号输出供人工复核。
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from datetime import datetime, timedelta
 
+from . import cls as cls_mod
 from . import datasource as ds
+from . import paths
 
 # ---------------------------------------------------------------- 多源抓取
 
@@ -139,30 +153,45 @@ def _news_from_em(n: int) -> list[dict]:
     return out
 
 
-def fetch_news(n: int = 950) -> list[dict]:
+def _news_from_cls() -> list[dict]:
+    """财联社电报（重要分类，近 2-3 天）—— 编辑人工筛选的政策/宏观大事。
+
+    精度与速度均优于通达式快讯，是部委发文/国家战略类消息的第一手源。
+    """
+    try:
+        return cls_mod.telegraph()
+    except Exception as e:
+        print(f"[news] 财联社电报抓取失败: {e}", file=sys.stderr)
+        return []
+
+
+def fetch_news(n: int = 2000) -> list[dict]:
     """近 N 条快讯/新闻。五源多页合并去重（按正文），时间倒序，5 分钟缓存。
 
-    旧版「取到第一个源就返回」且只拉第一页 80 条 —— 热闹时段只覆盖一两个
-    小时，隔夜部委政策（如工信部印发产业规划）早被挤出窗口，S1 因此漏定级。
-    现在新浪7x24两页 + 新浪滚动八页（实测第5页回溯到昨日下午、第8页到前日
-    晚上，配合交易日窗口覆盖假期）+ 央视新闻两页 + 同花顺两页 + 东财一页
-    全部合并；单源失败只丢该源，stderr 留痕便于排查。
+    抓取深度（v1.16 加深）：新浪7x24 两页 + **新浪滚动十六页**（约回溯 3 天）+
+    **央视新闻六页**（约回溯一周，部委发文报道最全 —— 七部门联合印发
+    「新型电池产业发展十五五规划」那条就在第 3 页）+ 同花顺两页 + 东财一页。
+    上次只抓央视两页，把第 3 页的政策消息漏掉了（实测教训）。
+    单源失败只丢该源，stderr 留痕便于排查。
     """
     def producer():
         merged: dict[str, dict] = {}
+        # 财联社电报（重要分类）：政策/宏观大事最快的源，放最前面
+        for it in _news_from_cls():
+            merged.setdefault(it["text"], it)
         for pg in (1, 2):
             try:
                 for it in _news_from_sina(100, pg):
                     merged.setdefault(it["text"], it)
             except Exception as e:
                 print(f"[news] 新浪7x24 第{pg}页抓取失败: {e}", file=sys.stderr)
-        for pg in (1, 2, 3, 4, 5, 6, 7, 8):
+        for pg in range(1, 17):
             try:
                 for it in _news_from_sina_roll(50, pg):
                     merged.setdefault(it["text"], it)
             except Exception as e:
                 print(f"[news] 新浪滚动 第{pg}页抓取失败: {e}", file=sys.stderr)
-        for pg in (1, 2):
+        for pg in range(1, 7):
             try:
                 for it in _news_from_cctv(80, pg):
                     merged.setdefault(it["text"], it)
@@ -302,3 +331,119 @@ def grade(news: list[dict], theme_name: str, lookback_h: int = 36,
             "since": cutoff.strftime("%m-%d %H:%M"),
             "evidence": [{"time": h["time"], "text": h["text"][:80], "source": h["source"],
                           "level": h["level"]} for h in hits[:3]]}
+
+
+# ---------------------------------------------------------------- 消息记忆
+# 快讯池只能翻两三天（新浪滚动/央视都按页丢弃旧闻），大级别政策发出去
+# 几天后就「查无此消息」。所以把每次 S/A/B 级定级结果逐日归档：
+# 在有效期内（S 20天 / A 10天 / B 5天）持续参与 S1 判定。
+# C 级（个股公告/传闻）不记 —— 那是噪声，记住反而天天干扰定级。
+
+MEM_PATH = paths.data_path("news_memory.json")
+LEVEL_ORDER = {"S": 0, "A": 1, "B": 2, "C": 3}
+VALID_DAYS = {"S": 20, "A": 10, "B": 5}          # 各级消息的记忆有效期（自然日）
+
+
+def _load_memory() -> list[dict]:
+    try:
+        with open(MEM_PATH, "r", encoding="utf-8") as f:
+            return (json.load(f) or {}).get("entries") or []
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def _save_memory(entries: list[dict]) -> None:
+    try:
+        os.makedirs(os.path.dirname(MEM_PATH), exist_ok=True)
+        tmp = MEM_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"entries": entries[-400:]}, f, ensure_ascii=False)
+        os.replace(tmp, MEM_PATH)
+    except OSError:
+        pass
+
+
+def remember(real_date: str, theme: str, level: str,
+             evidence: list[dict] | None = None, note: str = "") -> None:
+    """归档一次 S/A/B 级定级结果（同日同题材取最高级别，证据合并去重）。"""
+    if not theme or level not in VALID_DAYS:
+        return
+    entries = _load_memory()
+    items = [{"time": str(i.get("time", "")), "text": (i.get("text") or "")[:80],
+              "source": i.get("source", "")} for i in (evidence or [])[:5]]
+    row = next((e for e in entries
+                if e.get("date") == real_date and e.get("theme") == theme), None)
+    if row is None:
+        entries.append({"date": real_date, "theme": theme, "level": level,
+                        "items": items, "note": note, "saved": time.time()})
+    else:
+        if LEVEL_ORDER.get(level, 9) < LEVEL_ORDER.get(row.get("level", "C"), 9):
+            row["level"] = level
+        known = {i.get("text") for i in row.get("items", [])}
+        row.setdefault("items", []).extend(i for i in items if i["text"] not in known)
+        row["items"] = row["items"][:6]
+        if note:
+            row["note"] = note
+    _save_memory(sorted(entries, key=lambda e: e.get("date", "")))
+
+
+def memory_entries(theme: str = "") -> list[dict]:
+    """给界面/自查用：全部（或某题材的）记忆条目。"""
+    entries = _load_memory()
+    if theme:
+        entries = [e for e in entries if e.get("theme") == theme]
+    return sorted(entries, key=lambda e: e.get("date", ""), reverse=True)
+
+
+def lookup(theme: str, real_date: str = "") -> dict | None:
+    """查题材的消息记忆：有效期内的最高级别 S/A/B。无 → None。"""
+    if not theme:
+        return None
+    try:
+        today = (datetime.strptime(real_date, "%Y%m%d")
+                 if real_date else datetime.now())
+    except ValueError:
+        today = datetime.now()
+    best = None
+    for e in _load_memory():
+        if e.get("theme") != theme:
+            continue
+        lv = e.get("level", "")
+        if lv not in VALID_DAYS:
+            continue
+        try:
+            d = datetime.strptime(e.get("date", ""), "%Y%m%d")
+        except ValueError:
+            continue
+        if d > today:
+            continue
+        age = (today - d).days
+        if age > VALID_DAYS[lv]:
+            continue                                  # 过有效期
+        if best is None or LEVEL_ORDER[lv] < LEVEL_ORDER[best["level"]]:
+            best = {"level": lv, "date": e.get("date", ""), "days": age,
+                    "items": e.get("items", []), "note": e.get("note", "")}
+    return best
+
+
+def merge_suggestion(suggestion: dict | None, mem: dict | None) -> dict:
+    """把消息记忆并入今日自动定级 —— 级别取更高者。
+
+    记忆更高时：以记忆为准，今日级别存进 today_level 备查（证据换成记忆里的
+    原始消息）。记忆更低时：只作为佐证附在 memory 字段里。
+    """
+    sug = dict(suggestion or {"found": False})
+    if not mem:
+        return sug
+    mem_lv = mem.get("level", "")
+    sug_lv = sug.get("level") if sug.get("found") else ""
+    if not sug_lv or LEVEL_ORDER.get(mem_lv, 9) < LEVEL_ORDER.get(sug_lv, 9):
+        return {**sug, "found": True, "level": mem_lv, "theme_matched": True,
+                "evidence": (mem.get("items") or sug.get("evidence") or []),
+                "memory": {"date": mem.get("date"), "level": mem_lv,
+                           "days": mem.get("days", 0)},
+                "today_level": sug_lv,
+                "today_evidence": sug.get("evidence") or []}
+    sug["memory"] = {"date": mem.get("date"), "level": mem_lv,
+                     "days": mem.get("days", 0)}
+    return sug

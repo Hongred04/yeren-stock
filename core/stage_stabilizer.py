@@ -1,0 +1,241 @@
+# -*- coding: utf-8 -*-
+"""情绪阶段滞回稳定器 —— 专治「一会儿说可以出手、一会儿又退潮」。
+
+## 问题
+退潮判定（M3 与 E1）都建立在**瞬时**的涨停 / 跌停 / 炸板计数上：
+
+    亏钱面积 = (跌停 + 炸板) / (涨停 + 跌停 + 炸板)  ≥ 0.30 → 退潮
+
+盘中这三个数一直在跳。10:30 一波炸板把面积顶过 0.30 就报「退潮、无条件清仓」，
+十分钟后新涨停补上来又变回「可出手」。页面上策略建议来回横跳，
+人根本没法照着执行 —— 这不是市场变了，是**采样噪声**。
+
+## 做法（施密特触发器 + 连续确认）
+- **进入退潮**：原始信号连续 `enter_n` 次、且跨越 `enter_span` 秒才认。
+  但「亏钱面积 ≥ 阈值 + 强信号余量」可以直接认 —— 真塌方不用等确认。
+- **退出退潮**：原始信号连续 `exit_n` 次、跨越 `exit_span` 秒，**并且**
+  亏钱面积回落到「阈值 − 退出余量」以下才认。出门比进门难：
+  宁可多等一会儿，也别刚清完仓又追回去（这是最伤人的反复）。
+- **开盘保护**：开盘头 `warmup_min` 分钟样本太薄（涨停没几家，分母小、
+  比例噪声极大），此时只认强信号，否则每天 9:35 都会先报一次「退潮」。
+- **状态四档**：calm 正常 / watch 退潮预警（未确认，只降仓不清仓）/
+  ebb 确认退潮 / recovering 缓解中（仍是退潮，但提示可以留意了）。
+
+状态按自然日持久化在 data/stage_state.json，跨进程重启不丢；
+换日自动归零。
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+
+from . import paths
+
+STATE_PATH = paths.data_path("stage_state.json")
+_lock = threading.Lock()
+_memo: dict | None = None
+
+# 默认阈值（可被 cfg 覆盖）
+DEFAULTS = {
+    "enter_n": 2,            # 连续几次原始信号才确认进入
+    "enter_span": 60,        # 且至少跨越多少秒
+    "strong_margin": 0.15,   # 超出阈值这么多 → 直接认定（不等确认）
+    "exit_n": 2,
+    "exit_span": 180,        # 退出比进入慢：180s vs 60s
+    "exit_margin": 0.10,     # 还要回落到阈值 -0.10 以下
+    "warmup_min": 30,        # 开盘头 30 分钟只认强信号
+}
+
+
+def _cfg(cfg: dict | None) -> dict:
+    a = (cfg or {}).get("M3_sentiment", {}) or {}
+    out = dict(DEFAULTS)
+    for k in DEFAULTS:
+        v = a.get("ebb_" + k, a.get(k))
+        if isinstance(v, (int, float)):
+            out[k] = v
+    # 允许从 E1 的配置里也读一遍（两个模块谁先调用都行）
+    b = (cfg or {}).get("E1_meter", {}) or {}
+    for k in DEFAULTS:
+        v = b.get("ebb_" + k)
+        if isinstance(v, (int, float)) and "ebb_" + k not in a:
+            out[k] = v
+    return out
+
+
+def _blank(date: str) -> dict:
+    return {"date": date, "confirmed": False, "state": "calm",
+            "raw": False, "raw_true_n": 0, "raw_false_n": 0,
+            "raw_true_since": 0.0, "raw_false_since": 0.0,
+            "since": 0.0, "updates": 0, "note": ""}
+
+
+def _load(date: str) -> dict:
+    global _memo
+    if _memo and _memo.get("date") == date:
+        return dict(_memo)
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if obj.get("date") == date:
+            _memo = obj
+            return dict(obj)
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    _memo = _blank(date)
+    return dict(_memo)
+
+
+def _save(obj: dict) -> None:
+    global _memo
+    _memo = dict(obj)
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, STATE_PATH)
+    except OSError:
+        pass
+
+
+def reset(date: str = "") -> None:
+    """清状态（换日 / 手动复位 / 测试用）。"""
+    global _memo
+    with _lock:
+        _memo = _blank(date)
+        _save(_memo)
+
+
+def _cmp(hurt: float, threshold: float, margin: float, up: bool) -> bool:
+    """带余量的阈值比较。
+
+    必须先归一再比：0.30 - 0.10 在浮点下是 0.19999999999999998，
+    直接拿 0.20 <= 0.19999999999999998 去判会**永远不成立**，
+    结果就是"退潮再也解除不了"。
+    """
+    a = round(hurt, 4)
+    b = round(threshold + margin if up else threshold - margin, 4)
+    return a >= b if up else a <= b
+
+
+def stabilize(real_date: str, raw_ebb: bool, hurt_area: float,
+              threshold: float = 0.30, tmin: int | None = None,
+              cfg: dict | None = None) -> dict:
+    """喂一次原始判定，返回**稳定后**的结论。
+
+    real_date 换日即重置；tmin 为当日已交易分钟数（None 表示不启用开盘保护）。
+    """
+    c = _cfg(cfg)
+    now = time.time()
+    with _lock:
+        st = _load(real_date)
+        st["updates"] = int(st.get("updates", 0)) + 1
+        st["raw"] = bool(raw_ebb)
+
+        # ── 累计连续样本 ──
+        if raw_ebb:
+            if not st.get("raw_true_since"):
+                st["raw_true_since"] = now
+            st["raw_true_n"] = int(st.get("raw_true_n", 0)) + 1
+            st["raw_false_n"] = 0
+            st["raw_false_since"] = 0.0
+        else:
+            if not st.get("raw_false_since"):
+                st["raw_false_since"] = now
+            st["raw_false_n"] = int(st.get("raw_false_n", 0)) + 1
+            st["raw_true_n"] = 0
+            st["raw_true_since"] = 0.0
+
+        warmed = (tmin is None) or (tmin >= c["warmup_min"])
+        strong = _cmp(hurt_area, threshold, c["strong_margin"], up=True)
+        confirmed = bool(st.get("confirmed"))
+        prev = confirmed
+        note = ""
+
+        if not confirmed:
+            # 进门：强信号直接认；否则要连续 + 跨时间 + 过了开盘保护期
+            if strong:
+                confirmed = True
+                note = (f"亏钱面积 {hurt_area*100:.0f}% 已超阈值 "
+                        f"{threshold*100:.0f}% 一个身位，直接确认退潮")
+            elif (st["raw_true_n"] >= c["enter_n"]
+                  and now - st["raw_true_since"] >= c["enter_span"]
+                  and warmed):
+                confirmed = True
+                note = (f"退潮信号连续 {st['raw_true_n']} 次、"
+                        f"持续 {now - st['raw_true_since']:.0f}s 才确认")
+        else:
+            # 出门：要连续 + 跨更长时间 + 面积明显回落
+            clear = (not raw_ebb) and _cmp(hurt_area, threshold,
+                                           c["exit_margin"], up=False)
+            if (clear and st["raw_false_n"] >= c["exit_n"]
+                    and now - st["raw_false_since"] >= c["exit_span"]):
+                confirmed = False
+                note = (f"亏钱面积回落到 {hurt_area*100:.0f}%（阈值 "
+                        f"{threshold*100:.0f}% 下方 {c['exit_margin']*100:.0f} 个点）"
+                        f"并持续 {now - st['raw_false_since']:.0f}s，解除退潮")
+
+        if confirmed and not prev:
+            st["since"] = now
+            st["state"] = "ebb"
+        elif not confirmed and prev:
+            st["since"] = now
+            st["state"] = "calm"
+
+        # 状态细分：未确认但有预警 / 已确认但正在缓解
+        if confirmed:
+            clear = (not raw_ebb) and _cmp(hurt_area, threshold,
+                                           c["exit_margin"], up=False)
+            st["state"] = "recovering" if clear else "ebb"
+        elif raw_ebb:
+            st["state"] = "watch"          # 退潮预警：还没有确认
+        else:
+            st["state"] = "calm"
+
+        st["confirmed"] = confirmed
+        st["hurt_area"] = round(hurt_area, 3)
+        st["threshold"] = threshold
+        st["warmed"] = warmed
+        st["strong"] = strong
+        st["note"] = note or st.get("note", "")
+        st["last_ts"] = now
+        _save(st)
+
+        since = st.get("since") or now
+        return {
+            "confirmed": confirmed,
+            "state": st["state"],
+            "raw": bool(raw_ebb),
+            "changed": confirmed != prev,
+            "note": st["note"],
+            "hurt_area": round(hurt_area, 3),
+            "threshold": threshold,
+            "warmed": warmed,
+            "strong": strong,
+            "raw_streak": st["raw_true_n"] if raw_ebb else st["raw_false_n"],
+            "since_seconds": int(now - since),
+            "enter_n": c["enter_n"], "exit_n": c["exit_n"],
+            "enter_span": c["enter_span"], "exit_span": c["exit_span"],
+            "warmup_min": c["warmup_min"],
+        }
+
+
+def peek(real_date: str) -> dict:
+    """只读当前稳定结论（不喂新样本）—— 让 E1 与 M3 保持同一口径。"""
+    with _lock:
+        st = _load(real_date)
+    return {"confirmed": bool(st.get("confirmed")),
+            "state": st.get("state", "calm"),
+            "hurt_area": st.get("hurt_area", 0.0),
+            "note": st.get("note", "")}
+
+
+STATE_CN = {
+    "calm": "情绪平稳",
+    "watch": "退潮预警（未确认）",
+    "ebb": "确认退潮",
+    "recovering": "退潮缓解中",
+}

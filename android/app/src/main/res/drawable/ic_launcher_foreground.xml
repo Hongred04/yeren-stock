@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- 涨 -->
+    <path android:fillColor="#DEE7F5" android:pathData="M37.5,30h3v48h-3z"/>
+    <path android:fillColor="#E53935" android:pathData="M33,41h12v27h-12z"/>
+    <!-- 跌 -->
+    <path android:fillColor="#DEE7F5" android:pathData="M52.5,24h3v46h-3z"/>
+    <path android:fillColor="#26A69A" android:pathData="M48,36h12v22h-12z"/>
+    <!-- 涨 -->
+    <path android:fillColor="#DEE7F5" android:pathData="M67.5,34h3v52h-3z"/>
+    <path android:fillColor="#E53935" android:pathData="M63,45h12v31h-12z"/>
+</vector>

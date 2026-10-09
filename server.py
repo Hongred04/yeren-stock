@@ -14,11 +14,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import pipeline
 from core import datasource as ds
+from core import engine
+from core import paths
 from core import portfolio as portfolio_mod
 from core import strategy_config as sc
+from core import trading
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.join(BASE_DIR, "web")
+BASE_DIR = paths.ROOT
+WEB_DIR = paths.WEB_DIR
 
 # 后台分析任务状态
 _job = {"running": False, "progress": "空闲", "pct": 0, "done": False,
@@ -118,6 +121,64 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # ------------------------------------------------------------ 路由
+    def _live_view(self):
+        """轻量实时刷新：只拉"当前关心的那些票"的行情 + 重算情绪阶段。
+
+        **不触发全市场重扫**，所以毫秒到秒级返回，前端每分钟静默调一次即可。
+        情绪阶段是用最新的涨停/跌停/炸板池重算的，而且过的是 stage_stabilizer
+        的滞回逻辑 —— 盘中会随市场变化，但不会一跳一变。
+        """
+        from datetime import datetime
+        cached = pipeline.get_cached() or {}
+        cfg = sc.load_config()
+        view = {"ts": time.time(),
+                "server_time": datetime.now().strftime("%H:%M:%S")}
+        if cached.get("meta"):
+            view["result_ts"] = cached["meta"].get("ts")
+
+        # ① 情绪阶段：池接口（push2ex）不在被限速的 push2 家族里，可以放心调
+        sess = trading.market_session()
+        view["phase"] = sess.get("label", "")
+        view["tmin"] = sess.get("tmin", 0)
+        try:
+            live_phase = sess["phase"] in ("morning", "noon", "afternoon", "tail")
+            if live_phase:
+                real_date = ds.pool_qdate() or cached.get("meta", {}).get("date", "")
+                zt = ds.fetch_limit_up_pool()
+                dt = ds.fetch_limit_down_pool()
+                zb = ds.fetch_broken_board_pool()
+                view["sentiment"] = engine.evaluate_sentiment(
+                    cfg, zt, dt, zb, [], real_date=real_date,
+                    tmin=sess.get("tmin"))
+                view["live_sentiment"] = True
+            else:
+                view["sentiment"] = cached.get("sentiment") or {}
+                view["live_sentiment"] = False
+        except Exception as e:
+            view["sentiment"] = cached.get("sentiment") or {}
+            view["live_sentiment"] = False
+            view["sentiment_error"] = f"{type(e).__name__}: {e}"
+
+        # ② 实时行情：候选 + 自选 + 持仓（腾讯批量，一两百只也就一两个请求）
+        try:
+            codes = [p.get("code") for p in (cached.get("picks") or [])]
+            obj = portfolio_mod.load()
+            codes += [h["code"] for h in obj.get("holdings", [])]
+            codes += [w["code"] for w in obj.get("watchlist", [])]
+            codes = sorted({c for c in codes if c})
+            snaps = ds.fetch_snapshots(codes, batch=60, workers=8) if codes else {}
+            view["quotes"] = {
+                c: {"price": s.get("price"), "pct": s.get("pct"),
+                    "turnover": s.get("turnover"),
+                    "volume_ratio": s.get("volume_ratio"),
+                    "amount": s.get("amount")}
+                for c, s in snaps.items()
+            }
+        except Exception as e:
+            view["quotes"] = {}
+            view["quotes_error"] = f"{type(e).__name__}: {e}"
+        return view
+
     def _portfolio_view(self):
         """按需体检持仓：仅拉持仓/自选相关快照与K线，不触发全市场重扫。"""
         obj = portfolio_mod.load()
@@ -194,17 +255,22 @@ class Handler(BaseHTTPRequestHandler):
                                  "presets": sc.list_presets()})
             elif path == "/api/presets":
                 self._send_json({"presets": sc.list_presets()})
+            elif path == "/api/live":
+                # 静默刷新专用：轻量、不触发全市场重扫
+                self._send_json(self._live_view())
             elif path == "/api/portfolio":
                 self._send_json(self._portfolio_view())
             elif path == "/api/sources":
                 self._send_json({"ok": True, "cookie": ds.cookie_status(),
-                                 "blocked": ds.em_blocked()})
+                                 "blocked": ds.em_blocked(),
+                                 "push2": ds.push2_status()})
             elif path == "/api/stock":
                 # 单只股票详情：自选/持仓里点开不在当日候选中的股票也看得到
                 code = (qs.get("code") or [""])[0]
                 self._send_json(pipeline.stock_detail(code))
             elif path == "/api/health":
-                self._send_json({"ok": True, "job": _job})
+                self._send_json({"ok": True, "job": _job, "paths": paths.describe(),
+                                 "version": __import__("core.version", fromlist=["x"]).APP_VERSION})
             elif path in ("/", "/index.html"):
                 self._send_file(os.path.join(WEB_DIR, "index.html"))
             else:
@@ -296,6 +362,12 @@ class Handler(BaseHTTPRequestHandler):
                                      "msg": ("自动获取到 %d 个 cookie" % len(r["cookies"]))
                                             if r["found"] else
                                             "东财入口页没有下发 Set-Cookie，匿名 Cookie 拿不到"})
+                elif act == "reconnect":
+                    # 丢弃 keep-alive 连接池：盘后长时间挂机后若取不到行情，
+                    # 点这里强制重连（_get 已能自愈，这是多一层保险）
+                    n = ds.reset_pool()
+                    self._send_json({"ok": True, "closed": n,
+                                     "msg": f"已丢弃 {n} 条闲置连接，下次请求将重新握手"})
                 else:
                     self._send_json({"error": "未知 action"}, 400)
             elif path == "/api/refresh":
@@ -323,6 +395,9 @@ class StrictServer(ThreadingHTTPServer):
     ThreadingHTTPServer 默认 allow_reuse_address=1，会导致端口被占用时
     第二个实例照样启动成功，两者同时监听同一端口，浏览器随机连到旧实例，
     表现为「改了代码不生效」「页面卡住」等极难排查的问题。
+
+    安卓例外：App 重启很频繁，端口常处于 TIME_WAIT，此时必须允许复用，
+    否则会出现「刚打开就报端口失败」。所以由启动参数控制。
     """
     allow_reuse_address = False
 
@@ -334,31 +409,71 @@ class StrictServer(ThreadingHTTPServer):
         traceback.print_exc()
 
 
-def main(port: int = 8777):
-    # 端口占用预检
+def _port_busy(port: int) -> bool:
+    """桌面上的端口占用预检。安卓没有 netstat，直接跳过。"""
+    if paths.is_android():
+        return False
     import subprocess
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
                              timeout=10).stdout.decode("gbk", errors="ignore")
-        busy = [l.split()[-1] for l in out.splitlines()
-                if f":{port}" in l and "LISTENING" in l]
-        if busy:
-            print(f"\n[错误] 端口 {port} 已被占用（PID {', '.join(set(busy))}）")
-            print("       多实例共存会导致读到旧代码/旧缓存。")
-            print("       解决：关闭旧窗口，或用 python 启动系统.py --port 8899")
-            return
+        return any(f":{port}" in l and "LISTENING" in l for l in out.splitlines())
     except Exception:
-        pass
+        return False
 
-    try:
-        srv = StrictServer(("127.0.0.1", port), Handler)
-    except OSError as e:
-        print(f"\n[错误] 端口 {port} 启动失败: {e}")
-        print("       换个端口: python 启动系统.py --port 8899")
-        return
 
-    print(f"智能股票监控系统已启动 →  http://127.0.0.1:{port}")
-    print("按 Ctrl+C 停止")
+def build_server(port: int = 8777, host: str = "127.0.0.1",
+                 reuse: bool | None = None) -> "StrictServer":
+    """建一个已绑定但还没 serve 的服务器实例。
+
+    reuse=None 时按环境自动决定：安卓 True（容忍 TIME_WAIT），桌面 False。
+    """
+    if reuse is None:
+        reuse = paths.is_android()
+    if reuse:
+        # 动态建子类，避免污染 StrictServer 的语义
+        cls = type("ReusableServer", (StrictServer,), {"allow_reuse_address": True})
+    else:
+        cls = StrictServer
+    return cls((host, port), Handler)
+
+
+def serve_forever(port: int = 8777, host: str = "127.0.0.1",
+                  log: bool = True) -> "StrictServer":
+    """阻塞式启动（桌面 main 用）。"""
+    if not paths.is_android() and _port_busy(port):
+        print(f"\n[错误] 端口 {port} 已被占用。")
+        print("       多实例共存会导致读到旧代码/旧缓存。")
+        print("       解决：关闭旧窗口，或用 启动系统.py --port 8899")
+        raise SystemExit(1)
+    srv = build_server(port, host)
+    if log:
+        print(f"智能股票监控系统已启动 →  http://{host}:{port}")
+        print("按 Ctrl+C 停止")
+    return srv
+
+
+def start_background(port: int = 8777, host: str = "127.0.0.1"):
+    """在后台线程里跑服务，立即返回 (server, thread)。
+
+    安卓侧用它：Java 启动 Python 后调这个，再把 WebView 指向 host:port。
+    端口被占时自动往后找（App 反复重启时很常见）。
+    """
+    last_err = None
+    for p in range(port, port + 20):
+        try:
+            srv = build_server(p, host, reuse=True)
+        except OSError as e:
+            last_err = e
+            continue
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, t
+    raise OSError(f"{port}..{port + 19} 全部无法绑定：{last_err}")
+
+
+def main(port: int = 8777):
+    srv = serve_forever(port)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

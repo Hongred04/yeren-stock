@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""策略配置定义 + 预设。
+"""策略配置定义。
 
 设计原则：把「全能的野人」体系拆成 9 个可独立开关/调参的模块，
 每个模块的阈值都暴露成配置项，实现「随时改变选股策略」。
@@ -9,6 +9,14 @@
   M5 仓位操作系统  M6 消息与信息观  M7 业绩披露期  M8 保命纪律
   M9 题材主线五信号（消息定级→合力→中军→老龙→次日验证）
   M10 主导资金分类（机构/游资/庄股，定离场）
+
+★ 策略口径（一次说清，别再写反）：
+  · 野人的体系**不是「量能萎缩就买」**——量能萎缩只是市场状态，
+    意识到市场缩量之后，才切到**短线题材的应对打法**；
+  · 平常他做中长线波段，**不打板、不做短线**；
+  · 原来的四套预设（野人原版/激进打板/保守波段/超短首板）已**融合成
+    这一套自适应体系**：同一套打分选标的，个股适合哪种打法由
+    engine.style_fit 判定，**只写在股票详情页**。
 """
 from __future__ import annotations
 
@@ -16,13 +24,16 @@ import copy
 import json
 import os
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "data", "strategy.json")
+from . import paths
+
+CONFIG_PATH = paths.data_path("strategy.json")
+
+DEFAULT_PRESET = "wildman"
 
 
 # ---------------------------------------------------------------- 预设策略
 
-# M9 题材主线五信号：五套预设共用同一套阈值，可随时在面板里改
+# M9 题材主线五信号：阈值随时可在面板里改
 _M9_DEFAULTS = {
     "enabled": True,
     "auto_message": True,             # 自动抓快讯定级（手动录入 message_level 优先）
@@ -63,20 +74,25 @@ _E1_DEFAULTS = {
     "ebb_hurt_ratio": 0.30,           # 退潮预警用的亏钱面积阈值（与 M3 同口径）
 }
 _E2_DEFAULTS = {
-    "enabled": True,                  # E2 龙虎榜·游资席位
-    "top_n": 12,                      # 净买入榜展示条数
+    "enabled": True,                  # E2 龙虎榜·游资席位（数据只进内部判断，不上界面）
 }
 _E3_DEFAULTS = {
     "enabled": True,                  # E3 主力资金流
     "board_top_n": 10,                # 行业板块净流入展示条数
 }
+_E4_DEFAULTS = {
+    "enabled": True,                  # E4 信号复盘档案（胜率闭环）
+    "cost_pct": 0.002,                # 往返总成本（佣金+印花税+滑点），从收益扣除
+    "max_settle_per_scan": 30,        # 每轮最多结算多少只（控数据源压力）
+}
 
 
 PRESETS: dict[str, dict] = {
-    # ===== 野人原版：完全按用户提供的体系落地 =====
+    # ===== 单一融合体系：四套预设已合并，个股打法写在详情页 =====
     "wildman": {
-        "name": "野人原版",
-        "desc": "全能的野人原味体系：缩量做短线题材、审美三要素、退潮清仓",
+        "name": "野人体系",
+        "desc": ("平常中长线波段为主、不打板不做短线；市场缩量时才切短线题材"
+                 "应对打法。个股适合哪种打法写在股票详情里。"),
         "M1_macro": {
             "enabled": True,
             "fear_hawkish": "risk_off",       # 危机式降息/暴力加息期
@@ -87,8 +103,8 @@ PRESETS: dict[str, dict] = {
         "M2_volume": {
             "enabled": True,
             "peak_threshold": 15000,          # 亿，两市成交额峰值模式阈值
-            "comfort_threshold": 5000,        # 亿，回到此量能=游刃有余（打板天下）
-            "shrink_threshold": 12000,        # 亿，低于此=缩量存量→只做短线
+            "comfort_threshold": 5000,        # 亿，回到此量能=游刃有余
+            "shrink_threshold": 12000,        # 亿，低于此=缩量存量→切短线应对
             "shrink_red_flag": True,          # 极致缩量还红盘 = 筹码结构好
         },
         "M3_sentiment": {
@@ -96,9 +112,14 @@ PRESETS: dict[str, dict] = {
             "ebb_hurt_ratio": 0.30,           # 亏钱效应扩散面积阈值
             "ebb_limit_down_ratio": 0.15,     # 跌停/涨停 比
             "ebb_broken_ratio": 0.50,         # 炸板/涨停 比
-            "clear_on_ebb": True,             # 退潮无条件清仓
+            "clear_on_ebb": True,             # 退潮无条件清仓（已持仓）
+            "ebb_trial_weight": 0.05,         # 退潮期允许的试错仓：0.5 成（0 = 完全空仓）
             "probe_board": 1,                 # 首板试错
             "cycle_low_probe": True,          # 退潮后等新周期首板
+            # 情绪阶段滞回参数（治盘中"一会能出手一会退潮"，见 stage_stabilizer）
+            "ebb_enter_n": 2, "ebb_enter_span": 60, "ebb_strong_margin": 0.15,
+            "ebb_exit_n": 2, "ebb_exit_span": 180, "ebb_exit_margin": 0.10,
+            "ebb_warmup_min": 30,
         },
         "M4_aesthetic": {
             "enabled": True,
@@ -123,6 +144,7 @@ PRESETS: dict[str, dict] = {
             "hold_before_boards": 5,          # 龙头五板前不折腾
             "add_on_strength": True,          # Day2 去弱留强
             "max_single_weight": 0.60,
+            "ebb_trial_weight": 0.05,         # 退潮期试错仓：0.5 成，只做首板
         },
         "M6_message": {
             "enabled": True,
@@ -148,6 +170,7 @@ PRESETS: dict[str, dict] = {
                 {"id": "no_noearn", "text": "业绩披露期不碰无业绩题材", "on": True},
                 {"id": "holiday_cash", "text": "中长线节假日持币、短线走一步看一步", "on": True},
                 {"id": "volume_only", "text": "缩量市场只信量能，不信任何板块吹嘘", "on": True},
+                {"id": "shrink_react", "text": "短线是缩量期的应对打法、不是常态：平时中长线波段，不打板不做短线", "on": True},
             ],
         },
         "M9_mainline": dict(_M9_DEFAULTS),
@@ -155,162 +178,14 @@ PRESETS: dict[str, dict] = {
         "E1_meter": dict(_E1_DEFAULTS),
         "E2_lhb": dict(_E2_DEFAULTS),
         "E3_flow": dict(_E3_DEFAULTS),
-    },
-
-    # ===== 激进打板：情绪高位接力 =====
-    "aggressive": {
-        "name": "激进打板",
-        "desc": "只做龙头接力，放宽市值与价格限制，量能充足时的高弹性策略",
-        "M1_macro": {"enabled": True, "manual_override": "auto"},
-        "M2_volume": {
-            "enabled": True, "peak_threshold": 12000, "comfort_threshold": 8000,
-            "shrink_threshold": 9000, "shrink_red_flag": True,
-        },
-        "M3_sentiment": {
-            "enabled": True, "ebb_hurt_ratio": 0.45, "ebb_limit_down_ratio": 0.25,
-            "ebb_broken_ratio": 0.70, "clear_on_ebb": True, "probe_board": 1,
-            "cycle_low_probe": True,
-        },
-        "M4_aesthetic": {
-            "enabled": True,
-            "price_min": 3.0, "price_max": 30.0,
-            "mv_max": 300.0, "mv_mid_threshold": 800.0,
-            "exclude_boards": ["北交所"],
-            "need_bull_ma": False,
-            "recent_limitup_days": 10, "recent_limitup_min": 1,
-            "history_two_board": False,
-            "min_turnover": 2.0, "max_turnover": 35.0,
-            "exclude_st": True,
-            "weight_graph": 25, "weight_price_mv": 20, "weight_imagination": 55,
-        },
-        "M5_position": {
-            "enabled": True, "pick_count": 3, "first_weight": 0.30,
-            "cash_reserve": 0.10, "hold_before_boards": 7,
-            "add_on_strength": True, "max_single_weight": 0.70,
-        },
-        "M6_message": {"enabled": False},
-        "M7_earnings": {"enabled": False},
-        "M8_discipline": {
-            "enabled": True,
-            "rules": [
-                {"id": "capital", "text": "保住本金是第一原则", "on": True},
-                {"id": "ebb_clear", "text": "退潮期无条件清仓", "on": True},
-                {"id": "cut_weak", "text": "砍错不心疼", "on": True},
-                {"id": "no_anti_cycle", "text": "不对抗周期", "on": True},
-            ],
-        },
-        "M9_mainline": dict(_M9_DEFAULTS),
-        "M10_fundstyle": dict(_M10_DEFAULTS),
-        "E1_meter": dict(_E1_DEFAULTS),
-        "E2_lhb": dict(_E2_DEFAULTS),
-        "E3_flow": dict(_E3_DEFAULTS),
-    },
-
-    # ===== 保守波段：只做有业绩的大票 =====
-    "conservative": {
-        "name": "保守波段",
-        "desc": "量能峰值才出手，只做中大盘有业绩方向，周期票为主",
-        "M1_macro": {"enabled": True, "manual_override": "auto"},
-        "M2_volume": {
-            "enabled": True, "peak_threshold": 20000, "comfort_threshold": 10000,
-            "shrink_threshold": 14000, "shrink_red_flag": False,
-        },
-        "M3_sentiment": {
-            "enabled": True, "ebb_hurt_ratio": 0.20, "ebb_limit_down_ratio": 0.10,
-            "ebb_broken_ratio": 0.35, "clear_on_ebb": True, "probe_board": 1,
-            "cycle_low_probe": False,
-        },
-        "M4_aesthetic": {
-            "enabled": True,
-            "price_min": 3.0, "price_max": 60.0,
-            "mv_max": 3000.0, "mv_mid_threshold": 100000.0,
-            "exclude_boards": ["北交所"],
-            "need_bull_ma": True,
-            "recent_limitup_days": 60, "recent_limitup_min": 0,
-            "history_two_board": False,
-            "min_turnover": 0.3, "max_turnover": 15.0,
-            "exclude_st": True,
-            "weight_graph": 45, "weight_price_mv": 30, "weight_imagination": 25,
-        },
-        "M5_position": {
-            "enabled": True, "pick_count": 5, "first_weight": 0.20,
-            "cash_reserve": 0.30, "hold_before_boards": 3,
-            "add_on_strength": False, "max_single_weight": 0.35,
-        },
-        "M6_message": {"enabled": True, "no_chase_clear_good": True,
-                       "follow_money_not_news": True},
-        "M7_earnings": {"enabled": True, "only_with_earnings": True},
-        "M8_discipline": {
-            "enabled": True,
-            "rules": [
-                {"id": "capital", "text": "保住本金是第一原则", "on": True},
-                {"id": "ebb_clear", "text": "退潮期无条件清仓", "on": True},
-                {"id": "no_anti_cycle", "text": "不对抗周期", "on": True},
-                {"id": "no_chase", "text": "明牌不追", "on": True},
-            ],
-        },
-        "M9_mainline": dict(_M9_DEFAULTS),
-        "M10_fundstyle": dict(_M10_DEFAULTS),
-        "E1_meter": dict(_E1_DEFAULTS),
-        "E2_lhb": dict(_E2_DEFAULTS),
-        "E3_flow": dict(_E3_DEFAULTS),
-    },
-
-    # ===== 超短首板：只做新周期首板试错 =====
-    "firstboard": {
-        "name": "超短首板",
-        "desc": "极度聚焦：只做新周期首板试错，小市值低价，图形干净",
-        "M1_macro": {"enabled": True, "manual_override": "auto"},
-        "M2_volume": {
-            "enabled": True, "peak_threshold": 15000, "comfort_threshold": 5000,
-            "shrink_threshold": 13000, "shrink_red_flag": True,
-        },
-        "M3_sentiment": {
-            "enabled": True, "ebb_hurt_ratio": 0.25, "ebb_limit_down_ratio": 0.12,
-            "ebb_broken_ratio": 0.40, "clear_on_ebb": True, "probe_board": 1,
-            "cycle_low_probe": True,
-        },
-        "M4_aesthetic": {
-            "enabled": True,
-            "price_min": 4.0, "price_max": 15.0,
-            "mv_max": 80.0, "mv_mid_threshold": 200.0,
-            "exclude_boards": ["科创板", "北交所", "创业板"],
-            "need_bull_ma": False,
-            "recent_limitup_days": 30, "recent_limitup_min": 0,
-            "history_two_board": False,
-            "min_turnover": 1.5, "max_turnover": 20.0,
-            "exclude_st": True,
-            "weight_graph": 40, "weight_price_mv": 30, "weight_imagination": 30,
-        },
-        "M5_position": {
-            "enabled": True, "pick_count": 4, "first_weight": 0.20,
-            "cash_reserve": 0.20, "hold_before_boards": 3,
-            "add_on_strength": True, "max_single_weight": 0.50,
-        },
-        "M6_message": {"enabled": True, "no_chase_clear_good": True},
-        "M7_earnings": {"enabled": True, "only_with_earnings": False},
-        "M8_discipline": {
-            "enabled": True,
-            "rules": [
-                {"id": "capital", "text": "保住本金是第一原则", "on": True},
-                {"id": "ebb_clear", "text": "退潮无条件清仓，管住手", "on": True},
-                {"id": "cut_weak", "text": "去弱留强不带幻想", "on": True},
-                {"id": "no_anti_cycle", "text": "不对抗周期", "on": True},
-                {"id": "volume_only", "text": "只信量能", "on": True},
-            ],
-        },
-        "M9_mainline": dict(_M9_DEFAULTS),
-        "M10_fundstyle": dict(_M10_DEFAULTS),
-        "E1_meter": dict(_E1_DEFAULTS),
-        "E2_lhb": dict(_E2_DEFAULTS),
-        "E3_flow": dict(_E3_DEFAULTS),
+        "E4_journal": dict(_E4_DEFAULTS),
     },
 }
 
 
 def get_preset(key: str) -> dict:
     if key not in PRESETS:
-        raise KeyError(f"未知策略预设: {key}")
+        key = DEFAULT_PRESET
     return copy.deepcopy(PRESETS[key])
 
 
@@ -319,8 +194,8 @@ def list_presets() -> list[dict]:
 
 
 def default_config() -> dict:
-    cfg = get_preset("wildman")
-    cfg["preset"] = "wildman"
+    cfg = get_preset(DEFAULT_PRESET)
+    cfg["preset"] = DEFAULT_PRESET
     return cfg
 
 
@@ -335,16 +210,57 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _merge_rules(default_rules: list, saved_rules: list | None) -> list:
+    """M8 纪律规则按 id 合并：保留用户对已有规则的开关，补齐新增规则。
+
+    列表是整体替换的（_deep_merge 只递归 dict），不这样做的话，
+    新增的纪律条款会被旧存档里的整份列表覆盖掉、永远不出现。
+    """
+    saved_by_id = {r.get("id"): r for r in (saved_rules or [])
+                   if isinstance(r, dict)}
+    out = []
+    for r in default_rules:
+        s = saved_by_id.get(r.get("id"))
+        out.append({**r, "on": bool(s.get("on", r.get("on", True)))} if s else dict(r))
+    known = {r.get("id") for r in default_rules}
+    for r in saved_rules or []:
+        if isinstance(r, dict) and r.get("id") not in known:
+            out.append(r)
+    return out
+
+
+# 已被融合掉的历史预设：存档里残留这些键时，配置整体回到单套默认
+_LEGACY_PRESETS = {"aggressive", "conservative", "firstboard"}
+
+
 def load_config() -> dict:
-    """读取当前配置；不存在则写入 wildman 默认。"""
+    """读取当前配置；不存在则写入默认。
+
+    两种迁移：
+      · 旧四套预设（aggressive/conservative/firstboard）已融合成一套 ——
+        存档 preset 命中历史键时，配置整体回到单套默认（那些值是预设派生
+        的，不是用户手调，融合后失去意义）；
+      · M8 纪律规则按 id 合并，新增条款不会因旧存档整份列表而被吞掉。
+    """
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            # 与预设合并，保证新增配置项自动补齐
-            base = PRESETS.get(saved.get("preset", "wildman"), PRESETS["wildman"])
+            key = saved.get("preset", DEFAULT_PRESET)
+            if key in _LEGACY_PRESETS:
+                cfg = default_config()
+                save_config(cfg)
+                return cfg
+            if key not in PRESETS:
+                key = DEFAULT_PRESET
+            base = PRESETS[key]
             cfg = _deep_merge(base, {k: v for k, v in saved.items() if k != "preset"})
-            cfg["preset"] = saved.get("preset", "wildman")
+            cfg["M8_discipline"]["rules"] = _merge_rules(
+                base.get("M8_discipline", {}).get("rules", []),
+                (saved.get("M8_discipline") or {}).get("rules"))
+            cfg["preset"] = key
+            cfg["name"] = base.get("name", cfg.get("name", ""))
+            cfg["desc"] = base.get("desc", "")
             return cfg
         except (json.JSONDecodeError, OSError):
             pass
@@ -362,8 +278,8 @@ def save_config(cfg: dict) -> None:
 
 
 def apply_preset(cfg: dict, preset_key: str, overrides: dict | None = None) -> dict:
-    """切换预设，并叠加用户当前的自定义修改（保留已改动的键）。"""
+    """切换预设（现已融合为单套，保留此接口用于「恢复默认」）。"""
     base = get_preset(preset_key)
     merged = _deep_merge(base, overrides or {})
-    merged["preset"] = preset_key
+    merged["preset"] = preset_key if preset_key in PRESETS else DEFAULT_PRESET
     return merged

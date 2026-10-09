@@ -98,9 +98,31 @@ def pre_holiday_gap(now: datetime | None = None) -> int:
 
 # ---------------------------------------------------------------- 买入点
 
+def _stop_price(structure_low: float, close: float, max_loss: float = 0.07) -> float:
+    """止损价：结构位与最大亏损双约束，取更高的那个（少亏优先）。
+
+    首板的最低点有时离现价很远（低开拉板），单用结构位止损幅度过大；
+    用 max(前低-1%, 现价×(1-max_loss)) 保证单笔试错亏损有上限。
+    """
+    cands = [x for x in (structure_low * 0.99 if structure_low else 0.0,
+                         close * (1 - max_loss)) if x > 0]
+    return max(cands) if cands else close * (1 - max_loss)
+
+
+def _loss_pct(stop: float, close: float) -> str:
+    try:
+        return f"{(stop / close - 1) * 100:.1f}%"
+    except ZeroDivisionError:
+        return "—"
+
+
 def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
                 volume: dict, cfg: dict) -> list[dict]:
-    """生成买入点建议列表。"""
+    """生成买入点建议列表。
+
+    进场价一律给**具体数字 + 触发条件**（竞价怎么开、回踩到哪里、什么情况放弃），
+    不再给"低吸""逢低"这类没法执行的词。
+    """
     out = []
     if not bars:
         return out
@@ -108,12 +130,41 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     close = bars[-1]["close"]
     a = cfg.get("M4_aesthetic", {})
     last = bars[-1]
-    prev = bars[-2] if len(bars) > 1 else last
     thr = ind.limit_up_threshold(code)
+    fw = float(cfg.get("M5_position", {}).get("first_weight", 0.20) or 0.20)
 
-    # 交易许可检查：退潮期 / 极度缩量 → 不给开仓建议，只给观察提示
+    # 交易许可检查：退潮期 / 极度缩量
+    # 退潮期不再一刀切禁止出手 —— 允许 0.5 成试错仓，但**只做首板**：
+    # 退潮里唯一有胜率结构的就是新周期第一板，接力/低吸都是接刀子。
     if not sentiment.get("can_trade", True) or volume.get("mode") == "dry":
-        reason = ("情绪退潮期" if not sentiment.get("can_trade", True) else "极度缩量")
+        dry = volume.get("mode") == "dry"
+        if sentiment.get("trial_only") and not dry:
+            tw = float(sentiment.get("ebb_trial_weight") or 0.05)
+            boards = int(stock.get("zt_boards") or 0)
+            if boards <= 1:
+                return [{
+                    "type": "B0", "name": "退潮试错仓", "priority": "B",
+                    "trigger": f"退潮期试错：{sentiment.get('note') or ''}",
+                    "entry": (f"只做首板，单笔不超过 {pos_cn(tw)}；"
+                              f"不是首板就别碰"),
+                    "stop": "跌破买入价无条件走 —— 退潮期不留恋、不等反包",
+                    "target": "小赚即走，不奢望连板",
+                    "position": f"{pos_cn(tw)}（试错）",
+                    "note": ("退潮期的试错仓是保持盘感用的，不是抄底；"
+                             "宁可错过不可做错"),
+                    "trial": True,
+                }]
+            return [{
+                "type": "HOLD", "name": "退潮期只做首板", "priority": "A",
+                "trigger": f"该股已 {boards} 连板 —— 退潮期不接力",
+                "entry": f"退潮期只允许首板试错，上限 {pos_cn(tw)}；已连板的不参与",
+                "stop": "—",
+                "target": "等新周期首板",
+                "position": "0%（新增）",
+                "note": "退潮期接力的胜率极低，管住手",
+                "blocked": True,
+            }]
+        reason = "情绪退潮期" if not sentiment.get("can_trade", True) else "极度缩量"
         return [{
             "type": "HOLD", "name": "禁止开仓", "priority": "A",
             "trigger": f"{reason}：{sentiment.get('note') or volume.get('advice','')}",
@@ -147,6 +198,8 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     at_limit = (stock.get("pct", 0) >= thr
                 or (stock.get("zt_boards", 0) >= 1 and not premarket))
     open_prefix = "今日" if premarket else "次日"
+    low1 = low_of(bars[-1])
+    stop1 = _stop_price(low1, close)
     if stock.get("zt_boards", 0) == 1 and sentiment.get("stage") in ("probe", "follow"):
         note = "新周期一定是首板，二板还属于老周期"
         if at_limit:
@@ -154,12 +207,16 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B1", "name": "首板试错",
             "priority": "A",
-            "trigger": f"新周期首板，{stock.get('sector','题材内')}启动信号",
-            "entry": f"{open_prefix}开盘不追高，回踩不破 {close*0.98:.2f} 介入；或竞价小幅低开介入",
-            "stop": f"跌破首板最低价 {low_of(bars[-1])*0.98:.2f} 止损（试错失败只损失一笔很小的资金）",
-            "target": "看二板，三板以上看龙头溢价",
-            "position": "单票试错仓位，不超过总资金20%",
-            "note": note,
+            "trigger": (f"新周期首板（{stock.get('sector') or '题材内'}）—— "
+                        f"{open_prefix}竞价高开 0~3% 是预期内的，＞5% 就是抢筹过头"),
+            "entry": (f"分两笔：① {open_prefix}竞价高开 0~3% → 先买一半；"
+                      f"② 高开＞5% 不追，等回踩 {close*0.98:.2f} 附近补另一半；"
+                      f"低开跌破 {close*0.95:.2f} 直接放弃"),
+            "stop": (f"跌破 {stop1:.2f}（约 {_loss_pct(stop1, close)}）无条件走 —— "
+                     f"试错失败只亏很小一笔"),
+            "target": "看二板：封住二板继续持有，二板炸板走人",
+            "position": f"单票试错仓 {pos_cn(fw)}（分两笔进）",
+            "note": note + "；买的是「明天有人接力」的预期，不是今天的涨停板",
         })
 
     # 当日已涨停：B2/B3/B4 全是"当日进场"口径，涨停板上不成立 ——
@@ -190,32 +247,36 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     ma10 = ind.ma([b["close"] for b in bars], 10)
     hold_before = cfg.get("M5_position", {}).get("hold_before_boards", 5)
     if 2 <= boards_recent < hold_before and ma5 and close <= ma5 * 1.03 and close >= ma5 * 0.95:
+        stop2 = max(ma10, close * 0.93) if ma10 else close * 0.93
         out.append({
             "type": "B2", "name": "龙头回踩",
             "priority": "A",
-            "trigger": f"近5日{boards_recent}次涨停的龙头回踩5日线({ma5:.2f})，缩量不破位",
-            "entry": (f"次日回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳"
-                      if after else
-                      f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳"),
-            "stop": (f"有效跌破10日线 {ma10:.2f} 离场" if ma10
-                     else "跌破回踩低点离场"),
-            "target": f"龙头走到{hold_before}板前不折腾，吃主升",
-            "position": "可加至 40-60%（去弱留强后最强者）",
+            "trigger": (f"近5日 {boards_recent} 次涨停的龙头回踩，现价 {close:.2f} "
+                        f"贴近5日线 {ma5:.2f}（缩量不破）"),
+            "entry": (f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳；"
+                      f"直接高开走强不追，等回踩再说"),
+            "stop": (f"有效跌破 {stop2:.2f}（约 {_loss_pct(stop2, close)}，"
+                     f"10日线/前低双保险）离场"),
+            "target": f"龙头走到 {hold_before} 板前不折腾，吃主升",
+            "position": "去弱留强后最强者的加仓位（40-60%）",
             "note": "去弱留强不带幻想，砍错不心疼",
         })
 
     # B3 缩量红盘低吸
     if volume.get("red_flag") and stock.get("pct", 0) > 0:
+        stop3 = close * 0.95
         out.append({
             "type": "B3", "name": "缩量红盘低吸",
             "priority": "B",
-            "trigger": f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 {stock.get('pct',0):.2f}%，控盘好",
-            "entry": (f"次日开盘后等回落，{close*0.99:.2f} 附近低吸" if after else
-                      f"不追高，等回落后于 {close*0.99:.2f} 附近低吸"),
-            "stop": f"跌破 {close*0.95:.2f} 止损",
-            "target": "缩量红盘=筹码结构好，博弈反包",
-            "position": "小仓位试探，缩量市场只信量能",
-            "note": "散户90%套牢躺平，此时不宜重仓接",
+            "trigger": (f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 "
+                        f"{stock.get('pct',0):.2f}%，控盘好、筹码结构稳"),
+            "entry": (f"不追高：回落到 {close*0.99:.2f} 附近分两笔低吸"
+                      if not after else
+                      f"次日开盘不追，回落到 {close*0.99:.2f} 附近分两笔低吸"),
+            "stop": f"跌破 {stop3:.2f}（-5%）止损，缩量期不硬扛",
+            "target": "先看反包昨日高点：反包不上就走",
+            "position": "小仓位试探（缩量市场只信量能）",
+            "note": "散户90%套牢躺平、庄家控盘好；缩量期权宜打法，不宜重仓接",
         })
 
     # B4 尾盘博弈：只做节前最后交易日的尾盘窗口 ——
@@ -357,6 +418,15 @@ def sell_signals(stock: dict, bars: list[dict], sentiment: dict,
 
 # ---------------------------------------------------------------- 仓位链
 
+
+def pos_cn(w: float) -> str:
+    """仓位的中文写法：0.05 → '0.5 成（5%）'。
+
+    交易员嘴里说的都是"几成仓"，直接摆百分比还得自己换算，
+    所以两样一起给，避免"0.5 成"被误读成 0.5%。
+    """
+    return f"{w*10:g} 成（{w*100:g}%）"
+
 def position_plan(cfg: dict, picks: list[dict], sentiment: dict,
                   volume: dict, macro: dict) -> dict:
     """M5 仓位操作系统：试错 → 加仓 → 推仓 → 锁仓。"""
@@ -370,8 +440,28 @@ def position_plan(cfg: dict, picks: list[dict], sentiment: dict,
     max_single = p.get("max_single_weight", 0.60)
     hold_before = p.get("hold_before_boards", 5)
 
-    # 退潮期 → 目标仓位0
+    # 退潮期 → 默认空仓；但允许一笔 0.5 成试错仓（野哥的规矩）
     if sentiment.get("stage") == "ebb":
+        tw = p.get("ebb_trial_weight", sentiment.get("ebb_trial_weight", 0.05))
+        try:
+            tw = max(0.0, float(tw or 0.0))
+        except (TypeError, ValueError):
+            tw = 0.0
+        if tw > 0:
+            return {
+                "chain": [
+                    {"stage": "退潮试错", "action": f"只做首板，单笔不超过 {pos_cn(tw)}",
+                     "weight": round(tw, 4), "total": round(tw, 4),
+                     "note": "试错仓是保持手感、维持盘感用的，不是抄底；宁可错过，不可做错"},
+                    {"stage": "等待", "action": "空仓等新周期首板", "weight": 0.0,
+                     "total": 0.0, "note": "新周期一定是首板"},
+                ],
+                "target_total": round(tw, 4),
+                "chain_stage": "ebb",
+                "trial": True,
+                "note": (f"退潮期：不接力、不重仓。最多 {tw*100:.1f}% 试错仓，"
+                         f"只做首板，亏了立刻走"),
+            }
         return {
             "chain": [
                 {"stage": "退潮", "action": "无条件清仓", "weight": 0.0,

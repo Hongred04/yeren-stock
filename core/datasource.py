@@ -14,6 +14,7 @@ import http.cookiejar
 import json
 import os
 import queue
+import random
 import re
 import ssl
 import threading
@@ -22,6 +23,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+
+from . import paths
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -40,6 +43,34 @@ _SSL_CTX = ssl.create_default_context()
 _SYS_PROXY = urllib.request.getproxies()   # 导入时读一次系统代理
 _conn_pool: dict[str, queue.Queue] = {}
 _POOL_MAX = 32   # 每 host 池上限，防止长驻进程文件句柄膨胀
+_pool_lock = threading.Lock()
+
+
+def reset_pool(host: str = "") -> int:
+    """丢弃 keep-alive 连接池（全部或指定 host），返回关闭条数。
+
+    长驻进程跑过多轮扫描后，池里可能残留已被服务端关闭的连接；
+    _get 现在会自愈，但提供一个显式出口便于「数据源」面板手动重连。
+    """
+    global _conn_pool
+    closed = 0
+    with _pool_lock:
+        hosts = [host] if host else list(_conn_pool.keys())
+        for h in hosts:
+            q = _conn_pool.pop(h, None)
+            if not q:
+                continue
+            while True:
+                try:
+                    c = q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    c.close()
+                    closed += 1
+                except Exception:
+                    pass
+    return closed
 
 
 # ---------------------------------------------------------------- 东财 Cookie
@@ -55,9 +86,7 @@ _POOL_MAX = 32   # 每 host 池上限，防止长驻进程文件句柄膨胀
 #   1) 环境变量 EAST_MONEY_COOKIE
 #   2) 文件 data/eastmoney_cookie.txt（支持热加载：改文件即生效，无需重启进程）
 EM_COOKIE_ENV = "EAST_MONEY_COOKIE"
-EM_COOKIE_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "eastmoney_cookie.txt")
+EM_COOKIE_FILE = paths.data_path("eastmoney_cookie.txt")
 
 _ck_memo: tuple[float, str] | None = None   # (文件 mtime, 拼好的 cookie)
 
@@ -233,11 +262,13 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
             headers["Cookie"] = ck
     q = _conn_pool.setdefault(host, queue.Queue())
     last_err: Exception | None = None
-    for _ in range(2):
+    for attempt in range(3):
         conn = None
+        reused = False
         try:
             try:
                 conn = q.get_nowait()
+                reused = True
             except queue.Empty:
                 conn = _new_conn(host, timeout)
             if conn.sock is not None:
@@ -245,6 +276,14 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
             conn.request("GET", path, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
+            # keep-alive 池里的连接可能已被服务端单方面关闭：此时 request 不报错、
+            # 但读到的是空 body 或缺状态行的残包。长驻进程（看板服务）跑过几轮
+            # 全市场扫描后必然踩到 —— 表现为「明明代码没错却取不到行情」。
+            # 判定为坏包 → 丢弃连接、换一条重试，不让空数据静默流过。
+            if reused and (not data or resp.status != 200):
+                raise http.client.BadStatusLine(
+                    f"stale pooled conn: status={getattr(resp, 'status', '?')} "
+                    f"len={len(data)}")
             if q.qsize() < _POOL_MAX:
                 q.put(conn)
             else:
@@ -257,6 +296,8 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
                     conn.close()
                 except Exception:
                     pass
+            # 已被复用的坏连接：立即再试一次（下一轮 get_nowait 拿到的要么是新连接，
+            # 要么是池里另一条；池空则新建，天然自愈）
     raise last_err  # type: ignore[misc]
 
 
@@ -369,8 +410,7 @@ def _parse_tx_line(line: str) -> dict | None:
 # 因此要发约 600 个请求。每天首次扫描后把「真实返回了行情的代码」落盘，
 # 同日重扫只扫这 ~5 千只 —— 请求量降约 8 倍，这是快照阶段最大的提速。
 
-VALID_CODES_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "valid_codes.json")
+VALID_CODES_PATH = paths.data_path("valid_codes.json")
 
 
 def load_valid_codes() -> list[str] | None:
@@ -404,8 +444,7 @@ def save_valid_codes(codes: list[str]) -> None:
 # 量能阈值是"全天成交额"口径。盘前/集合竞价时当日累计额约等于 0，
 # 必须退回上一完整交易日的全天额 —— 这个数只能靠本地逐日积累。
 
-MARKET_AMOUNT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "market_amount.json")
+MARKET_AMOUNT_PATH = paths.data_path("market_amount.json")
 
 
 def save_market_amount(date: str, amount_yi: float) -> None:
@@ -576,8 +615,7 @@ def fetch_kline(code: str, n: int = 70) -> list[dict]:
     return cached(f"kline:{code}:{n}", 1800, producer)
 
 
-KLINE_CACHE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "kline")
+KLINE_CACHE_DIR = paths.cache_path("kline")
 
 # 进程内二级缓存：{code: (mtime, bars)}，避免重复读磁盘
 _MEM_KLINE: dict = {}
@@ -783,6 +821,45 @@ def fetch_broken_board_pool(date: str = "") -> list[dict]:
     return _fetch_pool("ZB", date or last_trade_date(), "fbt%3Aasc")
 
 
+def fetch_yesterday_zt_pool(ttl: int = 120) -> list[dict]:
+    """昨日涨停池 + 今日表现 —— 打板溢价率的直接数据源。
+
+    每行：zdp=该股今日涨幅、ylbc=昨日连板数、yfbt=昨日封板时间。
+    打板溢价（昨日涨停股今天赚不赚钱）是情绪最灵敏的单指标：
+    它不依赖本地归档与全市场快照，冷启动当天就有数。
+    """
+    def producer():
+        d = datetime.now()
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        url = (f"{POOL_BASE}/getYesterdayZTPool?ut={POOL_UT}&dpt=wz.ztzt"
+               f"&Pageindex=0&pagesize=600&sort=zs%3Adesc"
+               f"&date={d.strftime('%Y%m%d')}")
+        try:
+            raw = _get(url, timeout=15).decode("utf-8", errors="ignore")
+            js = json.loads(raw)
+        except Exception:
+            return []
+        data = js.get("data") or {}
+        out = []
+        for it in (data.get("pool") or []):
+            try:
+                mkt = "sh" if it.get("m") == 1 else "sz"
+                out.append({
+                    "code": f"{mkt}{it['c']}",
+                    "name": (it.get("n") or "").strip(),
+                    "price": (it.get("p") or 0) / 1000.0,
+                    "pct": it.get("zdp") or 0.0,       # 今日涨幅
+                    "boards_y": it.get("ylbc", 1),      # 昨日连板数
+                    "yfbt": it.get("yfbt", 0),          # 昨日封板时间
+                    "sector": it.get("hybk", ""),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+    return cached("pool:YZT", ttl, producer)
+
+
 # ---------------------------------------------------------------- 历史情绪
 
 def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:
@@ -797,8 +874,7 @@ def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:
     n = len(_fetch_pool("ZT", end, "fbt%3Aasc", ttl=300))
     if n <= 0:
         return []
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "data", "zt_history.json")
+    path = paths.data_path("zt_history.json")
     hist: list[dict] = []
     try:
         if os.path.exists(path):
@@ -831,8 +907,7 @@ def market_amount_history(days: int = 40) -> list[dict]:
 # 池接口忽略 date 入参、无法回溯历史，因此「昨日涨停池 / 老龙档案」只能靠
 # 本地逐日归档积累（与 zt_history.json 同一思路）。
 
-POOL_HIST_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pool_history")
+POOL_HIST_DIR = paths.data_path("pool_history")
 
 
 def save_pool_history(date: str, pool: list[dict]) -> None:
@@ -879,21 +954,69 @@ def pool_history_dates() -> list[str]:
 # 沪综指/深成指行情附带的统计字段（f104 上涨 / f105 下跌 / f106 平）是
 # 全市场口径，两市相加即全市场涨跌家数 —— 情绪温度计最直接的一根温度柱。
 
-# 东财 push2 有多台镜像，clist 接口偶发 RemoteDisconnected —— 逐台轮换提高成功率
+# 东财 push2 有多台镜像，clist 接口偶发 RemoteDisconnected —— 逐台轮换提高成功率。
+# v1.17.0 增补 push2delay（延时行情域名）：实测其 ulist.np 路径与主站相互独立
+# （主站盘中被路径风控时它仍可达）；clist 在该域名上同样可能被掐，
+# 且量级风控触发时全家族一起歇 —— 所以它是「多一次独立重试机会」，不是免死金牌。
 EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
-                  "82.push2.eastmoney.com"]
+                  "82.push2.eastmoney.com", "push2delay.eastmoney.com"]
+
+# ── push2 限速闸门 ──────────────────────────────────────────────────────
+# 实测（2026-10-09）：东财对**行情列表类**接口（clist/get、ulist.np/get）的
+# 风控是按「单位时间的请求量」触发的，而且一旦触发是**整个 push2 家族一起 RST**
+# —— push2 / 1.push2 / 82.push2 / push2his / push2delay 全灭，连查单只股票都
+# 取不到，持续数分钟。换镜像主机完全没用（教训：多镜像≠多额度）。
+# 所以这里做两件事：
+#   ① 串行 + 最小间隔 + 抖动，把突发削平（原来 8 个 worker 并发轰是主因）
+#   ② 被 RST 时记一次**家族级**冷却，所有 push2 调用一起退避，
+#      不再让每个接口各自撞一遍（那样只会把冷却越撞越长）
+PUSH2_MIN_INTERVAL = 0.35      # 同族请求最小间隔（秒）
+PUSH2_COOLDOWN = 180           # 被掐后家族级冷却（秒）
+_p2_lock = threading.Lock()
+_p2_last = 0.0
+_p2_down_until = 0.0
+
+
+def _push2_gate() -> bool:
+    """push2 请求前的闸门。False = 正在冷却，调用方应直接走降级。"""
+    global _p2_last
+    if time.time() < _p2_down_until:
+        return False
+    with _p2_lock:
+        gap = PUSH2_MIN_INTERVAL - (time.time() - _p2_last)
+        if gap > 0:
+            time.sleep(gap + random.uniform(0.0, 0.08))
+        _p2_last = time.time()
+    return True
+
+
+def _push2_trip(seconds: int = PUSH2_COOLDOWN) -> None:
+    """记一次家族级冷却（被 RST / 限流时调用）。"""
+    global _p2_down_until
+    _p2_down_until = max(_p2_down_until, time.time() + seconds)
+
+
+def push2_status() -> dict:
+    """给「数据源」面板看：还剩多久冷却、限速间隔多少。"""
+    return {"cooling_seconds": max(0, round(_p2_down_until - time.time())),
+            "min_interval": PUSH2_MIN_INTERVAL,
+            "hosts": len(EM_PUSH2_HOSTS)}
 
 
 def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dict:
-    """东财 push2 接口（clist / ulist.np）：镜像主机轮换 + 接口级熔断。
+    """东财 push2 接口（clist / ulist.np）：镜像轮换 + 限速 + 接口级熔断。
 
     熔断命中时直接返回 {}，由调用方走自己的降级链路 —— 不再空等 3 台镜像各自超时。
     """
     key = _api_key(path)
     if time.time() < _em_down_until.get(key, 0):
         return {}
+    if not _push2_gate():          # 家族级冷却中，别浪费请求
+        return {}
     soft = False
     for host in EM_PUSH2_HOSTS:
+        if not _push2_gate():
+            break
         try:
             raw = _get(f"https://{host}{path}", timeout=12, referer=referer).decode(
                 "utf-8", errors="ignore")
@@ -912,6 +1035,8 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
         if not soft or n >= EM_BLOCK_MIN_FAILS:
             _em_down_until[key] = time.time() + min(
                 EM_BLOCK_BASE * (2 ** (n - 1)), EM_BLOCK_MAX)
+    # 家族级冷却：行情列表接口被掐时，整个 push2 一起歇一会儿
+    _push2_trip(min(PUSH2_COOLDOWN * (2 ** min(_em_fail.get(key, 1) - 1, 3)), 900))
     return {}
 
 
@@ -988,39 +1113,330 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
     return out
 
 
-def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
-    """行业板块主力资金流排行（按主力净额降序）。
-    返回 [{code,name,pct,main,main_pct,lead,lead_code}]，main 单位元。
+# ---------------------------------------------------------------- 板块数据
+# 东财 clist 接口被**按 URL 路径**风控（三台镜像全部 RemoteDisconnected，实测
+# 2026-10-09 复现），但同一个 push2 服务的 ulist.np 完全可用、且字段一模一样。
+# 所以板块这块整体改走 ulist.np：
+#   ① 板块清单 —— 枚举 90.BKxxxx 号段自己发现（17 个请求扫出 731 个板块，1 秒）
+#   ② 板块资金流 —— ulist.np 批量一次拿全（含领涨股 f204/f205）
+#   ③ 板块成分股 —— 用个股的 f100(所属行业)/f103(所属概念) 自建成员表
+# 三者都落盘，日常运行零 clist 依赖。
 
-    失败不落缓存：接口偶发 RemoteDisconnected，若把空结果缓存 3 分钟，
-    面板会整段时间显示「不可用」—— 这里只在拿到数据时才写缓存。
+BOARD_LIST_PATH = paths.data_path("board_list.json")
+BOARD_MEMBERS_PATH = paths.data_path("board_members.json")
+_BOARD_LIST_TTL = 7 * 86400        # 板块代码变动极少，一周扫一次足够
+_BOARD_RETRY_AFTER = 3600          # 刷新失败后的重试间隔
+_BOARD_MEMBERS_TTL = 3 * 86400     # 成分表三天重建一次
+_BOARD_MEMBERS_MAX_CODES = 1200    # 成员表只扫前 N 只，别为它打上百个请求
+
+# 号段：90.BK0001 ~ 90.BK1399 覆盖东财全部行业 + 概念板块
+_BOARD_CODE_RANGE = range(1, 1400)
+_BOARD_SECTYPE = 90
+
+
+def _ulist_secids(secids: list[str], fields: str, batch: int = 80,
+                  workers: int = 6) -> list[dict]:
+    """ulist.np 批量取数 —— clist 的可用替代（同源、同字段、免鉴权）。
+
+    一次请求塞 80 个 secid；实测比 clist 更稳，也没有路径风控。
+    """
+    if not secids:
+        return []
+    chunks = [secids[i:i + batch] for i in range(0, len(secids), batch)]
+
+    def work(chunk: list[str]) -> list[dict]:
+        js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2&secids="
+                         + ",".join(chunk) + "&fields=" + fields)
+        return (js.get("data") or {}).get("diff") or []
+
+    out: list[dict] = []
+    if len(chunks) == 1:
+        return work(chunks[0])
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for part in pool.map(work, chunks):
+            out.extend(part)
+    return out
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _write_json(path: str, obj) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _discover_boards() -> dict[str, str]:
+    """枚举 90.BKxxxx 号段 → {BK代码: 板块名}。
+
+    板块清单本来靠 clist（fs=m:90+t:2），但该路径已被风控；改用 ulist.np
+    按号段探——服务端对不存在的 secid 直接不返回，等于免费帮我们做了筛选。
+    """
+    codes = [f"{_BOARD_SECTYPE}.BK{n:04d}" for n in _BOARD_CODE_RANGE]
+    found: dict[str, str] = {}
+    for it in _ulist_secids(codes, "f12,f14", batch=80, workers=6):
+        bk, name = str(it.get("f12", "")), it.get("f14", "")
+        if bk and name:
+            found[bk] = name
+    return found
+
+
+def _seed_boards() -> dict[str, str]:
+    """随包发布的板块代码种子表（零请求）。"""
+    try:
+        from . import board_seed
+        return dict(board_seed.BOARDS)
+    except Exception:
+        return {}
+
+
+def fetch_board_codes(force: bool = False) -> dict[str, str]:
+    """{BK代码: 板块名}。
+
+    优先级：磁盘缓存（7 天内）→ 联网枚举刷新 → 磁盘旧值 / 随包种子。
+    种子表让**首启与换机都是零请求**；联网枚举只在缓存过期时做一次，
+    且受 push2 限速闸门约束（~18 个请求 ≈ 6s），失败就退回种子，不硬撞。
+    """
+    now = time.time()
+    disk = _read_json(BOARD_LIST_PATH)
+    ts = _num(disk.get("_ts", 0))
+    boards = disk.get("boards") or {}
+    if boards and not force and now - ts < _BOARD_LIST_TTL:
+        return boards
+
+    if not boards and not force:
+        # 首启 / 换机：磁盘上什么都没有。直接用随包种子，**零请求**秒回，
+        # 并把时间戳摆成"1 小时后再刷新"——没必要为了板块清单在启动时
+        # 打 18 个请求（那正是触发限速的典型动作）。
+        seed = _seed_boards()
+        if seed:
+            _write_json(BOARD_LIST_PATH,
+                        {"_ts": now - _BOARD_LIST_TTL + _BOARD_RETRY_AFTER,
+                         "boards": seed})
+            return seed
+
+    fresh = _discover_boards()
+    if fresh:
+        _write_json(BOARD_LIST_PATH, {"_ts": now, "boards": fresh})
+        return fresh
+
+    fallback = boards or _seed_boards()
+    if fallback:
+        # 刷新失败：把时间戳往前推，让下次重试落在 1 小时后，
+        # 而不是每轮扫描都去撞一次（那只会把限速撞得更死）
+        _write_json(BOARD_LIST_PATH,
+                    {"_ts": now - _BOARD_LIST_TTL + _BOARD_RETRY_AFTER,
+                     "boards": fallback})
+    return fallback
+
+
+def fetch_board_list() -> dict[str, str]:
+    """{板块名: BK代码} —— 题材名 → 板块代码的映射表（mainline 用）。"""
+    return {name: bk for bk, name in fetch_board_codes().items() if name}
+
+
+# ── 新浪板块（独立主机，push2 被掐时的兜底）──────────────────────────────
+# 新浪的板块接口在另一台主机、另一套风控，push2 家族被 RST 时它照样能用。
+# 代价：只有涨跌幅/成交额/领涨股，**没有主力净额**（那是东财独有口径）。
+# 所以它是「面板不至于空掉」的兜底，主口径仍然是东财。
+_SINA_HY = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+_SINA_GN = ("https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php"
+            "?param=class")
+_SINA_REF = "https://finance.sina.com.cn/"
+
+
+def fetch_sina_boards(kind: str = "all") -> list[dict]:
+    """新浪行业/概念板块 → [{name,pct,amount,lead,lead_code}]。
+
+    行格式（实测）：代码,名称,家数,均价,涨跌额,涨跌幅,成交量,成交额,
+                   领涨股代码,领涨股涨跌幅,...,领涨股名
+    """
+    urls = []
+    if kind in ("all", "industry"):
+        urls.append(_SINA_HY)
+    if kind in ("all", "concept"):
+        urls.append(_SINA_GN)
+
+    out: list[dict] = []
+    for url in urls:
+        try:
+            raw = _get(url, timeout=12, referer=_SINA_REF).decode("gbk", "ignore")
+        except Exception:
+            continue
+        body = raw.split("=", 1)[-1].strip().rstrip(";")
+        try:
+            obj = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        for _, line in (obj or {}).items():
+            p = str(line).split(",")
+            if len(p) < 13:
+                continue
+            name = p[1].strip()
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "pct": round(_num(p[5]), 2),
+                "amount": _num(p[7]),
+                "lead": p[12].strip(),
+                "lead_code": p[8].strip(),
+            })
+    return out
+
+
+def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
+    """板块资金流排行（按主力净额降序），**行业 + 概念一起排**。
+    返回 [{code,name,pct,main,main_pct,lead,lead_code,source}]，main 单位元。
+
+    短线真正驱动行情的是概念板块，原来只排行业板块反而漏掉了主线；
+    现在同一批请求把两类都拿回来，主升题材能直接冲到榜首。
+
+    东财被风控时退到新浪：那条链路没有主力净额（main=None），
+    但涨跌幅/成交额/领涨股都有，面板至少能告诉你钱在往哪个方向走。
     """
     key = f"board_flow:{limit}"
     now = time.time()
     hit = _cache.get(key)
-    if hit and now - _cache_ts.get(key, 0) < 180:
+    if hit and now - _cache_ts.get(key, 0) < 600:      # 10 分钟：少打接口
         return hit
 
-    def producer():
-        js = _push2_json("/api/qt/clist/get?pn=1"
-                         f"&pz={limit}&po=1&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:2"
-                         "&fields=f12,f14,f3,f62,f184,f204,f205")
-        diff = (js.get("data") or {}).get("diff") or []
-        out = []
-        for it in diff:
-            out.append({"code": it.get("f12", ""), "name": it.get("f14", ""),
-                        "pct": _num(it.get("f3")), "main": _num(it.get("f62")),
-                        "main_pct": _num(it.get("f184")),
-                        "lead": it.get("f204", ""), "lead_code": it.get("f205", "")})
-        return out
-
-    rows = producer()
-    if not rows:                       # 单次失败重试一次（接口抖动）
-        rows = producer()
+    rows = _board_flow_em(limit) or _board_flow_sina(limit)
     if rows:
         _cache[key] = rows
         _cache_ts[key] = now
     return rows
+
+
+def _board_flow_em(limit: int) -> list[dict]:
+    """东财口径：带主力净额。一次拿全部板块，受 push2 限速闸门约束。"""
+    codes = fetch_board_codes()
+    if not codes:
+        return []
+    secids = [f"{_BOARD_SECTYPE}.{bk}" for bk in codes]
+    diff = _ulist_secids(secids, "f12,f14,f3,f62,f184,f204,f205",
+                         batch=80, workers=2)
+    out = []
+    for it in diff:
+        out.append({"code": str(it.get("f12", "")),
+                    "name": it.get("f14", ""),
+                    "pct": _num(it.get("f3")),
+                    "main": _num(it.get("f62")),
+                    "main_pct": _num(it.get("f184")),
+                    "lead": it.get("f204", ""),
+                    "lead_code": it.get("f205", ""),
+                    "source": "em"})
+    out.sort(key=lambda r: -(r["main"] or 0))
+    return out[:limit]
+
+
+def _board_flow_sina(limit: int) -> list[dict]:
+    """新浪兜底：没有主力净额，按成交额降序（钱多的地方=关注度高）。"""
+    rows = fetch_sina_boards("all")
+    out = []
+    for b in rows:
+        out.append({"code": "", "name": b["name"], "pct": b["pct"],
+                    "main": None, "main_pct": None,
+                    "lead": b["lead"], "lead_code": b["lead_code"],
+                    "amount": b["amount"], "source": "sina"})
+    out.sort(key=lambda r: -(r.get("amount") or 0))
+    return out[:limit]
+
+
+def _board_members_index() -> dict[str, list[dict]]:
+    """{板块名: [成员...]}，由全市场个股的 f100/f103 自建。
+
+    clist 的成分股接口（fs=b:BKxxxx）同样被风控；换个思路——个股自己就带着
+    「所属行业」(f100) 和「所属概念」(f103) 两个字段，把全市场扫一遍按板块
+    归类，等于自己拼出成分表。附带好处：**概念板块也有成分股了**，
+    原来 clist 只喂行业板块，M9 中军验证遇概念题材只能走弱验证。
+
+    落盘缓存：全市场 ~6000 只需 ~75 个请求（数秒），一天最多重建一次。
+    """
+    now = time.time()
+    disk = _read_json(BOARD_MEMBERS_PATH)
+    if disk.get("members") and now - _num(disk.get("_ts", 0)) < _BOARD_MEMBERS_TTL:
+        return disk["members"]
+
+    codes = (load_valid_codes() or [])[:_BOARD_MEMBERS_MAX_CODES]
+    if not codes:
+        return disk.get("members") or {}
+
+    secids = [to_secid_from_code(c) for c in codes]
+    diff = _ulist_secids(secids, "f12,f14,f3,f100,f103,f21",
+                         batch=80, workers=2)
+    members: dict[str, list[dict]] = {}
+    for it in diff:
+        raw = str(it.get("f12", ""))
+        if not raw:
+            continue
+        name = it.get("f14", "")
+        pct = _num(it.get("f3"))
+        mv = _norm_mv_yi(_num(it.get("f21")))
+        row = {"code": _with_market(raw), "name": name, "pct": pct,
+               "float_mv": mv}
+        for board in _split_boards(it.get("f103")):
+            members.setdefault(board, []).append(row)
+        ind = (it.get("f100") or "").strip()
+        if ind:
+            members.setdefault(ind, []).append(row)
+
+    if members:
+        _write_json(BOARD_MEMBERS_PATH, {"_ts": now, "members": members})
+    return members or (disk.get("members") or {})
+
+
+def _split_boards(v) -> list[str]:
+    """f103 是逗号分隔的概念名串。"""
+    if not v:
+        return []
+    return [s.strip() for s in str(v).replace("，", ",").split(",") if s.strip()]
+
+
+def _with_market(num: str) -> str:
+    """6 位代码补交易所前缀（北交所 4/8/92 开头）。"""
+    if num.startswith(("4", "8")) or num.startswith("92"):
+        return "bj" + num
+    if num.startswith(("6", "9", "5")):
+        return "sh" + num
+    return "sz" + num
+
+
+def to_secid_from_code(code: str) -> str:
+    """内部代码（sh600519 / 600519）→ 东财 secid（1.600519 / 0.000001）。"""
+    c = code
+    if c.startswith(("sh", "sz", "bj")):
+        c = c[2:]
+    return ("1." if code.startswith(("sh", "6", "9", "5")) else "0.") + c
+
+
+def fetch_board_constituents(bk_code: str) -> list[dict]:
+    """板块成分股 [{code,name,pct,float_mv(亿)}]，按涨幅降序。
+
+    走自建成员表（ulist.np + f100/f103），不再依赖被风控的 clist。
+    """
+    if not bk_code:
+        return []
+    name = fetch_board_codes().get(bk_code, "")
+    if not name:
+        return []
+    rows = _board_members_index().get(name) or []
+    if not rows:
+        return []
+    out = sorted(rows, key=lambda r: -(r.get("pct") or 0))
+    return list(out)
+
 
 
 # ---------------------------------------------------------------- 龙虎榜
@@ -1158,20 +1574,6 @@ def _norm_mv_yi(v: float) -> float:
     return v
 
 
-def fetch_board_list() -> dict[str, str]:
-    """东财行业板块列表 {板块名: BK代码}。"""
-    def producer():
-        js = _push2_json("/api/qt/clist/get?pn=1&pz=600&po=1&np=1"
-                         "&fltt=2&invt=2&fid=f12&fs=m:90+t:2&fields=f12,f14", EM_REFERER)
-        out: dict[str, str] = {}
-        for it in (js.get("data") or {}).get("diff") or []:
-            code, name = it.get("f12", ""), it.get("f14", "")
-            if code and name:
-                out[name] = code
-        return out
-    return cached("board_list", 86400, producer)
-
-
 def fetch_board_kline(bk_code: str, n: int = 70) -> list[dict]:
     """东财行业板块指数日K，返回 [{date,open,close,high,low,volume,amount}]。"""
     def producer():
@@ -1196,25 +1598,17 @@ def fetch_board_kline(bk_code: str, n: int = 70) -> list[dict]:
     return cached(f"bk_kline:{bk_code}:{n}", 600, producer)
 
 
-def fetch_board_constituents(bk_code: str) -> list[dict]:
-    """东财行业板块成分股 [{code,name,pct,float_mv(亿)}]，按涨幅降序。"""
-    def producer():
-        js = _push2_json("/api/qt/clist/get?pn=1&pz=1000&po=1&np=1"
-                         "&fltt=2&invt=2&fid=f3&fs=b:" + bk_code + "&fields=f12,f14,f3,f21",
-                         EM_REFERER)
-        out = []
-        for it in (js.get("data") or {}).get("diff") or []:
-            code = str(it.get("f12", ""))
-            if not code:
-                continue
-            if code.startswith(("4", "8")) or code.startswith("92"):
-                mkt = "bj"
-            elif code.startswith(("6", "9")):
-                mkt = "sh"
-            else:
-                mkt = "sz"
-            out.append({"code": mkt + code, "name": it.get("f14", ""),
-                        "pct": _num(it.get("f3")),
-                        "float_mv": _norm_mv_yi(_num(it.get("f21")))})
-        return out
-    return cached(f"bk_cons:{bk_code}", 300, producer)
+def fetch_board_constituents_raw(bk_code: str) -> list[dict]:
+    """（已废弃）原 clist 版成分股，保留仅作对照，不再被调用。"""
+    js = _push2_json("/api/qt/clist/get?pn=1&pz=1000&po=1&np=1"
+                     "&fltt=2&invt=2&fid=f3&fs=b:" + bk_code + "&fields=f12,f14,f3,f21",
+                     EM_REFERER)
+    out = []
+    for it in (js.get("data") or {}).get("diff") or []:
+        code = str(it.get("f12", ""))
+        if not code:
+            continue
+        out.append({"code": _with_market(code), "name": it.get("f14", ""),
+                    "pct": _num(it.get("f3")),
+                    "float_mv": _norm_mv_yi(_num(it.get("f21")))})
+    return out

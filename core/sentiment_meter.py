@@ -17,10 +17,10 @@ import json
 import os
 
 from . import datasource as ds
+from . import paths
+from . import stage_stabilizer as stab
 
-HIST_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "sentiment_history.json")
+HIST_PATH = paths.data_path("sentiment_history.json")
 
 # 情绪阶段（六阶段口径）
 STAGES = {
@@ -195,11 +195,27 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     seal_rate = (n_zt / seal_pool) if seal_pool else 0.0
 
     # 昨日涨停池 → 晋级率 / 赚钱效应（打板承接）
+    # 优先用东财「昨日涨停池+今日表现」：独立口径、不依赖本地归档与全市场
+    # 快照 —— 归档缺档/冷启动时它照样有数，打板溢价不再显示"待积累"。
+    # 全零涨幅视为无效（盘前当日数据未生成），退回本地算法。
     pdate, ppool = _prev_pool(real_date)
     promote_rate = None
     money_effect = None
     height_premium = None
-    if ppool and snaps:
+    premium_src = ""
+    yzt = ds.fetch_yesterday_zt_pool()
+    if yzt and any(_f(r.get("pct")) != 0 for r in yzt):
+        today_zt = {r.get("code") for r in zt}
+        prem = [_f(r.get("pct")) for r in yzt]
+        money_effect = round(sum(prem) / len(prem), 2)
+        alive = sum(1 for r in yzt
+                    if _f(r.get("pct")) >= 9.5 or r.get("code") in today_zt)
+        promote_rate = round(alive / len(yzt), 3)
+        hs = [_f(r.get("pct")) for r in yzt if _i(r.get("boards_y"), 1) >= 2]
+        if hs:
+            height_premium = round(sum(hs) / len(hs), 2)
+        premium_src = "em"
+    elif ppool and snaps:
         today_zt = {r.get("code") for r in zt}
         alive = 0
         prem_sum = 0.0
@@ -223,6 +239,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
             money_effect = round(prem_sum / prem_cnt, 2)
         if h_cnt:
             height_premium = round(h_sum / h_cnt, 2)
+        premium_src = "local" if prem_cnt else ""
 
     breadth = ds.fetch_breadth()
     up_ratio = breadth.get("up_ratio") if breadth else None
@@ -243,6 +260,11 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
             break
 
     stage = _stage_of(temp, ebb_flag, prev_temp)
+    # 退潮与否**以 M3 稳定器的确认为准**（E1 只用自己的温度决定非退潮时的档位）。
+    # 两个页面各报一个阶段是"一会能出手一会退潮"的另一个来源，这里统一口径。
+    v = stab.peek(real_date)
+    if v["confirmed"]:
+        stage = "ebb"
     info = STAGES.get(stage, STAGES["revive"])
 
     # 一字板家数 / 平均封成比
@@ -258,6 +280,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "hurt_area": round(hurt_area, 3),
         "promote_rate": promote_rate, "money_effect": money_effect,
         "height_premium": height_premium, "avg_seal_ratio": avg_seal_ratio,
+        "premium_src": premium_src,       # em=东财昨日涨停池 / local=本地归档
         "breadth": breadth, "prev_pool_date": pdate, "prev_temp": prev_temp,
     }
     delta = (temp - prev_temp) if prev_temp is not None else None

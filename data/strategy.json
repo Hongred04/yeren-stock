@@ -1,6 +1,6 @@
 {
-  "name": "野人原版",
-  "desc": "全能的野人原味体系：缩量做短线题材、审美三要素、退潮清仓",
+  "name": "野人体系",
+  "desc": "平常中长线波段为主、不打板不做短线；市场缩量时才切短线题材应对打法。个股适合哪种打法写在股票详情里。",
   "M1_macro": {
     "enabled": true,
     "fear_hawkish": "risk_off",
@@ -21,8 +21,16 @@
     "ebb_limit_down_ratio": 0.15,
     "ebb_broken_ratio": 0.5,
     "clear_on_ebb": true,
+    "ebb_trial_weight": 0.05,
     "probe_board": 1,
-    "cycle_low_probe": true
+    "cycle_low_probe": true,
+    "ebb_enter_n": 2,
+    "ebb_enter_span": 60,
+    "ebb_strong_margin": 0.15,
+    "ebb_exit_n": 2,
+    "ebb_exit_span": 180,
+    "ebb_exit_margin": 0.1,
+    "ebb_warmup_min": 30
   },
   "M4_aesthetic": {
     "enabled": true,
@@ -52,7 +60,8 @@
     "cash_reserve": 0.2,
     "hold_before_boards": 5,
     "add_on_strength": true,
-    "max_single_weight": 0.6
+    "max_single_weight": 0.6,
+    "ebb_trial_weight": 0.05
   },
   "M6_message": {
     "enabled": true,
@@ -116,6 +125,11 @@
         "id": "volume_only",
         "text": "缩量市场只信量能，不信任何板块吹嘘",
         "on": true
+      },
+      {
+        "id": "shrink_react",
+        "text": "短线是缩量期的应对打法、不是常态：平时中长线波段，不打板不做短线",
+        "on": true
       }
     ]
   },
@@ -136,7 +150,8 @@
     "dragon_premium_min": 3.0,
     "firstboard_survive_min": 0.5,
     "survive_pct_min": 3.0,
-    "midarmy_feedback_max": -2.0
+    "midarmy_feedback_max": -2.0,
+    "theme_lookback_days": 10
   },
   "M10_fundstyle": {
     "enabled": true,
@@ -148,6 +163,17 @@
     "hot_zt10_min": 2,
     "zhuang_crash_pct": -7.0,
     "zhuang_chop_amp": 2.8
+  },
+  "E1_meter": {
+    "enabled": true,
+    "ebb_hurt_ratio": 0.3
+  },
+  "E2_lhb": {
+    "enabled": true
+  },
+  "E3_flow": {
+    "enabled": true,
+    "board_top_n": 10
   },
   "preset": "wildman"
 }

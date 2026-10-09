@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 from datetime import datetime
 
+from . import cls as cls_mod
 from . import datasource as ds
 from . import engine
-from . import fundstyle
+from . import journal as journal_mod
+from . import kph as kph_mod
 from . import lhb as lhb_mod
 from . import mainline
 from . import moneyflow as flow_mod
+from . import outlook
 from . import portfolio as portfolio_mod
 from . import sentiment_meter
 from . import strategy_config as sc
@@ -72,10 +76,12 @@ _CODE_RE = re.compile(r"^(sh|sz|bj)\d{6}$")
 
 def stock_detail(code: str) -> dict:
     """单只股票完整详情。返回 {ok, stock, error}。"""
-    code = (code or "").strip().lower()
+    raw = (code or "").strip()
+    code = universe.normalize(raw)
     if not _CODE_RE.match(code):
-        return {"ok": False, "error": f"代码格式不对：{code or '(空)'}"
-                                       "（应为 sh600519 / sz000001 / bj430047）"}
+        return {"ok": False, "error": f"代码格式不对：{raw or '(空)'}"
+                                       "（应为 sh600519 / sz000001 / bj430047，"
+                                       "或直接填 6 位数字如 600519）"}
 
     cfg = sc.load_config()
     try:
@@ -84,7 +90,10 @@ def stock_detail(code: str) -> dict:
         return {"ok": False, "error": f"取行情失败：{type(e).__name__}"}
     snap = snaps.get(code)
     if not snap:
-        return {"ok": False, "error": f"没取到 {code} 的行情（代码可能不存在或已退市）"}
+        return {"ok": False,
+                "error": f"没取到 {code} 的行情 —— 可能是停牌、已退市，"
+                         f"或代码/交易所前缀填错了（{code[:2]} 开头）。"
+                         f"可在「管理」里删掉这条自选后重新添加。"}
 
     try:
         kl = ds.fetch_klines([code], n=70, workers=1)
@@ -100,16 +109,30 @@ def stock_detail(code: str) -> dict:
     volume = cached.get("volume") or {"mode": "unknown"}
 
     p = engine.score_one(cfg, code, snap, bars, zt, preopen=preopen)
+    # 今日涨停原因（财联社）—— 涨停股才有；匹配不上就不显示
+    try:
+        _rz = cls_mod.limit_up_reasons().get(code)
+    except Exception:
+        _rz = None
+    if _rz:
+        p["zt_reason"] = _rz
     p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
     p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
     p["kline_tail"] = bars[-30:]
     p["tradable"] = bool(sentiment.get("can_trade", True)) and volume.get("mode") != "dry"
     p["block_note"] = ""
     if not p["tradable"]:
-        p["block_note"] = ("情绪退潮期，今天不新开仓" if not sentiment.get("can_trade", True)
-                           else "量能极度萎缩，今天不新开仓")
-    if cfg.get("M10_fundstyle", {}).get("enabled", True) and bars:
-        p["fund_style"] = fundstyle.classify(bars, code, p.get("float_mv", 0.0), cfg)
+        if sentiment.get("trial_only") and volume.get("mode") != "dry":
+            tw = float(sentiment.get("ebb_trial_weight") or 0.05)
+            p["tradable"] = int(p.get("zt_boards") or 0) <= 1
+            p["trial_only"] = True
+            p["block_note"] = (f"退潮期只做首板试错，上限 {trading.pos_cn(tw)}；"
+                               f"连板股不接力" if not p["tradable"]
+                               else f"退潮期允许 {trading.pos_cn(tw)} 试错仓，只做首板")
+        else:
+            p["block_note"] = ("情绪退潮期，今天不新开仓"
+                               if not sentiment.get("can_trade", True)
+                               else "量能极度萎缩，今天不新开仓")
     return {"ok": True, "stock": p, "date": datetime.now().strftime("%Y-%m-%d")}
 
 
@@ -193,6 +216,24 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         zb = ds.fetch_broken_board_pool(date)
         # 池接口忽略 date 入参，以接口自报的 qdate 为准
         real_date = ds.pool_qdate() or date
+
+        # ---- 历史归档回补（开盘红）：缺哪天补哪天，补过/试过就不再发请求 ----
+        try:
+            bf = kph_mod.autobackfill(real_date)
+            if bf.get("filled"):
+                print(f"[pipeline] 历史归档回补: {', '.join(bf['filled'])}", file=sys.stderr)
+        except Exception as e:
+            print(f"[pipeline] 归档回补失败: {e}", file=sys.stderr)
+
+        # ---- 财联社涨停原因：挂到每只涨停股（详情页展示 + 随归档留存） ----
+        try:
+            _reasons = cls_mod.limit_up_reasons()
+        except Exception:
+            _reasons = {}
+        if _reasons:
+            for r in zt:
+                r.setdefault("reason", _reasons.get(r.get("code", ""), ""))
+
         zth = ds.fetch_limit_up_history(10, real_date)
         idx = ds.fetch_index_snapshots()
         amount = sum(v["amount"] for v in idx.values()
@@ -209,7 +250,9 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                                         fallback_amount=ds.load_last_complete_amount(real_date))
         if sess["phase"] in ("just_closed", "after_close", "rest") and amt_yi > 0:
             ds.save_market_amount(real_date, amt_yi)
-        sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth)
+        sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth,
+                                              real_date=real_date,
+                                              tmin=sess.get("tmin"))
 
         # ---- 选股 ----
         codes = ds.load_valid_codes()
@@ -241,6 +284,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
             p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
             p["kline_tail"] = bars[-30:]
+            if _reasons.get(p["code"]):
+                p["zt_reason"] = _reasons[p["code"]]
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
 
@@ -256,19 +301,27 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         _prog("构建情绪温度计…", 0, 100)
         meter = sentiment_meter.build(zt, dt, zb, snaps, real_date, cfg)
 
-        # ---- E2 龙虎榜·游资席位 ----
+        # ---- E2 龙虎榜·游资席位（数据只进「资金在干什么」结论，不上界面） ----
         _prog("拉取龙虎榜…", 0, 100)
         lhb_data = lhb_mod.evaluate(cfg, real_date, zt)
-        seat_hits = lhb_data.get("seat_hits", {})
-        if seat_hits:
-            for p in picks:
-                tags = seat_hits.get(p["code"])
-                if tags:
-                    p["lhb_tags"] = tags
 
-        # ---- E3 主力资金流（板块 + 候选股） ----
+        # ---- E3 主力资金流（板块 + 候选股 + 资金结论 + 板块资金记忆） ----
         _prog("拉取主力资金流…", 0, 100)
-        flow = flow_mod.evaluate(cfg, picks, snaps, ml.get("theme", ""), zt)
+        flow = flow_mod.evaluate(cfg, picks, snaps, ml.get("theme", ""), zt,
+                                 lhb=lhb_data, real_date=real_date)
+
+        # ---- 板块主线/支线/强势判断 ----
+        sectors = mainline.sector_view(ml, flow, zt)
+
+        # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
+        _prog("推演明日判断…", 0, 100)
+        next_outlook = outlook.build(cfg, real_date, sentiment, volume,
+                                     meter=meter, ml=ml, flow=flow,
+                                     sectors=sectors, macro=macro, plan=plan)
+
+        # ---- E4 信号复盘档案（胜率闭环；t+1/涨停不可买/停牌/成本约束） ----
+        _prog("结算信号档案…", 0, 100)
+        journal_data = journal_mod.run(cfg, real_date, picks, kl)
 
         # ---- 持仓体检（本地持仓/自选） ----
         _prog("持仓体检…", 0, 100)
@@ -299,6 +352,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 "date": real_date,
                 "requested_date": date,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                # epoch 秒：前端的静默刷新靠它判断"服务器上有没有更新的一份"
+                "ts": time.time(),
                 "session": sess,
                 "preset": cfg.get("preset"),
                 "preset_name": cfg.get("name", ""),
@@ -316,8 +371,10 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "sentiment": sentiment,
             "meter": meter,
             "mainline": ml,
-            "lhb": lhb_data,
+            "sectors": sectors,
+            "outlook": next_outlook,
             "flow": flow,
+            "journal": journal_data,
             "portfolio": port,
             "picks": picks,
             "position": plan,

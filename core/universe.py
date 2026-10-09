@@ -37,6 +37,43 @@ def enumerate_all() -> list[str]:
     return codes
 
 
+def normalize(code: str) -> str:
+    """把用户输入的代码规范成内部格式（带 sh/sz/bj 前缀）。
+
+    用户手输自选/持仓时常常只写 6 位数字（603466、000001、300750），
+    或写成 603466.SH / SZ000001 这类券商格式 —— 行情接口只认
+    sh600519 / sz000001 / bj430047。这里统一补齐前缀；识别不了就原样返回，
+    交给调用方报错。
+    """
+    if not code:
+        return ""
+    s = str(code).strip().lower().replace(" ", "")
+    # 去掉交易所后缀：603466.sh / 000001.sz / 600519.ss
+    for suf in (".sh", ".sz", ".bj", ".ss", ".sse", ".szse"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    # 已是带前缀格式
+    if len(s) >= 8 and s[:2] in ("sh", "sz", "bj") and s[2:].isdigit():
+        return s[:2] + s[2:8]
+    # 纯数字（可能不足 6 位，补零）
+    if s.isdigit():
+        num = s.zfill(6)
+        if len(num) != 6:
+            return code
+        if num.startswith(("600", "601", "603", "605", "688", "689")):
+            return "sh" + num
+        if num.startswith(("000", "001", "002", "003", "300", "301")):
+            return "sz" + num
+        if num.startswith(("430", "830", "831", "832", "833", "834", "835",
+                           "836", "837", "838", "839", "870", "871", "872",
+                           "873", "874", "875", "876", "877", "920")):
+            return "bj" + num
+        # 兜底：5/6 开头给沪、其余给深（覆盖 002 之类老段）
+        return ("sh" if num.startswith("5") or num.startswith("6") else "sz") + num
+    return code
+
+
 def to_qt_symbol(code: str) -> str:
     """内部代码 -> 腾讯接口符号（一致）。"""
     return code

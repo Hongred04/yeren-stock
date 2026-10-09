@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from . import cls as cls_mod
 from . import datasource as ds
 from . import news as news_mod
 
@@ -30,7 +31,7 @@ MESSAGE_LEVELS = {
     "A": {"name": "A级 · 部委政策 + 产业事件共振", "ceiling": "空间上限：中级行情", "gate_ok": True},
     "B": {"name": "B级 · 行业级事件/景气数据", "ceiling": "空间上限：局部主线", "gate_ok": True},
     "C": {"name": "C级 · 个股公告/传闻", "ceiling": "撑不起主线：脉冲后回落", "gate_ok": False},
-    "auto": {"name": "未录入", "ceiling": "未定级按观察处理：请在「调策略 → M9」录入消息级别", "gate_ok": False},
+    "auto": {"name": "未录入", "ceiling": "未定级按观察处理：请在「调策略」→「高级参数」→ M9 录入消息级别", "gate_ok": False},
 }
 
 STATUS_CN = {
@@ -94,13 +95,15 @@ def _fmt_date(d: str) -> str:
     return f"{d[4:6]}-{d[6:8]}" if len(d) == 8 else d
 
 
-def _theme_recent_history(real_date: str, lookback: int = 10) -> list[tuple[str, str]]:
-    """近 N 个已归档交易日的每日最强题材 [(date, top_sector)]，旧→新。
+def _theme_recent_history(real_date: str, lookback: int = 10) -> list[tuple[str, list[dict]]]:
+    """近 N 个已归档交易日的**活跃题材榜** [(date, [题材项,...])]，旧→新。
 
-    用涨停池本地归档按当日同口径重放聚类 —— 这是「主线回归」识别的依据：
-    题材前几天领衔过、今天二次登场，不是新题材首日。
+    活跃 = 当日合力榜前 3 且涨停 ≥2 家。**不能只记每天的第一名** ——
+    题材连续几天在第 2、第 3 名爬坡（涨停家数、最高板一天天抬高）正是典型的
+    「已在启动中」；只看冠军的话，等它登顶那天记忆里查无此题材，
+    会把它当成「新题材首日」，等于没有记忆（电池 09-30→10-08→10-09 实测踩到）。
     """
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, list[dict]]] = []
     for d in ds.pool_history_dates():
         if real_date and d >= real_date:
             continue
@@ -108,8 +111,9 @@ def _theme_recent_history(real_date: str, lookback: int = 10) -> list[tuple[str,
         if not pool:
             continue
         th = _cluster_themes(pool, 103000)
-        if th:
-            out.append((d, th[0]["sector"]))
+        act = [t for t in th[:3] if _int(t.get("zt"), 0) >= 2]
+        if act:
+            out.append((d, act))
     return out[-max(2, lookback):]
 
 
@@ -151,8 +155,10 @@ def _signal_message(a: dict, theme_name: str = "",
                     suggestion: dict | None = None) -> dict:
     """S1 消息定级别。
 
-    手动录入（message_level != auto）永远优先；未录入时若开启 auto_message
-    且系统从快讯中定级成功，则采用「系统建议级别」，证据（命中新闻）随信号输出。
+    手动录入（message_level != auto）永远优先；未录入时采用「系统建议级别」：
+    今日快讯自动定级 + **消息记忆**（近 S 20天 / A 10天 / B 5天内的重要消息），
+    两者取更高者 —— 大级别政策不会因为快讯池翻不到旧闻就"消失"。
+    证据（命中消息/记忆原文）随信号输出供人工复核。
     """
     lv = a.get("message_level") or "auto"
     info = MESSAGE_LEVELS.get(lv, MESSAGE_LEVELS["auto"])
@@ -160,31 +166,54 @@ def _signal_message(a: dict, theme_name: str = "",
     rules = ["先判断消息分量：消息级别决定行情空间的上限，消息不够大，后面都不用看"]
 
     ev_head = (suggestion or {}).get("evidence", [])[:2]
-    ev_str = "；".join(f"{e['time'][5:16]} {e['text'][:46]}" for e in ev_head)
+    ev_str = "；".join(f"{str(e.get('time',''))[5:16]} {str(e.get('text',''))[:46]}"
+                       for e in ev_head)
+
+    def _lv_name(code: str) -> str:
+        return MESSAGE_LEVELS.get(code, {}).get("name", code or "—")
 
     if lv == "auto":
-        if a.get("auto_message", True) and suggestion and suggestion.get("found"):
+        if suggestion and suggestion.get("found"):
             s_info = MESSAGE_LEVELS.get(suggestion["level"], MESSAGE_LEVELS["auto"])
             state = "pass" if s_info["gate_ok"] else "fail"
-            since = suggestion.get("since") or ""
-            ev = (f"自动定级 {s_info['name']}（依据{suggestion.get('scanned', 0)}条快讯"
-                  f"与主题材的关联匹配，覆盖至 {since}）"
-                  + (f"：{ev_str}" if ev_str else ""))
-            detail = rules + ["自动定级按关键词规则：国家战略S → 部委政策A → 行业事件B → "
-                              "个股公告C；只统计与主题材相关的快讯，如有出入请手动录入覆盖"]
+            mem = suggestion.get("memory")
+            if mem:
+                mem_day = _fmt_date(mem.get("date", ""))
+                today_lv = suggestion.get("today_level") or ""
+                ev = (f"消息记忆：{mem_day} 出现 {_lv_name(mem['level'])}"
+                      f"（{mem.get('days', 0)} 天前，仍在有效期内）")
+                if today_lv and today_lv != mem["level"]:
+                    ev += f"；今日快讯最高仅 {today_lv} 级"
+                ev += (f"：{ev_str}" if ev_str else "")
+                detail = rules + [
+                    "大级别政策不会因为日历翻页失效（有效期：S级记20天 / A级10天 / B级5天）；"
+                    "快讯池只能翻两三天，靠消息记忆兜住 —— "
+                    "这就是「前几天发的政策，今天还认」的机制"]
+            else:
+                since = suggestion.get("since") or ""
+                ev = (f"自动定级 {s_info['name']}（依据{suggestion.get('scanned', 0)}条快讯"
+                      f"与主题材的关联匹配，覆盖至 {since}）"
+                      + (f"：{ev_str}" if ev_str else ""))
+                detail = rules + ["自动定级按关键词规则：国家战略S → 部委政策A → 行业事件B → "
+                                  "个股公告C；只统计与主题材相关的快讯，如有出入请手动录入覆盖"]
         else:
             state = "unknown"
             ev = "消息级别：未定级。" + (
-                f"自动快讯未检测到与主题材「{theme_name}」直接相关的政策/事件消息"
+                f"自动快讯未检测到与主题材「{theme_name}」直接相关的政策/事件消息，"
+                f"消息记忆（近20日）里也没有"
                 if a.get("auto_message", True)
-                else "自动定级已关闭，请在「调策略 → M9」录入消息级别")
+                else "自动定级已关闭，请在「调策略」→「高级参数」→ M9 录入消息级别")
             detail = rules + ["盘中快速轮动启动的题材，快讯可能滞后 —— 人工确认后可手动录入"]
     else:
         state = "pass" if info["gate_ok"] else "fail"
         ev = f"消息级别：{info['name']}。{info['ceiling']}"
         if note:
             ev += f"｜今日消息：{note}"
-        if suggestion and suggestion.get("found"):
+        mem = (suggestion or {}).get("memory")
+        if mem:
+            ev += (f"｜消息记忆：{_fmt_date(mem.get('date', ''))} "
+                   f"{_lv_name(mem['level'])}（有效期内）")
+        elif suggestion and suggestion.get("found"):
             s_info = MESSAGE_LEVELS.get(suggestion["level"], MESSAGE_LEVELS["auto"])
             ev += f"｜快讯扫描也见{s_info['name']}" + (f"：{ev_str}" if ev_str else "")
         detail = rules
@@ -447,14 +476,19 @@ def _trio_checks(base_pool: list[dict], snaps: dict[str, dict],
 
 
 def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
-                     zt: list[dict], theme_name: str) -> tuple[dict, dict]:
+                     zt: list[dict], theme_name: str,
+                     themes: list[dict] | None = None) -> tuple[dict, dict]:
     """S5 次日定生死：基准日涨停池 → 今日的三项真金白银检验。
 
     基准日的选取（题材不是凭空来的）：
-      昨日最强题材 = 今日主线   → 基准 = 昨日全池（标准次日语径）
-      今日主线近 N 日领衔过      → 基准 = 该题材上次领衔日的池 —— 主线回归日
-                                   （二波），承接今日盘中即可检验，不必等明日
-      其他                      → 新题材首日，昨日池数据仅供参考
+      昨日活跃榜里有该题材      → 按延续口径检验；它就是昨日第一名时用昨日全池
+                                 （标准次日口径），否则用该题材自己的昨日涨停池 ——
+                                 题材连续多日爬坡（第3→第2→第1）也算延续，不算首日；
+      今日主线近 N 日活跃过      → 基准 = 该题材上次活跃日的池 —— 主线回归（二波）；
+      其他                      → 新题材首日，昨日池数据仅供参考。
+
+    "活跃榜"按前 3 且涨停 ≥2 家记 —— 只记第一名会把爬坡中的题材忘掉
+    （电池 09-30 第3 → 10-08 第2 → 10-09 第1 的实测教训）。
     """
     mv_min = _float(a.get("midarmy_mv_min"), 100.0)
     prem_min = _float(a.get("dragon_premium_min"), 3.0)
@@ -462,11 +496,16 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
     surv_pct = _float(a.get("survive_pct_min"), 3.0)
     fb_max = _float(a.get("midarmy_feedback_max"), -2.0)
     today_zt = {r.get("code"): r for r in zt}
+    themes = themes or []
 
     def pending(ev: str, detail: list[str]) -> tuple[dict, dict]:
         return ({"id": "S5", "name": "次日定生死", "state": "pending",
                  "evidence": ev, "detail": detail},
                 {"available": False})
+
+    # 今日该题材在合力榜里的位置（轨迹展示要用）
+    today_entry = next((x for x in themes if x.get("sector") == theme_name), None)
+    today_rank = _int((today_entry or {}).get("rank"), 0)
 
     dates = [d for d in ds.pool_history_dates() if not real_date or d < real_date]
     if not dates:
@@ -480,61 +519,103 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
 
     ythemes = _cluster_themes(yp, 103000)
     ytop = ythemes[0]["sector"] if ythemes else ""
-    theme_match = bool(theme_name) and ytop == theme_name
+    y_active = [t["sector"] for t in ythemes[:3] if _int(t.get("zt"), 0) >= 2]
+    theme_match = bool(theme_name) and theme_name in y_active
 
-    # 主线回归识别：近 N 日内该题材领衔过涨停池（当过主线）
+    # 近 N 日活跃轨迹 + 连续活跃天数（含今日）
     lookback = max(2, _int(a.get("theme_lookback_days"), 10))
     hist = _theme_recent_history(real_date, lookback)
-    seen = [d for d, s in hist if s == theme_name]
+    track: list[dict] = []
+    for d, act in hist:
+        for t in act:
+            if t["sector"] == theme_name:
+                track.append({"date": d, "rank": _int(t.get("rank"), 0),
+                              "zt": _int(t.get("zt"), 0),
+                              "max_boards": _int(t.get("max_boards"), 0)})
+                break
+    seen = [x["date"] for x in track]
+    prev_streak = 0
+    for _d, act in reversed(hist):
+        if any(t["sector"] == theme_name for t in act):
+            prev_streak += 1
+        else:
+            break
+    streak = (prev_streak + 1) if theme_name else 0
+    streak_since = (track[-prev_streak]["date"] if prev_streak
+                    else (track[-1]["date"] if track else ""))
+    track_full = list(track)
+    if today_entry is not None:
+        track_full.append({"date": real_date, "rank": today_rank,
+                           "zt": _int(today_entry.get("zt"), 0),
+                           "max_boards": _int(today_entry.get("max_boards"), 0)})
+
     return_day = bool(theme_name) and not theme_match and bool(seen)
 
     base_date, base_pool = ydate, yp
+    base_kind = "昨日全池"
+    if theme_match and theme_name != ytop:
+        # 昨日活跃但不是第一名：用该题材自己的昨日涨停池做承接检验（延续口径）
+        bp = [r for r in yp if (r.get("sector") or "") == theme_name]
+        if bp:
+            base_pool, base_kind = bp, "该题材昨日涨停池"
     if return_day:
         base_date = seen[-1]
         bp = [r for r in ds.load_pool_history(base_date)
               if (r.get("sector") or "") == theme_name]
         if bp:
-            base_pool = bp
+            base_pool, base_kind = bp, "该题材上次活跃日涨停池"
         else:   # 该日归档损坏/无该题材记录，退回昨日口径
-            base_date, base_pool = ydate, yp
+            base_date, base_pool, base_kind = ydate, yp, "昨日全池"
             return_day = False
 
     t = _trio_checks(base_pool, snaps, today_zt, mv_min, prem_min,
                      surv_min, surv_pct, fb_max)
+    track_extra = {"theme_match": theme_match, "return_day": return_day,
+                   "streak": streak, "streak_since": streak_since,
+                   "theme_track": track_full, "base_kind": base_kind}
     if not t["any_data"]:
-        return pending("基准日涨停池个股今日快照缺失（停牌/代码变更），待验证",
-                       ["主线不是当天确认的：明日开盘再看空间龙溢价、首板留存、中军反馈"])
+        return ({"id": "S5", "name": "次日定生死", "state": "pending",
+                 "evidence": "基准日涨停池个股今日快照缺失（停牌/代码变更），待验证",
+                 "detail": ["主线不是当天确认的：明日开盘再看空间龙溢价、首板留存、中军反馈"]},
+                {"available": False, **track_extra})
 
     day2 = {"available": True, "yesterday_date": ydate, "yesterday_theme": ytop,
-            "theme_match": theme_match, "return_day": return_day,
             "base_date": base_date, "times_in_window": len(seen),
-            "theme_history": [(d, s) for d, s in hist[-6:]],
+            "theme_history": [{"date": d, "sectors": [x["sector"] for x in act]}
+                              for d, act in hist[-6:]],
             "dragon_premium": None if t["avg_prem"] is None else round(t["avg_prem"], 2),
             "survive_rate": None if t["surv_rate"] is None else round(t["surv_rate"], 3),
             "firstboard_total": t["fb_total"], "firstboard_alive": t["alive"],
             "midarmy_worst": None if t["worst"] is None else {"name": t["worst"][0],
                                                               "pct": t["worst"][1]},
-            "candidates": t["cand_rows"]}
+            "candidates": t["cand_rows"], **track_extra}
 
     parts = t["parts"]
+    streak_txt = (f"该题材已连续 {streak} 日活跃（{_fmt_date(streak_since)} 起）"
+                  if streak >= 2 else "")
 
     if theme_match:
         ok_cnt = sum([t["prem_ok"], t["surv_ok"], t["army_ok"]])
         state = "pass" if ok_cnt == 3 else "fail"
-        ev = "；".join(parts) if parts else "数据不足"
-        detail = (["三者齐备，主线地位成立 —— 空间龙高溢价、首板留得住、中军不砸盘"]
-                  if state == "pass" else
-                  ["三项检验未全过 —— 高开不能兑现就是坑，主线地位不成立，按一日游处理"])
+        lead = (f"「{theme_name}」" + (streak_txt + "，" if streak_txt else "")
+                + f"{base_kind}：")
+        ev = lead + ("；".join(parts) if parts else "数据不足")
+        if state == "pass":
+            detail = ["三者齐备，主线地位成立 —— 空间龙高溢价、首板留得住、中军不砸盘"]
+        else:
+            detail = ["三项检验未全过 —— 高开不能兑现就是坑，主线地位不成立，按一日游处理"]
+        if streak_txt:
+            detail.insert(0, streak_txt + " —— 不是首日，是延续行情，按延续题材料理")
     elif return_day:
         present = [x for x in (t["avg_prem"], t["surv_rate"], t["worst"])
                    if x is not None]
         ok_cnt = sum([t["prem_ok"], t["surv_ok"], t["army_ok"]])
-        base_txt = f"基准 {_fmt_date(base_date)} 该题材涨停池"
+        base_txt = f"基准 {_fmt_date(base_date)} {base_kind}"
         if len(present) >= 2 and ok_cnt == len(present):
             state = "pass"
             ev = (f"主线回归承接成立（{base_txt}，近{lookback}日第{len(seen)}次登场）："
                   + "；".join(parts))
-            detail = ["回归日的检验基准是「该题材上次领衔日」的涨停池，不是昨日热点",
+            detail = ["回归日的检验基准是「该题材上次活跃日」的涨停池，不是昨日热点",
                       "三项齐备 = 二波承接成立，按主线节奏对待；老龙/中军高位注意随时切换口径"]
         elif len(present) >= 2:
             state = "fail"
@@ -544,14 +625,14 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
                       "二波比首波更挑承接，接不住别硬做"]
         else:
             state = "weak"
-            ev = (f"主线回归（上次领衔 {_fmt_date(base_date)}，近{lookback}日第{len(seen)}次），"
+            ev = (f"主线回归（上次活跃 {_fmt_date(base_date)}，近{lookback}日第{len(seen)}次），"
                   "承接数据不足：" + ("；".join(parts) if parts else "快照缺失")
                   + "，先按观察处理")
             detail = ["回归日承接数据不足 —— 盘中看老龙能否新高，有承接再定性"]
     else:
         state = "pending"
-        ev = (f"今日主线「{theme_name}」与昨日热点「{ytop}」不同，"
-              f"且近{lookback}日未曾领衔 —— 新题材首日，明日开盘验证")
+        ev = (f"今日主线「{theme_name}」与昨日活跃榜（{('、'.join(y_active) or ytop)}）"
+              f"不同属，且近{lookback}日未活跃过 —— 新题材首日，明日开盘验证")
         detail = ["主线不是当天确认的：明日看该题材的空间龙高开溢价、首板留存、中军反馈",
                   "（参考）昨日热点次日承接：" + ("；".join(parts) if parts else "数据不足")]
 
@@ -562,7 +643,7 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
 # ---------------------------------------------------------------- 综合判定
 
 def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
-             day2: dict | None = None) -> tuple[str, str]:
+             day2: dict | None = None, theme_name: str = "") -> tuple[str, str]:
     """按用户的规则收敛为四种状态。缺一环就是一日游。"""
     s1v, s2v, s3v, s4v, s5v = s1["state"], s2["state"], s3["state"], s4["state"], s5["state"]
 
@@ -581,14 +662,29 @@ def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
 
     if s5v == "pass" and s2v == "pass" and s4v != "weak":
         if s1v == "unknown":
-            return "watch", "五环基本齐但消息级别未录入 —— 先按观察对待，在「调策略 → M9」录入后再定性"
-        return "confirmed", ("五个信号依次共振，主线地位成立：按主线节奏做龙头与中军"
-                             + ("（主线回归日，承接已过检验）" if day2 and day2.get("return_day") else ""))
+            return "watch", "五环基本齐但消息级别未录入 —— 先按观察对待，在「调策略」→「高级参数」→ M9 录入后再定性"
+        note = "五个信号依次共振，主线地位成立：按主线节奏做龙头与中军"
+        if day2 and _int(day2.get("streak"), 0) >= 2:
+            note += (f"（该题材已连续 {day2['streak']} 日活跃"
+                     f"{'、' + _fmt_date(day2.get('streak_since', '')) + ' 起' if day2.get('streak_since') else ''}"
+                     f"，是延续行情不是首日）")
+        elif day2 and day2.get("return_day"):
+            note += "（主线回归，承接已过检验）"
+        return "confirmed", note
+
+    if s5v == "weak" and day2 and (day2.get("return_day") or day2.get("theme_match")):
+        return "watch", (f"主线「{theme_name}」已在活跃榜上"
+                         + (f"连续 {day2['streak']} 日" if _int(day2.get("streak"), 0) >= 2 else "")
+                         + "，但承接数据不足 —— 盘中看老龙能否新高、中军是否稳住再定性")
+
+    if s5v == "pass" and s2v == "weak":
+        return "watch", (f"「{theme_name}」承接检验已过（空间龙/首板留存/中军），"
+                         f"但首日合力或板块指数还差一环 —— 降级观察，明日看续强与否")
 
     if s2v in ("pass", "weak") and s5v == "pending" and s4v != "weak":
         if s1v == "unknown":
             return "day1_pending", ("首日启动成立（合力+中军），主线明日开盘验证；"
-                                    "另请在「调策略 → M9」录入今日消息级别")
+                                    "另请在「调策略」→「高级参数」→ M9 录入今日消息级别")
         if day2 and day2.get("return_day"):
             return "day1_pending", ("主线回归日启动成立（合力+中军）—— 今日盘中检验承接："
                                     "空间龙高溢价、首板留存、中军无负反馈，接不住就是一日游")
@@ -637,14 +733,36 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
                                         window_start=window_start)
         except Exception:
             suggestion = None
+    # 消息记忆：快讯池只翻两三天，S/A/B 级结果在有效期内继续参与定级
+    try:
+        mem = news_mod.lookup(theme_name, real_date) if theme_name else None
+        suggestion = news_mod.merge_suggestion(suggestion, mem)
+    except Exception:
+        pass
+    # 归档今天的定级（手动优先；只记 S/A/B —— C 级个股公告是噪声，记了反而干扰）
+    try:
+        lv_today = a.get("message_level") or "auto"
+        ev_all = (suggestion or {}).get("evidence") or []
+        lv_auto = ""
+        if suggestion and suggestion.get("found"):
+            lv_auto = suggestion.get("today_level") or suggestion.get("level") or ""
+        if lv_today in news_mod.VALID_DAYS:
+            news_mod.remember(real_date, theme_name, lv_today, ev_all,
+                              note=a.get("message_note", "") or "")
+        elif lv_auto in news_mod.VALID_DAYS:
+            ev_auto = (suggestion.get("today_evidence")
+                       or suggestion.get("evidence") or [])
+            news_mod.remember(real_date, theme_name, lv_auto, ev_auto)
+    except Exception:
+        pass
     s1 = _signal_message(a, theme_name, suggestion)
     s2 = _signal_consensus(a, top)
     s3 = _signal_midarmy(a, top, zt)
     s4 = _signal_old_dragon(a, real_date, snaps, zt, theme_name)
-    s5, day2 = _signal_next_day(a, real_date, snaps, zt, theme_name)
+    s5, day2 = _signal_next_day(a, real_date, snaps, zt, theme_name, themes)
     signals = [s1, s2, s3, s4, s5]
 
-    status, note = _verdict(s1, s2, s3, s4, s5, day2)
+    status, note = _verdict(s1, s2, s3, s4, s5, day2, theme_name)
 
     checks = []
     if status == "one_day":
@@ -669,7 +787,197 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
         "message_auto": suggestion or {"found": False},
         "signals": signals, "themes": themes[:6],
         "dragons": s4.get("dragons", []),
-        "day2": day2, "checks": checks,
-        "note": "题材以涨停池行业板块为代理；老龙档案与昨日涨停池为本地逐日积累，"
-                "冷启动时对应信号显示待验证",
+        "day2": day2,
+        "streak": _int((day2 or {}).get("streak"), 0),
+        "streak_since": (day2 or {}).get("streak_since", ""),
+        "checks": checks,
+        "note": "题材以涨停池行业板块为代理；每日涨停池自动归档（活跃榜前3都可回查），"
+                "题材连续多日爬坡不会被当成首日；冷启动前几天相关信号显示待验证",
+    }
+
+
+# ---------------------------------------------------------------- 主线/支线/强势板块
+
+def _board_lookup(boards: list[dict], name: str) -> dict | None:
+    """在板块资金流列表里按名称找板块（板块名与涨停池题材名常能对上）。"""
+    if not name or not boards:
+        return None
+    for b in boards:
+        if b.get("name") == name:
+            return b
+    for b in boards:
+        bn = b.get("name") or ""
+        if bn and (bn in name or name in bn):
+            return b
+    return None
+
+
+def sector_view(ml: dict, flow: dict | None = None,
+                zt: list[dict] | None = None) -> dict:
+    """主线 + 支线 + 当前最强板块结论。
+
+    · 主线   = 涨停合力最强的题材（M9 的 theme）；
+    · 支线   = 合力次之的题材（≥2 家涨停），以及「有资金、但还没打出涨停
+               合力」的纯资金板块（轮动预备队）；主线退潮时支线先死，
+               但轮动方向看支线；
+    · 强弱   = 涨停家数/早封 | 板块涨幅 | 主力净额 三样合看，给明确档位。
+    """
+    flow = flow or {}
+    zt = zt or []
+    boards_all = flow.get("boards_all") or []
+    themes = (ml or {}).get("themes") or []
+    theme_name = (ml or {}).get("theme") or ""
+    ml_status = (ml or {}).get("status") or ""
+
+    # 财联社板块热度榜（排名变化 = 资金正在涌进的方向）——匹配不上就不显示
+    try:
+        heats = cls_mod.sector_heat()
+    except Exception:
+        heats = []
+
+    def _heat_fact(name: str) -> str:
+        if not heats or not name:
+            return ""
+        h = cls_mod.match_heat(name, heats)
+        if not h:
+            return ""
+        chg = h.get("rank_change") or 0
+        if h.get("is_new"):
+            tail = "新上榜"
+        elif chg > 0:
+            tail = f"升{chg}位"
+        elif chg < 0:
+            tail = f"降{abs(chg)}位"
+        else:
+            tail = "持平"
+        return f"热度榜第{h['rank']}·{tail}"
+
+    def _pct_txt(v) -> str:
+        return f"{v:+.1f}%" if isinstance(v, (int, float)) else "—"
+
+    items: list[dict] = []
+    seen: set[str] = set()
+
+    for i, t in enumerate(themes[:6]):
+        name = t.get("sector") or ""
+        if not name or name in seen:
+            continue
+        b = _board_lookup(boards_all, name)
+        zt_n = _int(t.get("zt"), 0)
+        early = _int(t.get("early"), 0) + _int(t.get("one_word"), 0)
+        maxb = _int(t.get("max_boards"), 0)
+        b_pct = b.get("pct") if b else None
+        b_main = b.get("main") if b else None            # 亿
+
+        score = zt_n * 2 + early * 1.5 + min(maxb, 5) * 2.5
+        if isinstance(b_pct, (int, float)):
+            score += max(b_pct, 0.0) * 1.2
+        if isinstance(b_main, (int, float)):
+            score += max(b_main, 0.0) * 0.4
+
+        role = "主线" if (i == 0 or name == theme_name) else "支线"
+        if role == "支线" and zt_n < 2:
+            level = "观察"
+        elif score >= 18:
+            level = "强"
+        elif score >= 10:
+            level = "中"
+        else:
+            level = "弱"
+
+        facts = [f"涨停 {zt_n} 家" + (f"（早封 {early} 家）" if early else ""),
+                 f"最高 {maxb} 板"]
+        if isinstance(b_pct, (int, float)):
+            facts.append(f"板块 {_pct_txt(b_pct)}")
+        if isinstance(b_main, (int, float)):
+            facts.append(f"主力 {b_main:+.1f}亿")
+        stk = (b or {}).get("streak")
+        if isinstance(stk, int) and stk >= 2:
+            facts.append(f"连续 {stk} 日净流入" if (b or {}).get("source") == "em"
+                         else f"连续 {stk} 日走强")
+        hf = _heat_fact(name)
+        if hf:
+            facts.append(hf)
+
+        if role == "主线":
+            judge = {
+                "confirmed": "五信号共振，主线已确认 —— 明日看承接延续（空间龙溢价/首板留存）",
+                "day1_pending": "首日启动成立 —— 明日开盘检验承接，接不住就是一日游",
+                "one_day": "一日游特征 —— 不接力，等下一个方向",
+                "watch": "信号不全，按观察处理",
+            }.get(ml_status, "按观察处理")
+        elif zt_n >= 2:
+            judge = ("支线：有涨停合力 —— 主线走强时它能跟涨，主线一退它先死；"
+                     "只做其最强的那一只，不铺开")
+        else:
+            judge = "支线（弱）：仅个别异动，等合力加厚再看"
+
+        items.append({"name": name, "role": role, "level": level,
+                      "score": round(score, 1), "facts": facts, "judge": judge})
+        seen.add(name)
+
+    # 纯资金板块：涨幅 + 主力净流入、但尚未形成涨停合力（轮动预备队）
+    pure: list[dict] = []
+    for b in boards_all:
+        name = b.get("name") or ""
+        if not name or name in seen:
+            continue
+        b_pct, b_main = b.get("pct"), b.get("main")
+        if not isinstance(b_pct, (int, float)):
+            continue
+        if isinstance(b_main, (int, float)) and b_main <= 0:
+            continue
+        if b_pct >= 2.0:
+            stk = b.get("streak")
+            pure_facts = [f"板块 {_pct_txt(b_pct)}"
+                          + (f"，主力 {b_main:+.1f}亿"
+                             if isinstance(b_main, (int, float)) else "")]
+            if isinstance(stk, int) and stk >= 2:
+                pure_facts.append(f"连续 {stk} 日净流入" if b.get("source") == "em"
+                                  else f"连续 {stk} 日走强")
+            pure_facts.append("尚未形成涨停合力")
+            hf = _heat_fact(name)
+            if hf:
+                pure_facts.append(hf)
+            pure.append({
+                "name": name, "role": "资金支线", "level": "观察",
+                "score": round(b_pct * 2 + max(b_main or 0.0, 0.0) * 0.4, 1),
+                "facts": pure_facts,
+                "judge": "有资金在动但还没打出涨停合力 —— 轮动预备队，见涨停再加进来",
+            })
+    pure.sort(key=lambda x: -x["score"])
+    items += pure[:4]
+
+    # 强势板块 = 综合分最高（分数并列时题材优先）
+    strongest = None
+    if items:
+        strongest = sorted(
+            items, key=lambda x: (-x["score"], 0 if x["role"] == "主线" else 1))[0]
+
+    main_item = next((x for x in items if x["role"] == "主线"), None)
+    branches = [x for x in items if x["role"] != "主线"]
+
+    parts = []
+    if main_item:
+        parts.append(f"主线：{main_item['name']}（{main_item['level']}）")
+    strong_b = [x for x in branches if x["level"] == "强"][:2]
+    if strong_b:
+        parts.append("支线：" + "、".join(f"{x['name']}({x['level']})" for x in strong_b))
+    elif branches:
+        parts.append("支线：" + "、".join(f"{x['name']}({x['level']})" for x in branches[:2]))
+
+    src = flow.get("board_source") or ""
+    if src == "sina":
+        data_note = "东财板块接口受限，板块涨幅/资金为新浪口径（无主力净额）"
+    elif src == "em":
+        data_note = "板块数据来自东财 ulist.np（含主力净额）"
+    else:
+        data_note = "东财板块接口受限，暂无板块涨幅/资金数据，强弱仅按涨停合力判断"
+
+    return {
+        "available": bool(items),
+        "main": main_item, "branches": branches,
+        "strongest": strongest, "items": items[:10],
+        "summary": "；".join(parts) if parts else "今日暂无明确的板块合力",
+        "data_note": data_note,
     }

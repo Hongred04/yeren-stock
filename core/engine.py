@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from . import chips as chips_mod
 from . import fundstyle
 from . import indicators as ind
+from . import stage_stabilizer as stab
+from . import trading
 from . import universe
 
 
@@ -84,8 +87,8 @@ def evaluate_macro(cfg: dict) -> dict:
 
 VOLUME_MODES = {
     "peak_swing": "峰值量能 · 中长线波段大票",
-    "comfort_short": "舒适区(≥5000亿) · 打板选手天下",
-    "shrink_short": "缩量存量 · 只做短线中小题材",
+    "comfort_short": "舒适区(≥5000亿) · 题材轮动可做",
+    "shrink_short": "缩量存量 · 切短线应对打法",
     "shrink_red": "极致缩量还红盘 · 筹码结构好",
     "dry": "极度缩量 · 空仓等待",
     "pending": "量能未就绪 · 盘前/非交易时段",
@@ -175,7 +178,8 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         short_only = False
     elif amt >= shrink:
         mode = "shrink_short"
-        advice = "缩量存量，资金撬不动大票 —— 只做短线中小题材，降低单票仓位"
+        advice = ("缩量存量，资金撬不动大票 —— 这时才切短线中小题材的应对打法"
+                  "（平常中长线波段，不打板不做短线），并降低单票仓位")
         short_only = True
     else:
         mode = "dry"
@@ -190,7 +194,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
             if mode in ("shrink_short", "dry"):
                 mode = "shrink_red"
                 advice = ("极致缩量还红盘 = 控盘好、散户90%套牢躺平 → "
-                          "筹码结构好，可低吸但仍不做中长线")
+                          "筹码结构好，可低吸；但这是缩量期的权宜打法，不是常态策略")
                 red_flag = "缩量红盘"
 
     return {
@@ -217,7 +221,8 @@ SENTIMENT_STAGES = {
 
 
 def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
-                       broken: list[dict], zt_hist: list[dict]) -> dict:
+                       broken: list[dict], zt_hist: list[dict],
+                       real_date: str = "", tmin: int | None = None) -> dict:
     """M3 情绪周期定进退时点 —— 决定「能不能出手」。
 
     退潮期判定严格按「全能的野人」9月28日视频原话口径，四个现象
@@ -256,11 +261,17 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
 
     is_ebb = bool(signals)
 
+    # 原始信号只是"这一瞬间"的读数，盘中会来回跳。交给滞回稳定器过一遍，
+    # 确认后的结论才是能照着执行的那个（见 core/stage_stabilizer.py）。
+    st = stab.stabilize(real_date, is_ebb, hurt_area, hurt_ratio,
+                        tmin=tmin, cfg=cfg)
+    ebb_confirmed = st["confirmed"]
+
     # 最高连板（龙头高度）
     max_boards = max((r.get("boards", 1) for r in limit_up), default=0)
     probe = s.get("probe_board", 1)
 
-    if is_ebb:
+    if ebb_confirmed:
         stage = "ebb"
     elif max_boards >= 4:
         stage = "climax" if max_boards >= 5 else "follow"
@@ -273,20 +284,49 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
 
     can_trade = stage != "ebb" or not s.get("clear_on_ebb", True)
 
+    # 退潮期不是一刀切禁止出手：野哥的规矩是允许 **0.5 成试错仓**，
+    # 但只做首板、且亏了就走。这里把"能不能开、能开多大"讲清楚，
+    # 由 buy_signals / position_plan 分别落到建议与仓位链上。
+    trial_w = 0.0
+    if stage == "ebb":
+        try:
+            trial_w = max(0.0, float(s.get("ebb_trial_weight", 0.05) or 0.0))
+        except (TypeError, ValueError):
+            trial_w = 0.0
+    trial_only = stage == "ebb" and trial_w > 0
+
     seal = n_zt / (n_zt + n_zb) if (n_zt + n_zb) else 0
+
+    # 文案按"稳定后"的状态给，别让页面自相矛盾
+    if stage == "ebb":
+        if trial_only:
+            note = (f"退潮期：不接力、不重仓；最多 {trading.pos_cn(trial_w)} 试错仓，"
+                    f"只做首板，亏了就走")
+        else:
+            note = "退潮期：无条件清仓，停止一切低吸和打板，管住手"
+    elif st["state"] == "watch":
+        note = (f"退潮预警未确认（亏钱面积 {hurt_area*100:.0f}%，原始信号"
+                f"{st['raw_streak']} 次）—— 先降仓、别急着清，等确认")
+    else:
+        note = "可按周期节奏操作"
 
     return {
         "stage": stage,
         "label": SENTIMENT_STAGES.get(stage, stage),
         "can_trade": can_trade,
+        "trial_only": trial_only,             # True = 只允许试错仓，不能正常仓位
+        "ebb_trial_weight": round(trial_w, 4),
+        "max_new_position": round(trial_w if trial_only else 1.0, 4),
         "max_boards": max_boards,
         "signals": signals,
         "structural_signals": [],
         "area_signals": [],
         "warn": "",
         "trend": "",
-        "note": ("退潮期：无条件清仓，停止一切低吸和打板，管住手" if stage == "ebb"
-                 else "可按周期节奏操作"),
+        "note": note,
+        # 稳定器的完整状态：前端据此显示"预警/确认"和已持续多久
+        "stability": st,
+        "raw_ebb": is_ebb,
         "metrics": {
             "limit_up": n_zt, "limit_down": n_dt, "broken": n_zb,
             "hurt_area": round(hurt_area, 3),
@@ -348,11 +388,12 @@ def _imagination_score(snap: dict, bars: list[dict], zt_map: dict) -> tuple[floa
     return min(score, 1.0), reasons
 
 
-def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict, list[str]]:
-    """① 图形：底部量缩价缩 + 均线多头排列 + 上下影线。"""
+def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict, list[str], list[str]]:
+    """① 图形：底部量缩价缩 + 均线多头排列 + 上下影线 + 筹码分布（估算）。"""
     reasons = []
+    warns: list[str] = []
     if not bars:
-        return 0.0, {}, ["无K线数据"]
+        return 0.0, {}, ["无K线数据"], []
 
     base = ind.base_pattern(bars, 20)
     wash = ind.washout_signal(bars, 10)
@@ -418,6 +459,25 @@ def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict,
     elif dd > 60:
         reasons.append(f"距高点回撤{dd*100:.0f}%，趋势已破，非洗盘而是走弱")
 
+    # 筹码分布量化（估算）：获利盘 / 成本乖离 / 集中度 —— 只做小权重加分与提示，
+    # 不动选股主口径；详情页展示完整分布
+    chip = chips_mod.analyze(bars, close=bars[-1].get("close"))
+    if chip:
+        wr = chip["winner_rate"]
+        if wr <= 0.25:
+            score += 0.08
+            reasons.append(f"获利盘仅 {wr*100:.0f}%，筹码低位沉淀、上方套牢盘轻")
+        elif wr <= 0.70:
+            score += 0.05
+            reasons.append(f"获利盘 {wr*100:.0f}%，筹码结构均衡")
+        elif wr >= 0.92:
+            warns.append(f"获利盘 {wr*100:.0f}%，人人浮盈、抛压随时释放")
+        if chip["concentration"] <= 0.16:
+            score += 0.04
+            reasons.append(f"筹码高度集中（集中度 {chip['concentration']:.2f}）")
+        elif chip["concentration"] >= 0.35:
+            warns.append(f"筹码分散（集中度 {chip['concentration']:.2f}），上方阻力杂")
+
     detail = {
         "base_pos": round(base["pos"], 3),
         "shrink": round(base["shrink"], 3),
@@ -432,7 +492,9 @@ def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict,
         "drawdown60": round(dd, 3),
         "period_pct": round(pct_pos, 2),
     }
-    return min(score, 1.0), detail, reasons
+    if chip:
+        detail["chips"] = chip
+    return min(score, 1.0), detail, reasons, warns
 
 
 def _price_mv_score(snap: dict, cfg_a: dict) -> tuple[float, list[str], list[str]]:
@@ -480,6 +542,55 @@ def _vr_tags(snap: dict) -> tuple[list[str], list[str]]:
     return [], []
 
 
+# ================================================================ 打法适配（个股）
+# 四套预设已融合成一套自适应体系：选股口径相同，区别在「这只票怎么打」。
+# 判定结果只写在**股票详情页**，不进候选表。
+
+def style_fit(cfg: dict, stock: dict, bars: list[dict],
+              fund_style: dict | None = None) -> dict:
+    """判定这只股票适合哪种打法。
+
+      · 短线题材（缩量期的应对打法）—— 小市值/连板基因/游资主导：
+        小仓位、快进快出，只做首板与回踩，不恋战；
+      · 中长线波段（平常打法）—— 中军体量/机构主导/趋势在：
+        沿均线持有，小阳线爬坡不动手，突然加速=派发；
+      · 回避 —— 庄股特征，盈亏比极差。
+
+    stock["float_mv"] 单位是亿；bars 供均线/涨停基因判定。
+    """
+    fs = fund_style or {}
+    ftype = fs.get("type", "unknown")
+    code = stock.get("code", "")
+    mv = float(stock.get("float_mv") or 0)
+    a = cfg.get("M4_aesthetic", {})
+    mv_mid = float(a.get("mv_mid_threshold", 500.0) or 500.0)
+
+    if ftype == "zhuang":
+        return {"key": "avoid", "label": "庄股 · 不参与",
+                "note": "做庄失败打回原点，盈亏比极差；断崖式下跌绝不接，已持有的无条件出。"}
+
+    bars = bars or []
+    maa = ind.ma_bull_alignment(bars) if bars else {}
+    aligned = bool(maa.get("aligned"))
+    lus20 = len(ind.count_limit_ups(bars, code, lookback=20)) if bars else 0
+
+    swing = (ftype == "institutional"
+             or mv >= max(150.0, mv_mid * 0.4)
+             or (aligned and lus20 <= 1 and mv >= 100.0))
+    if swing:
+        return {"key": "swing", "label": "中长线波段（平常打法）",
+                "note": ("大资金/趋势票 —— 沿5日线持有、小阳线爬坡不动手；"
+                         "突然加速拉涨停 = 派发信号，减仓而不是加仓。")}
+
+    if lus20 >= 2:
+        return {"key": "short", "label": "短线题材（缩量期应对打法）",
+                "note": ("有连板基因的题材票 —— 小仓位、快进快出，跟着断板节奏走；"
+                         "节奏破坏就撤，不把短线拿成中线。")}
+    return {"key": "short", "label": "短线题材（缩量期应对打法）",
+            "note": ("小市值题材票 —— 小仓位、快进快出，只做首板与回踩企稳；"
+                     "缩量期权宜打法，节奏不对就空仓。")}
+
+
 def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
               zt: list[dict], preopen: bool = False) -> dict:
     """对**单只**股票按候选股同一套口径打分，并列出「它为什么没进今天的候选」。
@@ -492,7 +603,7 @@ def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
     rec = zt_map.get(code, {})
     bars = bars or []
 
-    g, gdetail, greasons = _graph_score(bars, code, a) if bars else (0.0, {}, [])
+    g, gdetail, greasons, gwarns = _graph_score(bars, code, a) if bars else (0.0, {}, [], [])
     p_sc, preasons, pwarns = _price_mv_score(snap, a)
     i_sc, ireasons = _imagination_score(snap, bars, zt_map)
 
@@ -503,7 +614,7 @@ def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
     total = (g * wg + p_sc * wp + i_sc * wi) / wsum
 
     reasons = list(greasons) + list(preasons) + list(ireasons)
-    warns = list(pwarns)
+    warns = list(gwarns) + list(pwarns)
     vr_r, vr_w = _vr_tags(snap)
     reasons += vr_r
     warns += vr_w
@@ -533,7 +644,7 @@ def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
         if a.get("need_bull_ma") and not gdetail.get("ma_aligned"):
             filters.append("未形成均线多头排列（策略要求必须多头）")
 
-    return {
+    result = {
         "code": code,
         "name": name,
         "board": bd,
@@ -561,6 +672,11 @@ def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
         "filters": filters,          # 非空 = 今天进不了候选，原因在此
         "in_pick": False,
     }
+    # M10 主导资金分类 + 打法适配：详情页要用（管道原实现会再算一次，这里统一）
+    if cfg.get("M10_fundstyle", {}).get("enabled", True) and bars:
+        result["fund_style"] = fundstyle.classify(bars, code, result.get("float_mv", 0.0), cfg)
+    result["style_fit"] = style_fit(cfg, result, bars, result.get("fund_style"))
+    return result
 
 
 def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
@@ -587,12 +703,19 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
     wi = a.get("weight_imagination", 35)
     wsum = max(wg + wp + wi, 1)
 
-    # 一致性过滤：情绪退潮 + 量能极度缩 → 缩量红盘仍可低吸，其余不动手
+    # 一致性过滤：退潮期 / 极度缩量
+    # 退潮期允许 0.5 成试错仓（只做首板），所以不是简单地把 tradable 全关掉。
     allow = True
     block_note = ""
+    trial_only = bool(sentiment.get("trial_only"))
     if not sentiment.get("can_trade", True):
-        allow = False
-        block_note = "情绪退潮期：退潮期策略是无条件清仓、停止一切低吸和打板"
+        if trial_only:
+            tw = float(sentiment.get("ebb_trial_weight") or 0.05)
+            block_note = (f"退潮期试错仓：只做首板，单笔 ≤{trading.pos_cn(tw)}；"
+                          f"连板股一律不接力")
+        else:
+            allow = False
+            block_note = "情绪退潮期：退潮期策略是无条件清仓、停止一切低吸和打板"
     elif volume.get("mode") == "dry":
         allow = False
         block_note = "极度缩量：量能不够说破大天都没用，建议空仓等待"
@@ -618,7 +741,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
         if len(bars) < 25:
             continue
 
-        g, gdetail, greasons = _graph_score(bars, code, a)
+        g, gdetail, greasons, gwarns = _graph_score(bars, code, a)
         p, preasons, pwarns = _price_mv_score(snap, a)
         i, ireasons = _imagination_score(snap, bars, zt_map)
 
@@ -627,7 +750,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
 
         total = (g * wg + p * wp + i * wi) / wsum
         reasons = greasons + preasons + ireasons
-        warns = list(pwarns)
+        warns = list(gwarns) + list(pwarns)
 
         # 量比：当日放量程度 —— 短线最直接的确认信号。不参与打分（避免动选股口径），
         # 只作为理由/警示呈现，详情页也会单独显示。
@@ -658,18 +781,22 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
             "in_zt": code in zt_map,
             "zt_boards": zt_map.get(code, {}).get("boards", 0),
             "sector": zt_map.get(code, {}).get("sector", ""),
-            # 交易许可：退潮/极度缩量时，选股结果仅作观察名单，不构成开仓建议
-            "tradable": allow,
+            # 交易许可：退潮/极度缩量时，只有首板在试错仓范围内算"可做"，
+            # 其余仅作观察名单，不构成开仓建议
+            "tradable": allow and (not trial_only
+                                   or zt_map.get(code, {}).get("boards", 0) <= 1),
+            "trial_only": trial_only,
             "block_note": block_note,
         })
 
     results.sort(key=lambda x: -x["score"])
     top = results[:top_n]
-    # M10 主导资金分类：只对最终候选做，省算力
-    if cfg.get("M10_fundstyle", {}).get("enabled", True):
-        for p in top:
+    # M10 主导资金分类 + 打法适配：只对最终候选做，省算力
+    for p in top:
+        if cfg.get("M10_fundstyle", {}).get("enabled", True):
             p["fund_style"] = fundstyle.classify(
                 kl.get(p["code"], []), p["code"], p.get("float_mv", 0.0), cfg)
+        p["style_fit"] = style_fit(cfg, p, kl.get(p["code"], []), p.get("fund_style"))
     return top
 
 

@@ -17,10 +17,11 @@ import os
 from datetime import datetime
 
 from . import fundstyle
+from . import paths
 from . import trading
+from . import universe
 
-PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "data", "portfolio.json")
+PATH = paths.data_path("portfolio.json")
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -40,6 +41,14 @@ def load() -> dict:
         obj = {}
     obj.setdefault("holdings", [])
     obj.setdefault("watchlist", [])
+    # 老数据可能存的是裸 6 位代码（603466）或券商格式（603466.SH）——
+    # 行情接口只认 sh/sz/bj 前缀，读的时候顺手规范一次，历史记录自愈。
+    for h in obj["holdings"]:
+        if h.get("code"):
+            h["code"] = universe.normalize(h["code"])
+    for w in obj["watchlist"]:
+        if w.get("code"):
+            w["code"] = universe.normalize(w["code"])
     return obj
 
 
@@ -55,6 +64,7 @@ def _save(obj: dict) -> None:
 
 def upsert_holding(code: str, name: str = "", cost: float = 0.0,
                    shares: float = 0.0, date: str = "", note: str = "") -> dict:
+    code = universe.normalize(code)
     obj = load()
     for h in obj["holdings"]:
         if h["code"] == code:
@@ -71,6 +81,7 @@ def upsert_holding(code: str, name: str = "", cost: float = 0.0,
 
 
 def remove_holding(code: str) -> dict:
+    code = universe.normalize(code)
     obj = load()
     obj["holdings"] = [h for h in obj["holdings"] if h["code"] != code]
     _save(obj)
@@ -78,6 +89,7 @@ def remove_holding(code: str) -> dict:
 
 
 def watch_upsert(code: str, name: str = "") -> dict:
+    code = universe.normalize(code)
     obj = load()
     if not any(w["code"] == code for w in obj["watchlist"]):
         obj["watchlist"].append({"code": code, "name": name})
@@ -86,6 +98,7 @@ def watch_upsert(code: str, name: str = "") -> dict:
 
 
 def watch_remove(code: str) -> dict:
+    code = universe.normalize(code)
     obj = load()
     obj["watchlist"] = [w for w in obj["watchlist"] if w["code"] != code]
     _save(obj)

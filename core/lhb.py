@@ -181,11 +181,13 @@ def evaluate(cfg: dict | None = None, real_date: str = "",
         "date": date, "is_today": bool(want and date == want),
         "source_url": _SHARES_URL,
         "top": top[:20], "top_net": top_net, "hotmoney": hotmoney[:8],
+        "hotmoney_net": round(hm_net / 1e8, 2),
         "institutions": {"net": round(inst_net / 1e8, 2),
                          "stocks": [p for p in top if "机构专用" in p["tags"]][:6]},
         "northbound": {"net": round(north_net / 1e8, 2)},
         "summary": summary, "checks": checks,
         "seat_hits": stock_tags,
         "note": "席位绰号为公开复盘常用口径、非官方认定，仅供识别资金性质参考；"
-                "盘中当日龙虎榜尚未披露时自动回退到最近一期。",
+                "盘中当日龙虎榜尚未披露时自动回退到最近一期。"
+                "数据只进「资金在干什么」结论，不在界面展示明细。",
     }

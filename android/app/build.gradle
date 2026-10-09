@@ -1,0 +1,140 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+// 桌面工程根目录（android/ 的上一级）—— Python 代码的唯一出处，
+// 构建时同步过来，避免维护两份会漂移的副本。
+def desktopRoot = rootProject.projectDir.parentFile
+
+// 版本号直接从主工程 core/version.py 读，避免两处漂移
+def appVersion = "1.0.0"
+def verFile = new File(desktopRoot, "core/version.py")
+if (verFile.exists()) {
+    def m = verFile.getText("UTF-8") =~ /APP_VERSION\s*=\s*["']([^"']+)["']/
+    if (m.find()) {
+        appVersion = m.group(1)
+    }
+}
+def vParts = appVersion.tokenize(".")
+def appVersionCode = ((vParts[0] ?: "1") as int) * 10000 +
+        ((vParts.size() > 1 ? vParts[1] : "0") as int) * 100 +
+        ((vParts.size() > 2 ? vParts[2] : "0") as int)
+
+android {
+    namespace 'com.yeren.stock'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.yeren.stock"
+        minSdk 24
+        targetSdk 34
+        versionCode appVersionCode
+        versionName appVersion
+
+        ndk {
+            // Chaquopy 16 的 Python 3.12 只提供 arm64-v8a / x86_64，
+            // 32 位 ARM（armeabi-v7a）已不再支持 —— 现代真机都是 arm64。
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            // 自用工具，不做商店分发，用 debug 签名占位
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packagingOptions {
+        jniLibs { useLegacyPackaging true }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        // 目标与构建解释器都用 3.13：.pyc 的字节码版本只跟次版本号绑定，
+        // 两者同为 3.13 才能预编译（否则只能随包发源码、首次启动现编）。
+        // 本机可用的 3.13 就是 PATH 上的那个。
+        version = "3.13"
+        def bpEnv = System.getenv("CHAQUOPY_BUILD_PYTHON")
+        buildPython(bpEnv ?: "python")
+    }
+    sourceSets {
+        main {
+            srcDirs = ['src/main/python']
+        }
+    }
+}
+
+// ── 同步 1：Python 源码 → src/main/python ──
+// 两个来源都显式列在 from 里，Sync 会精确重建目标目录，
+// 不会残留旧文件，也不需要 preserve 之类的特殊处理。
+tasks.register('syncPython', Sync) {
+    from(desktopRoot) {
+        include 'server.py'
+        include 'core/**'
+        exclude '**/__pycache__/**'
+        exclude '**/*.pyc'
+    }
+    from('src/android_glue') {
+        include '*.py'
+    }
+    into layout.projectDirectory.dir('src/main/python')
+}
+
+// ── 同步 2：前端页面 → 生成的 assets 目录 ──
+// Chaquopy 只把 .py 打进 APK，web/index.html 必须走 Android assets，
+// 由 MainActivity 在启动时解到私有目录，再用 STOCK_WEB_DIR 告诉 Python。
+def genWebAssets = layout.buildDirectory.dir('generated/webassets').get().asFile
+
+android.sourceSets.main.assets.srcDirs += genWebAssets
+
+tasks.register('syncWeb', Sync) {
+    // 看板页面
+    from(desktopRoot) { include 'web/**' }
+    // 默认策略配置：桌面调好的那套，装到手机上首启就用同一份。
+    // （Chaquopy 不打包 .py 以外的文件，所以只能跟着 assets 走）
+    // 以 data 目录为源，才会落到 assets/defaults/strategy.json 而不是多一层 data/
+    from(new File(desktopRoot, 'data')) {
+        include 'strategy.json'
+        into 'defaults'
+    }
+    into genWebAssets
+    doFirst { genWebAssets.mkdirs() }
+}
+
+// Chaquopy 的 python 源合并任务、以及 assets 合并任务，都直接读上面两个任务的产物。
+// 必须显式声明依赖，否则 Gradle 会判定「读到了未声明的产物」而报错。
+// 用 configureEach 是为了兼容 debug/release 两个变体（任务在配置后才创建）。
+tasks.configureEach { t ->
+    def n = t.name.toLowerCase()
+    if (t.name != 'syncPython' && n.contains('python')) {
+        t.dependsOn(tasks.named('syncPython'))
+    }
+    if (t.name != 'syncWeb' && n.contains('asset')) {
+        t.dependsOn(tasks.named('syncWeb'))
+    }
+}
+tasks.named('preBuild') {
+    dependsOn 'syncPython'
+    dependsOn 'syncWeb'
+}

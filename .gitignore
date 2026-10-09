@@ -21,3 +21,24 @@ data/portfolio.json
 
 # 东财 Cookie（凭证，绝不进 git）
 data/eastmoney_cookie.txt
+
+# ── 安卓打包 ──
+# 构建时从本工程同步过来的副本，不是源（改代码请改本工程根目录）
+android/app/src/main/python/
+# Gradle 产物与本地配置
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/_*.log
+
+# 打包产物（可再生成）
+dist/
+
+# 可再生成的板块缓存（board_seed.py 已固化种子表）
+data/board_list.json
+data/board_members.json
+
+# 与股票项目无关的临时探测脚本（留在本地，不入库）
+_probe_dy2.py
+_dy_page.html

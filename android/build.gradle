@@ -1,0 +1,17 @@
+// 根构建脚本。仓库全部走国内可达镜像 + 官方源兜底
+// （本机 github.com 不可达，而 Gradle 官方发行包正是托管在 GitHub，
+//   所以 gradle 本体是从腾讯镜像下的，依赖解析也要避开 GitHub。）
+buildscript {
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        google()
+        mavenCentral()
+    }
+}
+
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+    id 'com.chaquo.python' version '16.1.0' apply false
+}
