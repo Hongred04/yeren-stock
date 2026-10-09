@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from core import cls                      # noqa: E402
 from core import datasource as ds         # noqa: E402
 from core import kph                      # noqa: E402
 from core import sentiment_meter as sm    # noqa: E402
+from core import ths                      # noqa: E402
 
 okc = badc = 0
 
@@ -109,6 +111,48 @@ def main():
     ok(m2["metrics"]["money_effect"] is None
        and m2["metrics"]["premium_src"] == "",
        "全零不进口径（无本地兜底数据时为空）")
+
+    print("[8] 同花顺人气榜解析（mock 数据层）")
+    _fake_hot = json.dumps({
+        "status_code": 0,
+        "data": {"stock_list": [
+            {"code": "600127", "name": "金健米业",
+             "tag": {"concept_tag": ["玉米"], "popularity_tag": "首板涨停"}},
+            {"code": "002242", "name": "九阳股份",
+             "tag": {"popularity_tag": "5天5板"}},
+            {"code": "600825", "name": "新华传媒", "tag": {}},
+        ]},
+    }).encode()
+    ds._get = lambda *a, **k: _fake_hot
+    hot = ths.hot_rank()
+    ok(hot.get("sh600127", {}).get("rank") == 1
+       and hot["sh600127"]["tag"] == "首板涨停", "代码归一 + 人气标签")
+    ok(hot.get("sz002242", {}).get("rank") == 2, "排名连续")
+    ok(hot.get("sh600825", {}).get("tag") == "", "无标签返回空串")
+
+    print("[9] 盘口异动解析（i 字段三段式 → 百分数）")
+    _fake_ch = json.dumps({"rc": 0, "data": {"allstock": [
+        {"tm": 92422, "c": "300668", "m": 0, "n": "杰恩股份", "t": 8208,
+         "i": "-0.019542,29.10000,-0.019542"},
+        {"tm": 145145, "c": "600573", "m": 1, "n": "惠泉啤酒", "t": 8201,
+         "i": "0.072007,11.91000,0.072007"},
+    ]}}).encode()
+    ds._get = lambda *a, **k: _fake_ch
+    ch = ds.fetch_stock_changes("8208")
+    ok(ch and ch[0]["time"] == "092422" and ch[0]["code"] == "sz300668",
+       "时间补零 + 代码前缀")
+    ok(ch[0]["pct"] == -1.95, "比率 ×100（-0.0195 → -1.95%）")
+    ch2 = ds.fetch_stock_changes("8201")
+    hq = next((x for x in ch2 if x["name"] == "惠泉啤酒"), None)
+    ok(hq and hq["pct"] == 7.2, "火箭发射同规则（0.072 → 7.2%）")
+
+    print("[10] 风口板块匹配（复用 match_heat 别名表）")
+    winds = [{"name": "短剧", "catalyst": "AI电影定档"},
+             {"name": "农业种植", "catalyst": "粮价上涨"}]
+    hit = cls.match_heat("出版", winds)
+    ok(hit and hit["catalyst"] == "AI电影定档", "出版→短剧（别名）")
+    hit2 = cls.match_heat("种植业", winds)
+    ok(hit2 and hit2["name"] == "农业种植", "种植业→农业种植（别名）")
 
     print()
     print(f"===== {okc} 通过 / {badc} 失败 =====")

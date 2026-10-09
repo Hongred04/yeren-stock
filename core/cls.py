@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """财联社数据源（扩展数据源）。
 
-协议知识借鉴自开源项目 electkismet/AxData（Apache-2.0，仅作接口研究参考），
-按其公开接口声明用标准库重写 —— 不引入任何第三方依赖，也不打包它的框架。
+协议知识借鉴自开源项目 electkismet/AxData 与 fleetinglife/levistock
+（均 MIT，仅作接口研究参考），按公开声明用标准库重写 —— 不引入任何
+第三方依赖，也不打包它们的框架。
 
 补四块数据（全部只进结论层，界面上不摆原始表格）：
   1. telegraph()         电报快讯（重要分类）—— 并入 S1 消息定级源，
@@ -12,7 +13,8 @@
   3. market_emotion()    市场情绪快照 —— 封板率 / 触及涨停 / 昨日涨停今日
                          表现（打板溢价），给 E1 温度计做独立口径兜底；
   4. sector_heat()       板块热度榜（含排名变化）—— 进板块强弱表的
-                         「热度」维度：排名飙升=资金正在进场的方向。
+                         「热度」维度：排名飙升=资金正在进场的方向；
+  5. market_wind()       今日风口板块 + 催化剂解读 —— 板块表加"催化"一句。
 
 约定：所有函数失败返回空值（{} / []），静默不抛 —— 数据源是锦上添花，
 任何一路挂掉都不能影响主扫描链路。请求走 datasource 的连接池与内存缓存。
@@ -38,6 +40,7 @@ EMOTION_URL = "https://x-quote.cls.cn/v2/quote/a/stock/emotion"
 ZT_POOL_URL = "https://x-quote.cls.cn/quote/index/up_down_analysis"
 HEAT_URL = "https://x-quote.cls.cn/v2/quote/a/plate/plate_heat_list"
 TELEGRAPH_URL = "https://api3.cls.cn/v1/roll/get_roll_list"
+WIND_URL = "https://api3.cls.cn/v2/todayTuyere"
 
 # 固定签名的接口（参数不随请求变化）
 _EMOTION_PARAMS = {"app": "CailianpressWeb", "os": "web", "sv": "8.4.6",
@@ -287,6 +290,10 @@ _HEAT_ALIASES = {
     "航空装备": ["军工"],
     "电网设备": ["智能电网"],
     "电力": ["电力", "智能电网"],
+    "一般零售": ["商业零售", "零售"],
+    "专业连锁": ["商业零售", "零售"],
+    "出版": ["短剧", "影视", "文化传媒"],
+    "影视院线": ["短剧", "影视"],
 }
 
 
@@ -307,6 +314,34 @@ def match_heat(name: str, heats: list[dict] | None = None) -> dict | None:
     if len(cands) == 1:
         return cands[0]
     return None
+
+
+# ---------------------------------------------------------------- 风口板块
+
+def market_wind() -> list[dict]:
+    """今日风口板块 + 催化剂解读 [{name, catalyst}]。
+
+    财联社编辑盘中标出的「今天为什么涨」——给板块强弱表补一句判断依据。
+    失败返回 []。
+    """
+    def producer():
+        js = _fetch_json(WIND_URL, _signed(), mobile=True)
+        data = js.get("data") or {}
+        rows = data.get("today_tuyere") or []
+        out = []
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            name = (it.get("title") or it.get("plate_name") or "").strip()
+            cat = (it.get("interpret") or it.get("catalyst") or "").strip()
+            if name:
+                out.append({"name": name, "catalyst": cat[:60]})
+        return out
+    try:
+        return ds.cached("cls:wind", 600, producer)
+    except Exception as e:
+        print(f"[cls] 风口板块抓取失败: {e}", file=sys.stderr)
+        return []
 
 
 def sector_rotation(days: int = 4) -> list[dict]:

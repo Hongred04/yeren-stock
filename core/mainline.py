@@ -834,6 +834,11 @@ def sector_view(ml: dict, flow: dict | None = None,
         heats = cls_mod.sector_heat()
     except Exception:
         heats = []
+    # 财联社风口板块（编辑标注的"今天为什么涨"——催化剂一句话）
+    try:
+        winds = cls_mod.market_wind()
+    except Exception:
+        winds = []
 
     def _heat_fact(name: str) -> str:
         if not heats or not name:
@@ -851,6 +856,14 @@ def sector_view(ml: dict, flow: dict | None = None,
         else:
             tail = "持平"
         return f"热度榜第{h['rank']}·{tail}"
+
+    def _catalyst_fact(name: str) -> str:
+        if not winds or not name:
+            return ""
+        hit = cls_mod.match_heat(name, winds)      # 复用匹配逻辑（精确/别名/唯一包含）
+        if hit and hit.get("catalyst"):
+            return "催化：" + hit["catalyst"][:38]
+        return ""
 
     def _pct_txt(v) -> str:
         return f"{v:+.1f}%" if isinstance(v, (int, float)) else "—"
@@ -898,6 +911,9 @@ def sector_view(ml: dict, flow: dict | None = None,
         hf = _heat_fact(name)
         if hf:
             facts.append(hf)
+        cf = _catalyst_fact(name)
+        if cf:
+            facts.append(cf)
 
         if role == "主线":
             judge = {
@@ -939,6 +955,9 @@ def sector_view(ml: dict, flow: dict | None = None,
             hf = _heat_fact(name)
             if hf:
                 pure_facts.append(hf)
+            cf = _catalyst_fact(name)
+            if cf:
+                pure_facts.append(cf)
             pure.append({
                 "name": name, "role": "资金支线", "level": "观察",
                 "score": round(b_pct * 2 + max(b_main or 0.0, 0.0) * 0.4, 1),

@@ -392,6 +392,7 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div class="sec" id="secMeter">
         <div class="sh"><h2>情绪温度计</h2>
           <span class="hint">连板梯队 · 炸板率 · 晋级率 · 涨跌家数 —— 冰点→启动→发酵→高潮→退潮</span></div>
+        <div id="intradayWrap"></div>
         <div id="meterWrap"></div>
       </div>
     </div>
@@ -1369,6 +1370,8 @@ function renderDetail(p){
     <div class="kv">
       <div><div class="k">现价</div><div class="v">${f2(p.price)}</div></div>
       <div><div class="k">涨跌幅</div><div class="v ${pct(p.pct)}">${f2(p.pct)}%</div></div>
+      ${p.hot_rank?`<div><div class="k">同花顺人气</div><div class="v" style="color:var(--org)">第 ${p.hot_rank} 名${
+        p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
       <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
       <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
       <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
@@ -1486,6 +1489,18 @@ function drawK(p){
 const STG={ice:['🧊','var(--blu)','冰点'],revive:['🌱','var(--grn)','修复·启动'],
   ferment:['🔥','var(--org)','发酵'],climax:['🌋','var(--red)','高潮'],ebb:['🌊','var(--grn)','退潮']};
 function renderMeter(){
+  // 盘中实时异动（打开涨停板 = 正在炸板）——仅交易时段有数据，收盘自动消失
+  const iw=$('intradayWrap');
+  if(iw){
+    const op=((REPORT.intraday||{}).opened)||[];
+    iw.innerHTML=op.length?`<div class="card" style="border-left:4px solid var(--org);background:#fffdf8;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--org);margin-bottom:6px">盘中实时 · 刚刚打开涨停板（${op.length} 只）</div>
+      <div style="font-size:12.5px;color:var(--tx2);line-height:1.9">${
+        op.map(x=>`<b>${esc(x.name)}</b><span class="fl"> ${(x.time||'').slice(0,2)}:${(x.time||'').slice(2,4)}${x.pct!=null?' · 现 '+x.pct+'%':''}</span>`).join('　')
+      }</div>
+      <div class="fl" style="font-size:11px;margin-top:5px">封单被砸开 = 承接转弱的第一现场；如果出现你的持仓，高度警惕</div>
+    </div>`:'';
+  }
   const el=$('meterWrap'); if(!el) return;
   const m=REPORT.meter||{};
   if(m.enabled===false||!m.metrics||!Object.keys(m.metrics).length){

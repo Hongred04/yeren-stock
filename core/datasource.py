@@ -860,6 +860,69 @@ def fetch_yesterday_zt_pool(ttl: int = 120) -> list[dict]:
     return cached("pool:YZT", ttl, producer)
 
 
+# 盘口异动类型（东财 getAllStockChanges），只收录本系统用到的
+CHANGE_TYPES = {
+    "8208": "打开涨停板",
+    "8205": "封涨停板",
+    "8201": "火箭发射",
+    "8193": "大笔买入",
+}
+
+
+def fetch_stock_changes(change_type: str = "8208", ttl: int = 60) -> list[dict]:
+    """盘口异动列表（实时事件流，最新在前）。
+
+    默认「打开涨停板」—— 盘中实时炸板监测：炸板池接口给的是"已炸板归档"，
+    这个给的是"此刻正在炸"的事件流，盯盘时更早一步看到风险。
+    收盘后该接口数据有限（事件已清理），调用方自行判断是否需要。
+
+    字段格式实测（2026-10-09）：i 为逗号拼接串，位置因类型而异 ——
+    打开涨停板/火箭发射类："涨幅比率,价格,涨幅比率"（比率 ×100 得百分数）；
+    大笔买卖类："量,价格,涨幅比率,金额"。
+    """
+    def producer():
+        url = (f"{POOL_BASE}/getAllStockChanges?type={change_type}&ut={POOL_UT}"
+               f"&pageindex=0&pagesize=200&dpt=wzchanges")
+        try:
+            raw = _get(url, timeout=12, referer="https://quote.eastmoney.com/").decode(
+                "utf-8", errors="ignore")
+            js = json.loads(raw)
+        except Exception:
+            return []
+        items = (js.get("data") or {}).get("allstock") or []
+        out = []
+        for it in items:
+            try:
+                code6 = str(it.get("c") or "")
+                if not code6 or len(code6) != 6:
+                    continue
+                mkt = "sh" if it.get("m") == 1 else "sz"
+                tm = str(it.get("tm") or "")
+                if len(tm) == 5:
+                    tm = "0" + tm
+                parts = str(it.get("i") or "").split(",")
+                pct = None
+                try:
+                    if change_type in ("8201", "8202", "8203", "8204",
+                                       "8205", "8206", "8207", "8208"):
+                        pct = round(float(parts[0]) * 100, 2)
+                    elif change_type in ("8193", "8194") and len(parts) >= 3:
+                        pct = round(float(parts[2]) * 100, 2)
+                except (ValueError, IndexError):
+                    pct = None
+                out.append({
+                    "code": f"{mkt}{code6}",
+                    "name": str(it.get("n") or "").strip(),
+                    "time": tm,                       # HHMMSS
+                    "pct": pct,
+                    "type": change_type,
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+    return cached(f"changes:{change_type}", ttl, producer)
+
+
 # ---------------------------------------------------------------- 历史情绪
 
 def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:

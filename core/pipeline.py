@@ -20,6 +20,7 @@ from . import outlook
 from . import portfolio as portfolio_mod
 from . import sentiment_meter
 from . import strategy_config as sc
+from . import ths as ths_mod
 from . import trading
 from . import universe
 from .version import APP_VERSION
@@ -116,6 +117,15 @@ def stock_detail(code: str) -> dict:
         _rz = None
     if _rz:
         p["zt_reason"] = _rz
+    # 同花顺人气榜排名（在榜才有）
+    try:
+        _h = ths_mod.hot_rank().get(code)
+    except Exception:
+        _h = None
+    if _h:
+        p["hot_rank"] = _h["rank"]
+        if _h.get("tag"):
+            p["hot_tag"] = _h["tag"]
     p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
     p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
     p["kline_tail"] = bars[-30:]
@@ -234,6 +244,19 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             for r in zt:
                 r.setdefault("reason", _reasons.get(r.get("code", ""), ""))
 
+        # ---- 同花顺人气榜：挂到涨停股（散户关注度，界面上只显示一行） ----
+        try:
+            _hot = ths_mod.hot_rank()
+        except Exception:
+            _hot = {}
+        if _hot:
+            for r in zt:
+                h = _hot.get(r.get("code"))
+                if h:
+                    r["hot_rank"] = h["rank"]
+                    if h.get("tag"):
+                        r["hot_tag"] = h["tag"]
+
         zth = ds.fetch_limit_up_history(10, real_date)
         idx = ds.fetch_index_snapshots()
         amount = sum(v["amount"] for v in idx.values()
@@ -286,6 +309,11 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             p["kline_tail"] = bars[-30:]
             if _reasons.get(p["code"]):
                 p["zt_reason"] = _reasons[p["code"]]
+            h = _hot.get(p["code"])
+            if h:
+                p["hot_rank"] = h["rank"]
+                if h.get("tag"):
+                    p["hot_tag"] = h["tag"]
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
 
@@ -300,6 +328,24 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         # ---- E1 情绪温度计（连板梯队/炸板率/晋级率/涨跌家数） ----
         _prog("构建情绪温度计…", 0, 100)
         meter = sentiment_meter.build(zt, dt, zb, snaps, real_date, cfg)
+
+        # ---- 盘中实时异动（打开涨停板 = 正在炸板；仅交易时段拉取） ----
+        intraday = {}
+        if sess["phase"] in ("morning", "afternoon", "tail"):
+            try:
+                ch = ds.fetch_stock_changes("8208", ttl=45)
+                seen_codes, opened = set(), []
+                for it in ch:
+                    if it["code"] in seen_codes:
+                        continue
+                    seen_codes.add(it["code"])
+                    opened.append(it)
+                    if len(opened) >= 6:
+                        break
+                if opened:
+                    intraday["opened"] = opened
+            except Exception:
+                pass
 
         # ---- E2 龙虎榜·游资席位（数据只进「资金在干什么」结论，不上界面） ----
         _prog("拉取龙虎榜…", 0, 100)
@@ -370,6 +416,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "volume_history": [{"date": b["date"], "volume": b["volume"]} for b in hist[-20:]],
             "sentiment": sentiment,
             "meter": meter,
+            "intraday": intraday,
             "mainline": ml,
             "sectors": sectors,
             "outlook": next_outlook,
