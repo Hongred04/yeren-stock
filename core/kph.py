@@ -26,7 +26,8 @@ from urllib.request import Request, urlopen
 from . import datasource as ds
 from . import universe
 
-HIST_URL = "https://apphis.kaipanhong.com/w1/api/index.php"
+HIST_URL = "https://apphis.kaipanhong.com/w1/api/index.php"      # 历史
+RT_URL = "https://apphwshhq.kaipanhong.com/w1/api/index.php"     # 实时
 
 _BASE = {
     "PhoneOSNew": "1", "DeviceID": "1a609dd6-b2b8-3bf9-ac40-a77581551454",
@@ -61,10 +62,10 @@ def _gate() -> None:
     _last_req = time.time()
 
 
-def _post(params: dict, timeout: int = 12) -> dict:
+def _post(params: dict, timeout: int = 12, url: str = HIST_URL) -> dict:
     _gate()
     body = urlencode({**_BASE, **params}).encode("utf-8")
-    req = Request(HIST_URL, data=body, headers={
+    req = Request(url, data=body, headers={
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "User-Agent": _UA, "Accept": "application/json,text/plain,*/*",
     }, method="POST")
@@ -161,6 +162,36 @@ def history_emotion(date: str) -> dict:
         }
     except Exception as e:
         print(f"[kph] 历史情绪抓取失败({date}): {e}", file=sys.stderr)
+        return {}
+
+
+def market_emotion() -> dict:
+    """当日实时市场情绪（涨跌家数 / 涨停跌停）。
+
+    push2 被限流时，这是 E1「涨跌家数」的**备用源**（东财 ulist.np 的
+    f104/f105/f106 拿不到时顶上）。平盘数 = 本地有效代码总数 - 涨 - 跌。
+    失败返回 {}。
+    """
+    def producer():
+        js = _post({"a": "ZhangFuDetail", "c": "HomeDingPan"}, url=RT_URL)
+        info = js.get("info") if isinstance(js.get("info"), dict) else {}
+        up = _int(info.get("SZJS"))
+        down = _int(info.get("XDJS"))
+        if up + down <= 0:
+            return {}
+        try:
+            codes = ds.load_valid_codes() or []
+            total = len(codes) if len(codes) > up + down else up + down
+        except Exception:
+            total = up + down
+        flat = max(total - up - down, 0)
+        return {"up": up, "down": down, "flat": flat, "total": up + down + flat,
+                "limit_up": _int(info.get("ZT")), "limit_down": _int(info.get("DT")),
+                "source": "kph"}
+    try:
+        return ds.cached("kph:emotion", 120, producer)
+    except Exception as e:
+        print(f"[kph] 实时情绪抓取失败: {e}", file=sys.stderr)
         return {}
 
 

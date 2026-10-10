@@ -187,8 +187,11 @@ def auto_fetch_cookie(timeout: int = 12) -> dict:
 _em_fail: dict[str, int] = {}          # 接口 -> 连续失败轮数
 _em_down_until: dict[str, float] = {}  # 接口 -> 冷却截止（epoch 秒）
 _em_lock = threading.Lock()
-EM_BLOCK_BASE = 300      # 首次冷却 5 分钟
-EM_BLOCK_MAX = 1800      # 封顶 30 分钟
+# v1.19：冷却时长整体下调。原来封顶 30 分钟 —— 一次限流就半小时看不到
+# 板块资金/涨跌家数，逼着人去刷页面（越刷越触发风控，恶性循环）。
+# 现在：接口级封顶 5 分钟，家族级封顶 4 分钟，且都支持半开探测提前恢复。
+EM_BLOCK_BASE = 120      # 首次冷却 2 分钟
+EM_BLOCK_MAX = 300       # 封顶 5 分钟
 EM_BLOCK_MIN_FAILS = 2   # 软失败（超时等）连续几轮才熔断；硬失败（被 RST）立即熔断
 
 
@@ -1034,16 +1037,47 @@ EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
 #   ② 被 RST 时记一次**家族级**冷却，所有 push2 调用一起退避，
 #      不再让每个接口各自撞一遍（那样只会把冷却越撞越长）
 PUSH2_MIN_INTERVAL = 0.35      # 同族请求最小间隔（秒）
-PUSH2_COOLDOWN = 180           # 被掐后家族级冷却（秒）
+PUSH2_COOLDOWN = 240           # 被掐后家族级冷却上限（v1.19：900 → 240）
+PUSH2_PROBE_AFTER = 60         # 冷却开始多久后放行一次「半开探测」
+PUSH2_BUDGET = 15              # 滑动窗口预算：60 秒内最多多少次 push2 请求
 _p2_lock = threading.Lock()
 _p2_last = 0.0
 _p2_down_until = 0.0
+_p2_probe = 0.0
+_budget_log: list[float] = []
+_budget_skip = 0               # 被预算挡下的次数（数据源面板展示用）
+
+
+def _push2_allow() -> bool:
+    """滑动窗口预算：60 秒窗口内还有额度才放行。
+
+    东财是按「单位时间请求量」限流的 —— 等被 RST 再退避已经晚了（会连坐
+    整个 push2 家族好几分钟，页面一串"冷却中"）。主动设预算：额度用完就
+    **不发请求、不记失败**，直接让调用方走降级源 —— 从根源上不触发风控。
+    """
+    global _budget_skip
+    now = time.time()
+    with _p2_lock:
+        _budget_log[:] = [t for t in _budget_log if now - t < 60.0]
+        if len(_budget_log) >= PUSH2_BUDGET:
+            _budget_skip += 1
+            return False
+        _budget_log.append(now)
+        return True
 
 
 def _push2_gate() -> bool:
-    """push2 请求前的闸门。False = 正在冷却，调用方应直接走降级。"""
-    global _p2_last
-    if time.time() < _p2_down_until:
+    """push2 请求前的闸门。False = 冷却中或预算用尽，调用方应走降级。"""
+    global _p2_last, _p2_probe
+    now = time.time()
+    if now < _p2_down_until:
+        # 冷却中：每隔 PUSH2_PROBE_AFTER 放行一次半开探测 —— 东财恢复后
+        # 几十秒内自己就能回来，不用干等满冷却（原来最坏要等 15 分钟）
+        if now - _p2_probe >= PUSH2_PROBE_AFTER:
+            _p2_probe = now
+        else:
+            return False
+    if not _push2_allow():
         return False
     with _p2_lock:
         gap = PUSH2_MIN_INTERVAL - (time.time() - _p2_last)
@@ -1059,11 +1093,24 @@ def _push2_trip(seconds: int = PUSH2_COOLDOWN) -> None:
     _p2_down_until = max(_p2_down_until, time.time() + seconds)
 
 
+def _push2_recover() -> None:
+    """一次成功就清零家族冷却（半开探测成功即恢复）。"""
+    global _p2_down_until, _p2_probe
+    _p2_down_until = 0.0
+    _p2_probe = 0.0
+
+
 def push2_status() -> dict:
-    """给「数据源」面板看：还剩多久冷却、限速间隔多少。"""
-    return {"cooling_seconds": max(0, round(_p2_down_until - time.time())),
+    """给「数据源」面板看：冷却剩余、每分钟预算用量、被预算挡下多少次。"""
+    now = time.time()
+    with _p2_lock:
+        _budget_log[:] = [t for t in _budget_log if now - t < 60.0]
+        used = len(_budget_log)
+    return {"cooling_seconds": max(0, round(_p2_down_until - now)),
             "min_interval": PUSH2_MIN_INTERVAL,
-            "hosts": len(EM_PUSH2_HOSTS)}
+            "hosts": len(EM_PUSH2_HOSTS),
+            "budget_used": used, "budget_max": PUSH2_BUDGET,
+            "budget_skipped": _budget_skip}
 
 
 def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dict:
@@ -1087,6 +1134,7 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
             with _em_lock:
                 _em_fail.pop(key, None)
                 _em_down_until.pop(key, None)
+            _push2_recover()         # 半开探测/正常请求成功 → 家族冷却清零
             return js
         except Exception as e:
             if not _is_hard_block(e):
@@ -1099,17 +1147,44 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
             _em_down_until[key] = time.time() + min(
                 EM_BLOCK_BASE * (2 ** (n - 1)), EM_BLOCK_MAX)
     # 家族级冷却：行情列表接口被掐时，整个 push2 一起歇一会儿
-    _push2_trip(min(PUSH2_COOLDOWN * (2 ** min(_em_fail.get(key, 1) - 1, 3)), 900))
+    # 60 / 120 / 240 秒三档封顶（原来 180→900 秒，太狠）
+    _push2_trip(min(60 * (2 ** min(_em_fail.get(key, 1) - 1, 2)), PUSH2_COOLDOWN))
     return {}
 
 
+def _breadth_fallback() -> dict:
+    """push2 拿不到涨跌家数时的备用口径 —— 开盘红实时情绪（独立链路）。
+
+    返回结构与 fetch_breadth 一致，多一个 source='kph' 供界面如实标注。
+    """
+    try:
+        from . import kph as _kph
+        em = _kph.market_emotion()
+    except Exception:
+        return {}
+    up = int(em.get("up") or 0)
+    down = int(em.get("down") or 0)
+    flat = int(em.get("flat") or 0)
+    if up + down <= 0:
+        return {}
+    total = up + down + flat
+    return {"up": up, "down": down, "flat": flat, "total": total,
+            "up_ratio": round(up / total, 3),
+            "up_down_ratio": round(up / down, 2) if down else 0.0,
+            "source": "kph"}
+
+
 def fetch_breadth() -> dict:
-    """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。"""
+    """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。
+
+    push2 拿不到时（被限流 / 预算用尽）退**开盘红实时情绪**——它直接给
+    涨跌家数，是独立于东财的一条路；结果带 source 字段供界面如实标注。
+    """
     js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
                      "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
     diff = (js.get("data") or {}).get("diff") or []
     if not diff:
-        return {}
+        return _breadth_fallback()
     up = down = flat = 0
     for it in diff:
         up += int(_num(it.get("f104")))
@@ -1366,8 +1441,9 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
     短线真正驱动行情的是概念板块，原来只排行业板块反而漏掉了主线；
     现在同一批请求把两类都拿回来，主升题材能直接冲到榜首。
 
-    东财被风控时退到新浪：那条链路没有主力净额（main=None），
-    但涨跌幅/成交额/领涨股都有，面板至少能告诉你钱在往哪个方向走。
+    东财被风控时**先退财联社**（同样有主力净额），再退新浪：那条链路
+    没有主力净额（main=None），但涨跌幅/成交额/领涨股都有，面板至少
+    能告诉你钱在往哪个方向走。三条路都带 source 供界面如实标注。
     """
     key = f"board_flow:{limit}"
     now = time.time()
@@ -1375,7 +1451,8 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
     if hit and now - _cache_ts.get(key, 0) < 600:      # 10 分钟：少打接口
         return hit
 
-    rows = _board_flow_em(limit) or _board_flow_sina(limit)
+    rows = (_board_flow_em(limit) or _board_flow_cls(limit)
+            or _board_flow_sina(limit))
     if rows:
         _cache[key] = rows
         _cache_ts[key] = now
@@ -1400,6 +1477,28 @@ def _board_flow_em(limit: int) -> list[dict]:
                     "lead": it.get("f204", ""),
                     "lead_code": it.get("f205", ""),
                     "source": "em"})
+    out.sort(key=lambda r: -(r["main"] or 0))
+    return out[:limit]
+
+
+def _board_flow_cls(limit: int) -> list[dict]:
+    """财联社口径：push2 被限流时的**中间层**——有主力净额（新浪兜底没有）。
+
+    东财 ulist.np 给 f62、财联社给 main_fund_diff，两者同口径的另一条路；
+    板块名是财联社口径（"影视院线"等），与东财行业名略有出入但语义一致。
+    """
+    try:
+        from . import cls as _cls
+        rows = _cls.sector_industry()
+    except Exception:
+        return []
+    out = []
+    for it in rows:
+        if not it.get("name"):
+            continue
+        out.append({"code": "", "name": it["name"], "pct": it.get("pct"),
+                    "main": it.get("main"), "main_pct": None,
+                    "lead": it.get("lead"), "lead_code": "", "source": "cls"})
     out.sort(key=lambda r: -(r["main"] or 0))
     return out[:limit]
 

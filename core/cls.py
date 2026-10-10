@@ -41,6 +41,7 @@ ZT_POOL_URL = "https://x-quote.cls.cn/quote/index/up_down_analysis"
 HEAT_URL = "https://x-quote.cls.cn/v2/quote/a/plate/plate_heat_list"
 TELEGRAPH_URL = "https://api3.cls.cn/v1/roll/get_roll_list"
 WIND_URL = "https://api3.cls.cn/v2/todayTuyere"
+PLATE_LIST_URL = "https://x-quote.cls.cn/web_quote/plate/plate_list"
 
 # 固定签名的接口（参数不随请求变化）
 _EMOTION_PARAMS = {"app": "CailianpressWeb", "os": "web", "sv": "8.4.6",
@@ -317,6 +318,44 @@ def match_heat(name: str, heats: list[dict] | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------- 风口板块
+
+def sector_industry() -> list[dict]:
+    """行业板块实时行情（涨幅 + 主力净额 + 涨跌家数 + 领涨股）。
+
+    push2 被限流时，这是板块资金流的**首选替代源**：东财 ulist.np 给的是
+    f62 主力净额，这里给 main_fund_diff —— 同口径的另一条路。
+    失败返回 []。
+    """
+    def producer():
+        js = _fetch_json(
+            PLATE_LIST_URL,
+            {"app": "CailianpressWeb", "os": "web", "page": "5", "rever": "1",
+             "sv": "8.4.6", "type": "industry", "way": "change",
+             "sign": "ef1ec7886be706a0b722d7e7bf3c0054"})
+        data = js.get("data") or {}
+        rows = data.get("plate_data") or []
+        out = []
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            name = (it.get("secu_name") or "").strip()
+            if not name:
+                continue
+            lead = it.get("first_stock") if isinstance(it.get("first_stock"), dict) else {}
+            out.append({
+                "name": name,
+                "pct": round(_f(it.get("change")) * 100, 2),      # 比率 → 百分数
+                "main": _f(it.get("main_fund_diff")),              # 元（与东财 f62 同口径）
+                "up": int(_f(it.get("limit_up_num"))),
+                "down": int(_f(it.get("limit_down_num"))),
+                "lead": (lead.get("secu_name") or "").strip(),
+            })
+        return out
+    try:
+        return ds.cached("cls:industry", 300, producer)
+    except Exception as e:
+        print(f"[cls] 板块实时行情抓取失败: {e}", file=sys.stderr)
+        return []
 
 def market_wind() -> list[dict]:
     """今日风口板块 + 催化剂解读 [{name, catalyst}]。

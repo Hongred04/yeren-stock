@@ -154,6 +154,40 @@ def main():
     hit2 = cls.match_heat("种植业", winds)
     ok(hit2 and hit2["name"] == "农业种植", "种植业→农业种植（别名）")
 
+    print("[11] push2 请求预算（主动限流，不等被掐）")
+    _old_budget = ds.PUSH2_BUDGET
+    ds.PUSH2_BUDGET = 3
+    ds._budget_log.clear()
+    allow = [ds._push2_allow() for _ in range(5)]
+    ok(allow == [True, True, True, False, False],
+       "额度用完即让行（前3次放行、后2次挡下且不记失败）")
+    ok(ds._budget_skip >= 2, "被挡次数有记录（面板展示用）")
+    ds.PUSH2_BUDGET = _old_budget
+    ds._budget_log.clear()
+
+    print("[12] push2 挂掉 → 备用源顶上（mock）")
+    from core import kph as _kph
+    _kph.market_emotion = lambda: {"up": 3000, "down": 2000, "flat": 200,
+                                   "total": 5200, "limit_up": 60,
+                                   "limit_down": 5, "source": "kph"}
+    cls.sector_industry = lambda: [{"name": "影视院线", "pct": 6.77,
+                                    "main": 8.37e8, "up": 5, "down": 0,
+                                    "lead": "捷成股份"}]
+    ds._push2_json = lambda *a, **k: {}
+    ds._cache.pop("kph:emotion", None)      # 清掉可能由前面用例留下的真实缓存
+    ds._cache_ts.pop("kph:emotion", None)
+    b = ds._breadth_fallback()
+    ok(b.get("source") == "kph" and b.get("up") == 3000,
+       "涨跌家数退到开盘红（并标注来源）")
+    ok(round(b.get("up_ratio", 0), 2) == 0.58,
+       "上涨占比按 up/(up+down+flat) 计算")
+    for k in [k for k in ds._cache if str(k).startswith("board_flow")]:
+        ds._cache.pop(k, None)
+        ds._cache_ts.pop(k, None)
+    flow = ds.fetch_board_moneyflow(5)
+    ok(flow and flow[0]["source"] == "cls"
+       and flow[0]["name"] == "影视院线", "板块资金退到财联社（仍有主力净额）")
+
     print()
     print(f"===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
