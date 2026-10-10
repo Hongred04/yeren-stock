@@ -945,6 +945,8 @@ function render(){
     watch:['信号不全 · 仅观察','hold'],one_day:['一日游特征 · 回避接力','stop'],
     disabled:['模块已关闭','hold']};
   const mlMeta=ML_CN[ml.status]||ML_CN.watch;
+  // 标题优先用后端的动态 label（一日游/游资行情的措辞由后端按连续活跃天数定）
+  if(ml.label) mlMeta[0]=ml.label;
   const ML_ST={confirmed:'成立',day1_pending:'待验证',watch:'观察',one_day:'一日游',disabled:'—'};
 
   $('hdPreset').textContent=(CONFIG.name||m.preset_name||m.preset);
@@ -991,8 +993,8 @@ function render(){
       s:mm.hurt_area>=0.30?'超过30%警戒线':'低于30%警戒线',c:mm.hurt_area>=0.30?'r':'g'},
     {t:'纪律检查',v:{green:'正常',yellow:'有注意',red:'有冲突'}[mt.status],
       s:mt.checks.length+' 项检查',c:mt.status==='green'?'g':(mt.status==='yellow'?'o':'r')},
-    {t:'题材主线',v:ML_ST[ml.status]||'—',
-      s:ml.theme?'最强题材：'+ml.theme:'五信号判定题材持续性',
+    {t:'题材主线',v:(ml.status==='one_day'&&ml.streak>=2)?'容量有限':(ML_ST[ml.status]||'—'),
+      s:ml.theme?('最强题材：'+ml.theme+(ml.streak>=2?`（已连续${ml.streak}日活跃）`:'')):'五信号判定题材持续性',
       c:ml.status==='confirmed'?'g':(ml.status==='one_day'?'r':(ml.status==='disabled'?'':'o'))},
     {t:'入选股票',v:REPORT.picks.length+' 只',
       s:'从 '+m.scanned+' 只里筛出',c:REPORT.picks.length?'g':''},
