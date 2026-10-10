@@ -159,6 +159,13 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             c0, c3 = _f(bars[-4].get("close")), _f(bars[-1].get("close"))
             if c0 > 0 and c3 > 0:
                 r3 = round((c3 / c0 - 1) * 100, 1)      # 近 3 日涨幅（去弱留强用）
+        # 野人「扶老太太下楼梯」：被套（≤-5%）时的向下解套参考。
+        # 只对日内有波动的票成立 —— 一字锁死/流动性差的票做不动这个动作。
+        unwind = ""
+        if pnl_pct is not None and pnl_pct <= -5:
+            unwind = ("被套参考「扶老太太下楼梯」（适合日内有波动的票）："
+                      "开盘先卖 → 低位（-3%~-5%）接回反复磨；出现高开修复才格局、"
+                      "冲高回本线卖一半；不符合预期就解套走人、不恋战")
         out.append({
             "code": code, "name": h.get("name") or snap.get("name", ""),
             "cost": cost, "shares": shares, "date": h.get("date", ""),
@@ -167,7 +174,7 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
             "mv": round(mv, 1), "verdict": verdict, "level": level,
             "signals": sells, "fund_style": fs.get("type", "unknown"),
-            "r3": r3,
+            "r3": r3, "unwind": unwind,
         })
         if level in ("critical", "high"):
             checks.append({"level": "red" if level == "critical" else "yellow",

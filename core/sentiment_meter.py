@@ -179,6 +179,39 @@ def _save_hist(real_date: str, row: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- 入口
 
+def _space_board(real_date: str, max_boards: int,
+                 days: int = 20) -> dict:
+    """空间板检测 —— 野人：「空间板打开之后，后面的短线生态就好做了」。
+
+    空间板 = 场内资金用真金白银把高度打上去（试探监管 + 打开天花板）。
+    口径：今日最高连板 vs 近 N 个交易日（不含今日）的最高连板——
+    突破 = 空间打开（短线敢做的高度出来了）；未突破 = 高度压制
+    （谁板谁死，做多高度没打开）。只读本地归档，零额外请求。
+    """
+    try:
+        dates = [d for d in ds.pool_history_dates() if d < real_date][-days:]
+        best, best_d = 0, ""
+        for d in dates:
+            pool = ds.load_pool_history(d) or []
+            mb = max((int(r.get("boards") or 1) for r in pool), default=0)
+            if mb > best:
+                best, best_d = mb, d
+        if not best or not max_boards:
+            return {}
+        broke = max_boards > best
+        return {
+            "today": max_boards, "prev20": best, "prev_date": best_d,
+            "open": broke,
+            "note": (f"空间打开：今日最高 {max_boards} 板，突破近20日前高 {best} 板"
+                     f"（{best_d}）—— 短线生态转好，敢做的高度出来了"
+                     if broke else
+                     f"高度压制：今日最高 {max_boards} 板，近20日前高 {best} 板"
+                     f"（{best_d}）—— 空间没打开之前，别把预期打太高"),
+        }
+    except Exception:
+        return {}
+
+
 def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
           real_date: str, cfg: dict | None = None) -> dict:
     """构建情绪温度计。zt/dt/zb 为涨停/跌停/炸板池，snaps 为全市场快照。"""
@@ -299,6 +332,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "enabled": True, "temperature": temp, "stage": stage,
         "label": f"{info['emoji']} {info['label']}", "advice": info["advice"],
         "delta": delta, "ladder": ladder, "metrics": metrics,
+        "space": _space_board(real_date, max_boards),
         "heat_series": heat_series,
         "note": "温度 = 涨停家数30 + 连板高度25 + 炸板率20 + 晋级率/宽度25；"
                 "M3 判「能不能出手」，温度计看「今天多少度」",

@@ -401,7 +401,7 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <div class="page" data-page="mood-line">
       <div class="sec">
         <div class="sh"><h2>题材主线五信号</h2>
-          <span class="hint">消息定级 → 首日合力 → 中军容量 → 老龙引信 → 次日验证 · 缺一环就是一日游</span></div>
+          <span class="hint">消息定级 → 首日合力 → 中军容量 → 老龙引信 → 次日验证 · 缺一环主线不成立（首日新题材 = 一日游；连续活跃题材 = 容量有限）</span></div>
         <div id="mlVerdict"></div>
         <div class="card" style="margin-top:12px"><div class="steps" id="mlSteps"></div></div>
         <div id="mlExtra"></div>
@@ -962,9 +962,11 @@ function render(){
 
   /* ── ① 一句话结论 ── */
   const canTrade=sen.can_trade && vol.mode!=='dry';
-  const cls=!canTrade?'stop':(sen.stage==='climax'||sen.stage==='follow')?'go':'hold';
-  const emoji=!canTrade?'🚫':cls==='go'?'✅':'⚠️';
+  const frozen=sen.stage==='unknown';   // 没有涨停 = 冰点/无信号，别鼓励试水（野人：手痒=送钱）
+  const cls=!canTrade?'stop':frozen?'stop':(sen.stage==='climax'||sen.stage==='follow')?'go':'hold';
+  const emoji=!canTrade?'🚫':frozen?'🧊':(cls==='go'?'✅':'⚠️');
   const title=!canTrade?'今天不要买'
+    :frozen?'暂无涨停信号 —— 空仓等启动，手痒=送钱'
     :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水');
   const reason=!canTrade
     ?(sen.can_trade? vol.advice : (sen.note||'情绪已进入退潮期'))
@@ -1550,6 +1552,9 @@ function renderMeter(){
     ['赚钱效应',(mt.money_effect==null?'—':(mt.money_effect>=0?'+':'')+f(mt.money_effect)+'%'),'昨日涨停今日平均涨幅',mt.money_effect!=null&&mt.money_effect>0?'g':'r'],
     ['高度溢价',(mt.height_premium==null?'—':(mt.height_premium>=0?'+':'')+f(mt.height_premium)+'%'),'昨日连板股今日表现',mt.height_premium!=null&&mt.height_premium>0?'g':'o'],
     ['一字板',mt.one_word+' 只','竞价即封，抢不到',mt.one_word>=3?'o':''],
+    ['空间板',(m.space&&m.space.today!=null?m.space.today+' 板':'—'),
+     (m.space&&m.space.prev20?((m.space.open?'突破':'未破')+'近20日前高 '+m.space.prev20+' 板'):'近20日前高数据不足'),
+     (m.space&&m.space.open?'g':'o'),(m.space&&m.space.note)||''],
     ['涨跌家数',(mt.breadth&&mt.breadth.total?mt.breadth.up+'/'+mt.breadth.down:'—'),mt.breadth&&mt.breadth.total?('涨跌比 '+mt.breadth.up_down_ratio):'数据不可用',mt.breadth&&mt.breadth.total&&mt.breadth.up>mt.breadth.down?'g':'o'],
   ];
   el.innerHTML=`<div class="verdict ${t>=62?'go':(t<42?'stop':'hold')}" style="padding:16px 20px">
@@ -1559,7 +1564,7 @@ function renderMeter(){
     <div style="height:9px;background:rgba(255,255,255,.65);border-radius:5px;overflow:hidden;margin-top:12px">
       <div style="height:100%;width:${t}%;background:linear-gradient(90deg,#2563d9,#0f9d58,#e07c1a,#d92d3f)"></div></div>
   </div>
-  <div class="grid g4" style="margin-top:12px">${cards.map(c=>`<div class="mc ${c[3]}">
+  <div class="grid g4" style="margin-top:12px">${cards.map(c=>`<div class="mc ${c[3]}" title="${esc(c[4]||'')}">
     <div class="t">${c[0]}</div><div class="v" style="font-size:19px">${c[1]}</div>
     <div class="s">${esc(c[2])}</div></div>`).join('')}</div>
   <div class="card" style="margin-top:12px">
@@ -1790,7 +1795,9 @@ function renderPort(){
         <td class="num ${(h.pnl_pct||0)>=0?'up':'dn'}" style="font-weight:800">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</td>
         <td class="num">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</td>
         <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
-        <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}</td>
+        <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}${
+          h.unwind?`<div style="margin-top:5px;font-size:11px;color:var(--org);background:#fffdf8;
+            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">${esc(h.unwind)}</div>`:''}</td>
       </tr>`).join('');
       hp.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
           <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>
@@ -1986,7 +1993,7 @@ function renderModules(){
     ['M6_message','M6 消息观','明牌不追，消息服务于资金'],
     ['M7_earnings','M7 业绩期','业绩披露期只做有业绩方向'],
     ['M8_discipline','M8 纪律清单','保命规则，可逐条开关'],
-    ['M9_mainline','M9 题材主线五信号','消息定级→合力→中军→老龙→次日验证；缺一环就是一日游'],
+    ['M9_mainline','M9 题材主线五信号','消息定级→合力→中军→老龙→次日验证；缺一环主线不成立（首日新题材=一日游）'],
     ['M10_fundstyle','M10 主导资金分类','机构(中军)/游资(龙头)/庄股——分类定离场：加速减仓·断板节奏·庄股回避'],
     ['E1_meter','E1 情绪温度计','连板梯队/炸板率/晋级率/涨跌家数 → 0-100 温度'],
     ['E2_lhb','E2 龙虎榜·游资席位','席位/机构/北向数据 —— 只进「资金在干什么」结论，不在界面展示明细'],
@@ -2004,9 +2011,9 @@ function renderModules(){
       num(k,'comfort_threshold','舒适区量能(亿)','回到此量能=游资游刃有余',m.comfort_threshold)+
       num(k,'shrink_threshold','缩量阈值(亿)','低于此成交额=只做短线题材',m.shrink_threshold)+sw(k,'shrink_red_flag','极致缩量红盘视为筹码结构好');
     if(k==='M3_sentiment') body=sw(k,'enabled','启用')+
-      num(k,'ebb_hurt_ratio','退潮·亏钱面积阈值(%)','亏钱效应扩散面积超过即退潮',(m.ebb_hurt_ratio||.3)*100)+
-      num(k,'ebb_limit_down_ratio','退潮·跌停/涨停比','中位股成排跌停',(m.ebb_limit_down_ratio||.15)*100)+
-      num(k,'ebb_broken_ratio','退潮·炸板/涨停比','A字杀绝不反包',(m.ebb_broken_ratio||.5)*100)+
+      pctf(k,'ebb_hurt_ratio','退潮·亏钱面积阈值(%)','亏钱效应扩散面积超过即退潮',(m.ebb_hurt_ratio||.3)*100)+
+      pctf(k,'ebb_limit_down_ratio','退潮·跌停/涨停比(%)','中位股成排跌停',(m.ebb_limit_down_ratio||.15)*100)+
+      pctf(k,'ebb_broken_ratio','退潮·炸板/涨停比(%)','A字杀绝不反包',(m.ebb_broken_ratio||.5)*100)+
       sw(k,'clear_on_ebb','退潮期无条件清仓')+sw(k,'cycle_low_probe','退潮后等新周期首板')+
       num(k,'probe_board','首板试错板数','',m.probe_board||1);
     if(k==='M4_aesthetic'){const a=m;

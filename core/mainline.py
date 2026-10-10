@@ -704,19 +704,24 @@ def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
 
     if s5v == "pass" and s2v == "weak":
         return "watch", (f"「{theme_name}」承接检验已过（空间龙/首板留存/中军），"
-                         f"但首日合力或板块指数还差一环 —— 降级观察，明日看续强与否")
+                         f"但题材合力或板块指数还差一环 —— 降级观察，明日看续强与否")
 
     if s2v in ("pass", "weak") and s5v == "pending" and s4v != "weak":
+        _st = _int((day2 or {}).get("streak"), 0)
+        if _st >= 2:
+            return "day1_pending", (
+                f"「{theme_name}」已连续 {_st} 日活跃（不是首日）—— 今日合力+中军"
+                "重新成立，明日开盘看承接：空间龙高溢价、首板活口留存、中军无负反馈")
         if s1v == "unknown":
             return "day1_pending", ("首日启动成立（合力+中军），主线明日开盘验证；"
                                     "另请在「调策略」→「高级参数」→ M9 录入今日消息级别")
         if day2 and day2.get("return_day"):
             return "day1_pending", ("主线回归日启动成立（合力+中军）—— 今日盘中检验承接："
-                                    "空间龙高溢价、首板留存、中军无负反馈，接不住就是一日游")
+                                    "空间龙高溢价、首板留存、中军无负反馈，接不住就得熄火")
         return "day1_pending", ("首日启动成立（合力+中军），但主线是次日确认的 —— 明日开盘看："
                                 "空间龙高溢价、首板活口留存、中军无负反馈")
 
-    return "watch", "信号不全，缺一环就是一日游 —— 按观察处理，等信号补齐"
+    return "watch", "信号不全，主线不成立 —— 按观察处理，等信号补齐"
 
 
 def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],

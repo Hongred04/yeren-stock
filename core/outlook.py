@@ -37,6 +37,26 @@ def _f(v, d: float = 0.0) -> float:
         return d
 
 
+_DISCLOSURE_MONTHS = {
+    1: "年报预告窗口", 4: "年报/一季报披露窗口", 7: "中报预告窗口",
+    8: "中报披露窗口", 10: "三季报披露窗口",
+}
+
+
+def _disclosure_note(real_date: str) -> str:
+    """业绩披露窗口提示 —— 野人 10-08：「马上进入业绩预披露期，大资金谨慎
+    （不信 Q3 比 Q2 好）→ 存量资金互掏口袋」。披露期结束大资金才会回来。"""
+    try:
+        m = int(real_date[4:6])
+    except (ValueError, IndexError, TypeError):
+        return ""
+    label = _DISCLOSURE_MONTHS.get(m)
+    if not label:
+        return ""
+    return (f"现在是{label}：大资金对业绩谨慎、盘面容易走成存量博弈（互掏口袋）——"
+            "题材当短线看、不格局；等业绩落地，新子弹才会来")
+
+
 def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
           meter: dict | None = None, ml: dict | None = None,
           flow: dict | None = None, sectors: dict | None = None,
@@ -114,8 +134,13 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
                   + f"五信号共振 —— 明日盯：空间龙继续高开、"
                   f"昨日首板有活口、中军不砸盘，三者任一走坏按退潮预备处理")
     elif ml_status == "day1_pending":
-        t_note = (f"主线「{theme}」首日启动、还没确认 —— 明日开盘三件事："
-                  f"空间龙溢价、首板留存、中军反馈；过线才叫主线")
+        _st = int(_f(ml.get("streak"), 0))
+        if _st >= 2:
+            t_note = (f"「{theme}」已连续 {_st} 日活跃 —— 今日合力重新成立但待确认，"
+                      "明日开盘看：空间龙溢价、首板留存、中军反馈")
+        else:
+            t_note = (f"主线「{theme}」首日启动、还没确认 —— 明日开盘三件事："
+                      f"空间龙溢价、首板留存、中军反馈；过线才叫主线")
     elif ml_status == "one_day":
         _st = int(_f(ml.get("streak"), 0))
         t_note = (f"「{theme}」已连续 {_st} 日活跃，不是一日游 —— 但主线不成立"
@@ -199,6 +224,9 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     rot = (ml or {}).get("rotation_note") or ""
     if rot:
         mode_note = f"{mode_note}。{rot}"
+    dn = _disclosure_note(real_date)
+    if dn:
+        mode_note = f"{mode_note}。{dn}"
 
     return {
         "date": _next_trade_date(real_date),
