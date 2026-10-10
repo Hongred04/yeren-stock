@@ -40,10 +40,27 @@ _pool_qdate: dict = {}
 # 这里按 host 维护常驻 keep-alive 连接，跨阶段、跨扫描复用。
 
 _SSL_CTX = ssl.create_default_context()
-_SYS_PROXY = urllib.request.getproxies()   # 导入时读一次系统代理
+# 系统代理：**惰性刷新**（每 5 分钟重读一次）—— 用户随时会开/关 Clash、换端口，
+# 服务进程里固化一份启动时的快照会跟现实脱节（端口都对不上）。
+_SYS_PROXY: dict = {}
+_SYS_PROXY_TS = 0.0
+_SYS_PROXY_TTL = 300.0
+_PROXY_BAD_UNTIL = 0.0     # 代理连不上时短暂拉黑（期间直连），避免每请求都先撞死端口
 _conn_pool: dict[str, queue.Queue] = {}
 _POOL_MAX = 32   # 每 host 池上限，防止长驻进程文件句柄膨胀
 _pool_lock = threading.Lock()
+
+
+def _sys_proxy() -> dict:
+    global _SYS_PROXY, _SYS_PROXY_TS
+    now = time.time()
+    if now - _SYS_PROXY_TS > _SYS_PROXY_TTL:
+        try:
+            _SYS_PROXY = urllib.request.getproxies()
+        except Exception:
+            _SYS_PROXY = {}
+        _SYS_PROXY_TS = now
+    return _SYS_PROXY
 
 
 def reset_pool(host: str = "") -> int:
@@ -231,16 +248,29 @@ def em_reset_blocks() -> int:
 
 
 def _new_conn(host: str, timeout: int) -> http.client.HTTPSConnection:
-    px = _SYS_PROXY.get("https") or _SYS_PROXY.get("http")
+    """创建 HTTPS 连接。**优先走系统代理**，代理不可用时自动直连。
+
+    为什么东财请求要走代理（实测 2026-10-10）：系统以前从不吃系统代理，
+    几十轮扫描全从家宽 IP 直连打出去，东财把这个 IP 标记了 —— 接口间歇
+    RST、网页弹滑块。走用户本地代理（Clash 节点）相当于换干净 IP，实测
+    6/6 成功 vs 直连 3/6。代理连不上（没开 Clash）时自动回直连，并在
+    120 秒内不再尝试代理，避免每个请求都先撞一次死端口。
+    """
+    px = _sys_proxy().get("https") or _sys_proxy().get("http")
+    if px and time.time() < _PROXY_BAD_UNTIL:
+        px = None                     # 刚刚连不上：这几分钟直连，别反复撞
     if px:
-        # 走系统代理：连代理端口 + CONNECT 隧道到目标 443，行为与 urllib 一致
-        pu = urllib.parse.urlsplit(px if "//" in px else "//" + px)
-        conn = http.client.HTTPSConnection(pu.hostname, pu.port or 80,
-                                           timeout=timeout, context=_SSL_CTX)
-        conn.set_tunnel(host, 443)
-    else:
-        conn = http.client.HTTPSConnection(host, 443,
-                                           timeout=timeout, context=_SSL_CTX)
+        try:
+            pu = urllib.parse.urlsplit(px if "//" in px else "//" + px)
+            conn = http.client.HTTPSConnection(pu.hostname, pu.port or 80,
+                                               timeout=timeout, context=_SSL_CTX)
+            conn.set_tunnel(host, 443)
+            conn._via_proxy = True    # 标记：失败时区分「代理问题」还是「东财掐」
+            return conn
+        except (ValueError, OSError):
+            pass                      # 代理地址畸形 → 直连
+    conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=_SSL_CTX)
+    conn._via_proxy = False
     return conn
 
 
@@ -294,6 +324,13 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
             return data
         except Exception as e:
             last_err = e
+            # 代理连不上（端口拒绝/超时在 connect 阶段）≠ 东财掐我们：
+            # 前者该立即回直连并短暂拉黑代理，后者该走预算冷却。区分开。
+            if isinstance(e, (ConnectionRefusedError, OSError)) \
+                    and "connect" in str(e).lower() \
+                    and getattr(conn, "_via_proxy", False):
+                global _PROXY_BAD_UNTIL
+                _PROXY_BAD_UNTIL = time.time() + 120
             if conn is not None:
                 try:
                     conn.close()
@@ -1101,16 +1138,20 @@ def _push2_recover() -> None:
 
 
 def push2_status() -> dict:
-    """给「数据源」面板看：冷却剩余、每分钟预算用量、被预算挡下多少次。"""
+    """给「数据源」面板看：冷却剩余、每分钟预算用量、代理出口状态。"""
     now = time.time()
     with _p2_lock:
         _budget_log[:] = [t for t in _budget_log if now - t < 60.0]
         used = len(_budget_log)
+    px = _sys_proxy().get("https") or _sys_proxy().get("http") or ""
+    proxy_on = bool(px) and now >= _PROXY_BAD_UNTIL
     return {"cooling_seconds": max(0, round(_p2_down_until - now)),
             "min_interval": PUSH2_MIN_INTERVAL,
             "hosts": len(EM_PUSH2_HOSTS),
             "budget_used": used, "budget_max": PUSH2_BUDGET,
-            "budget_skipped": _budget_skip}
+            "budget_skipped": _budget_skip,
+            "proxy": (px.split("//")[-1] if px else ""),
+            "proxy_on": proxy_on}
 
 
 def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dict:

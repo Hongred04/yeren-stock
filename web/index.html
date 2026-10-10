@@ -578,14 +578,18 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
     <div class="fld"><label>关于东财限速</label>
       <div style="font-size:12px;color:var(--tx2);line-height:1.8;background:#fafbfc;
         border:1px solid var(--line2);border-radius:9px;padding:11px 13px">
-        <b>东财 push2 按请求量限速</b>：打多了整个家族一起被掐，几分钟后自恢复。
-        系统的对策是<b>主动限流而不是被动挨打</b>：
+        <b>东财按「请求量 + IP 信誉」双重风控</b>。系统的对策是<b>主动限流，不被动挨打</b>：
         ① 每分钟只给它 15 次请求额度，超了就<b>不发</b>（改走备用源，不触发风控）；
-        ② 万一还是被掐，冷却封顶 4 分钟，且每 60 秒做一次半开探测，东财一恢复就自己回来；
+        ② 万一被掐，冷却封顶 4 分钟，每 60 秒半开探测，东财一恢复就自己回来；
         ③ 被掐期间板块资金改走<b>财联社</b>（同样有主力净额）、涨跌家数改走<b>开盘红</b>，
-        最后才退新浪 —— 界面始终标注数据来自哪家。<br>
-        Cookie 只在东财将来改成鉴权校验时才用得上，目前解决不了限速。
+        最后才退新浪 —— 界面始终标注数据来自哪家；
+        ④ <b>你开着 Clash 时，系统自动借它的节点出口</b>（换干净 IP —— 家宽 IP 被标记
+        时这招最有效），Clash 没开则自动直连，都不用你操作。<br>
+        <b>关于滑块</b>：那是东财网页对被标记 IP 的人工验证，程序绕不过。要更新 Cookie：
+        点下面按钮在浏览器完成滑块 → F12 → 网络(Network) → 随便一个请求 →
+        请求头里复制 Cookie 值 → 粘贴到上面保存。
       </div>
+      <button class="btn2" id="srcOpenEm" style="width:100%;margin-top:8px">打开东财行情页（完成滑块验证用）</button>
     </div>
   </div>
   <div class="pf"><button class="btn" id="srcDone" style="flex:1">完成</button></div>
@@ -1928,11 +1932,15 @@ function renderSrc(){
     const u=SRC.push2||{};
     if(u.budget_max){
       const cooling=u.cooling_seconds>0;
+      const exit=u.proxy_on
+        ? `出口：代理 <code>${esc(u.proxy||'')}</code>（节点IP，干净）`
+        : '出口：<b style="color:var(--org)">直连（家宽IP）</b> —— 被东财盯上时接口和网页都会受限';
       p2.innerHTML=`<div style="font-size:12px;line-height:1.8;background:#fafbfc;
         border:1px solid var(--line2);border-radius:9px;padding:9px 11px">
         <span class="pill ${cooling?'org':'grn'}">东财 push2</span>
         <span class="fl" style="font-size:11.5px">本分钟额度 ${u.budget_used||0}/${u.budget_max}${
           cooling?' · <b style="color:var(--org)">冷却中 '+u.cooling_seconds+' 秒</b>':' · 正常'}</span>
+        <div class="fl" style="font-size:11px;margin-top:3px">${exit}</div>
         ${u.budget_skipped?`<div class="fl" style="font-size:11px;margin-top:3px">已主动让出 ${
           u.budget_skipped} 次请求 —— 超额时不硬撞风控，改走备用源</div>`:''}</div>`;
     } else p2.innerHTML='';
@@ -2162,6 +2170,7 @@ $('srcSave').onclick=()=>srcCmd({action:'save_cookie',cookie:$('srcCookieInput')
 $('srcClear').onclick=()=>{ if(!confirm('清空已保存的 Cookie？'))return;
   $('srcCookieInput').value=''; srcCmd({action:'save_cookie',cookie:''}); };
 $('srcAuto').onclick=()=>srcCmd({action:'auto'});
+$('srcOpenEm').onclick=()=>window.open('https://quote.eastmoney.com/center','_blank');
 $('srcUnblock').onclick=()=>srcCmd({action:'unblock'});
 $('srcReconnect').onclick=()=>srcCmd({action:'reconnect'});
 document.querySelectorAll('.btnPort').forEach(b=>b.onclick=openPort);
