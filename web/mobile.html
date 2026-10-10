@@ -15,29 +15,27 @@
   --blu:#2563d9; --blu-bg:#eaf1fd;
   --sk:#f0f2f5;
   --sh:0 1px 3px rgba(16,24,40,.06);
+  --tabh:56px;
 }
 @media (prefers-color-scheme: dark){
   :root{
     --bg:#12151a; --card:#1b1f27; --line:#2a3039; --line2:#232830;
     --tx:#e8ebf0; --tx2:#a3adbd; --tx3:#6b7484;
-    --red:#ff5c67; --red-bg:#3a1e23;
-    --grn:#2fbf71; --grn-bg:#16301f;
-    --org:#f0932b; --org-bg:#3a2a14;
-    --blu:#5b8def; --blu-bg:#182642;
+    --red:#ff5c67; --red-bg:#3a1e23; --grn:#2fbf71; --grn-bg:#16301f;
+    --org:#f0932b; --org-bg:#3a2a14; --blu:#5b8def; --blu-bg:#182642;
     --sk:#232830;
   }
-  body{background:var(--bg)}
   .hero.go{background:#16301f!important}
   .hero.hold{background:#3a2a14!important}
   .hero.stop{background:#3a1e23!important}
-  .stat,.card,.pick,.hold{background:var(--card)}
   .mode{background:var(--org-bg)!important;border-color:transparent!important}
+  .tabbar{background:#171b22!important}
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html{-webkit-text-size-adjust:100%}
 body{background:var(--bg);color:var(--tx);
   font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-  padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+  padding-bottom:calc(var(--tabh) + env(safe-area-inset-bottom))}
 b,strong{font-weight:800}
 .fl{color:var(--tx3)}.up{color:var(--red)}.dn{color:var(--grn)}
 
@@ -49,21 +47,39 @@ header{position:sticky;top:0;z-index:20;
   border-bottom:1px solid var(--line2);
   display:flex;align-items:center;gap:10px}
 .brand{font-weight:900;font-size:16px;letter-spacing:.4px}
-.hmeta{font-size:11.5px;color:var(--tx3);flex:1;min-width:0}
+.hmeta{font-size:11.5px;color:var(--tx3);flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #btnRefresh{margin-left:auto;border:1px solid var(--line);background:var(--card);
   color:var(--tx2);border-radius:20px;padding:7px 14px;font-size:13px;font-weight:700;
-  min-height:36px;display:flex;align-items:center;gap:5px}
+  min-height:36px;display:flex;align-items:center;gap:5px;flex:none}
 #btnRefresh:active{opacity:.6}
 #btnRefresh.syncing{color:var(--blu);border-color:var(--blu)}
 
 main{padding:12px 14px 10px;max-width:560px;margin:0 auto}
-h2{font-size:13px;font-weight:800;color:var(--tx2);margin:18px 2px 8px;
+.tab{display:none}
+.tab.on{display:block}
+h2{font-size:13px;font-weight:800;color:var(--tx2);margin:16px 2px 8px;
   display:flex;align-items:baseline;gap:7px}
+h2:first-child{margin-top:4px}
 h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
 
+/* ── 底部 Tab 栏 ── */
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;
+  background:rgba(255,255,255,.94);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-top:1px solid var(--line2);
+  padding-bottom:env(safe-area-inset-bottom)}
+.tabbar button{flex:1;background:none;border:0;padding:7px 0 8px;color:var(--tx3);
+  font-size:11px;font-weight:700;font-family:inherit;
+  display:flex;flex-direction:column;align-items:center;gap:2px;min-height:var(--tabh)}
+.tabbar button .ic{font-size:19px;line-height:1.15;filter:grayscale(1);opacity:.55}
+.tabbar button.on{color:var(--blu)}
+.tabbar button.on .ic{filter:none;opacity:1}
+.tabbar .dot{position:absolute;transform:translate(15px,-2px);
+  min-width:15px;height:15px;border-radius:8px;background:var(--red);color:#fff;
+  font-size:9.5px;font-weight:800;line-height:15px;padding:0 3px}
+
 /* ── ① 结论大卡 ── */
-.hero{border-radius:16px;padding:18px 17px;box-shadow:var(--sh);
-  border:1px solid var(--line2)}
+.hero{border-radius:16px;padding:18px 17px;box-shadow:var(--sh);border:1px solid var(--line2)}
 .hero.go{background:#f0faf4}.hero.hold{background:#fdf8f1}.hero.stop{background:#fdf3f4}
 .hero .top{display:flex;align-items:center;gap:12px}
 .hero .em{font-size:34px;line-height:1}
@@ -74,7 +90,7 @@ h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
   padding:9px 12px;font-size:12.5px;line-height:1.65}
 .mode b{color:var(--org)}
 
-/* ── ② 情绪三格 ── */
+/* ── 情绪三格 / 指标格 ── */
 .stats3{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:11px}
 .stat{background:var(--card);border:1px solid var(--line2);border-radius:13px;
   padding:11px 12px;box-shadow:var(--sh)}
@@ -83,25 +99,42 @@ h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
 .stat .s{font-size:10.5px;color:var(--tx3);margin-top:2px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-/* ── ③ 通用卡 ── */
+/* ── 通用卡 ── */
 .card{background:var(--card);border:1px solid var(--line2);border-radius:15px;
   padding:14px 15px;box-shadow:var(--sh);margin-top:10px}
 .card .label{font-size:12px;font-weight:800;color:var(--org)}
 .card .theme{font-size:19px;font-weight:900;margin-top:2px}
 .card p{font-size:12.5px;color:var(--tx2);line-height:1.7;margin-top:7px}
 .card .mini{font-size:11px;color:var(--tx3);margin-top:6px}
+.card.tap:active{transform:scale(.99)}
 
-/* ── ④ 候选卡 ── */
-.pick{background:var(--card);border:1px solid var(--line2);border-radius:14px;
+/* 五信号列表 */
+.sigrow{display:flex;align-items:flex-start;gap:9px;padding:9px 0;
+  border-bottom:1px solid var(--line2)}
+.sigrow:last-child{border-bottom:0}
+.sigrow .dot{flex:none;width:9px;height:9px;border-radius:50%;margin-top:6px}
+.sigrow .dot.pass{background:var(--red)}
+.sigrow .dot.weak{background:var(--org)}
+.sigrow .dot.fail{background:var(--grn)}
+.sigrow .dot.pending,.sigrow .dot.unknown{background:var(--tx3)}
+.sigrow .nm{font-size:13px;font-weight:800}
+.sigrow .dt{font-size:11.5px;color:var(--tx3);line-height:1.6;margin-top:2px}
+
+/* ── 候选 / 持仓卡 ── */
+.pick,.hold{background:var(--card);border:1px solid var(--line2);border-radius:14px;
   padding:12px 14px;box-shadow:var(--sh);margin-bottom:9px}
 .pick:active{transform:scale(.985)}
-.pick .r1{display:flex;align-items:center;gap:8px}
-.pick .nm{font-size:16px;font-weight:900}
+.pick .r1,.hold .r1{display:flex;align-items:center;gap:8px}
+.pick .nm,.hold .nm{font-size:16px;font-weight:900}
 .pick .cd{font-size:10.5px;color:var(--tx3);font-weight:600}
-.pick .pct{margin-left:auto;font-size:17px;font-weight:900;letter-spacing:.2px}
+.pick .pct,.hold .pnl{margin-left:auto;font-size:17px;font-weight:900}
 .pick .r2{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .pick .r3{font-size:12px;color:var(--tx2);margin-top:7px;line-height:1.6;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hold .r2{display:flex;gap:12px;font-size:11.5px;color:var(--tx3);margin-top:6px}
+.hold .act{font-size:12px;color:var(--tx2);margin-top:7px;line-height:1.6}
+.hold .unwind{font-size:11.5px;color:var(--org);background:var(--org-bg);
+  border-radius:8px;padding:7px 9px;margin-top:7px;line-height:1.65}
 .tag{display:inline-block;font-size:10.5px;font-weight:800;border-radius:6px;
   padding:2px 7px;line-height:1.5}
 .tag.red{background:var(--red-bg);color:var(--red)}
@@ -110,24 +143,14 @@ h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
 .tag.grn{background:var(--grn-bg);color:var(--grn)}
 .tag.gry{background:var(--sk);color:var(--tx2)}
 
-/* ── ⑤ 持仓 ── */
-.hold{background:var(--card);border:1px solid var(--line2);border-radius:14px;
-  padding:12px 14px;box-shadow:var(--sh);margin-bottom:9px}
-.hold .r1{display:flex;align-items:center;gap:8px}
-.hold .nm{font-size:15.5px;font-weight:900}
-.hold .pnl{margin-left:auto;font-size:16px;font-weight:900}
-.hold .r2{display:flex;gap:12px;font-size:11.5px;color:var(--tx3);margin-top:6px}
-.hold .act{font-size:12px;color:var(--tx2);margin-top:7px;line-height:1.6}
-.hold .unwind{font-size:11.5px;color:var(--org);background:var(--org-bg);
-  border-radius:8px;padding:7px 9px;margin-top:7px;line-height:1.65}
-
-/* ── ⑥ 明日判断 ── */
 .watchlist{list-style:none;margin-top:8px}
 .watchlist li{font-size:12.5px;color:var(--tx2);line-height:1.7;padding-left:16px;
   position:relative;margin-top:5px}
 .watchlist li::before{content:"·";position:absolute;left:5px;font-weight:900;color:var(--blu)}
 
-footer{font-size:11px;color:var(--tx3);text-align:center;margin:22px 0 6px;line-height:1.8}
+.empty{font-size:13px;color:var(--tx3);text-align:center;padding:26px 10px;
+  line-height:1.8}
+footer{font-size:11px;color:var(--tx3);text-align:center;margin:20px 0 6px;line-height:1.8}
 
 /* ── 底部抽屉 ── */
 #mask{position:fixed;inset:0;background:rgba(10,14,20,.45);z-index:40;opacity:0;
@@ -159,12 +182,14 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:22px 0 6px;line-
   transition:width .5s}
 #err{display:none;margin:14px 0;background:var(--red-bg);color:var(--red);
   border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.7}
+.notice{background:var(--blu-bg);color:var(--blu);border-radius:10px;
+  padding:9px 12px;font-size:12px;line-height:1.7;margin-top:10px}
 </style>
 </head>
 <body>
 
 <header>
-  <div>
+  <div style="min-width:0">
     <div class="brand">野人体系</div>
     <div class="hmeta" id="hmeta">载入中…</div>
   </div>
@@ -178,8 +203,20 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:22px 0 6px;line-
     <div id="loadMsg">正在准备…</div>
     <div class="bar"><div id="loadBar"></div></div>
   </div>
-  <div id="app" style="display:none"></div>
+  <div id="app" style="display:none">
+    <section class="tab on" id="tab-today"></section>
+    <section class="tab" id="tab-theme"></section>
+    <section class="tab" id="tab-picks"></section>
+    <section class="tab" id="tab-hold"></section>
+  </div>
 </main>
+
+<nav class="tabbar" id="tabbar">
+  <button class="on" data-tab="today"><span class="ic">📊</span>今日</button>
+  <button data-tab="theme"><span class="ic">🎯</span>主线</button>
+  <button data-tab="picks"><span class="ic">📋</span>选股<span class="dot" id="dotPicks" style="display:none">0</span></button>
+  <button data-tab="hold"><span class="ic">💼</span>持仓<span class="dot" id="dotHold" style="display:none">0</span></button>
+</nav>
 
 <div id="mask" onclick="closeSheet()"></div>
 <div id="sheet"><div class="grab"></div><div id="sheetBody"></div></div>
@@ -189,26 +226,40 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:22px 0 6px;line-
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=(v,d=2)=>{ if(v==null||v===''||isNaN(Number(v)))return'—'; return Number(v).toFixed(d); };
-const pctCls=v=>(Number(v)>0?'up':(Number(v)<0?'dn':'fl'));           // 红涨绿跌
+const pctCls=v=>(Number(v)>0?'up':(Number(v)<0?'dn':'fl'));
 const pctTxt=v=>v==null?'—':((Number(v)>=0?'+':'')+num(v,2)+'%');
-let REPORT=null, TIMER=null, POLL=null;
+let REPORT=null, POLL=null, CUR_TAB='today';
 
-/* ── 数据获取 ── */
+/* ── Tab 切换 ── */
+function switchTab(k){
+  CUR_TAB=k;
+  document.querySelectorAll('.tab').forEach(s=>s.classList.toggle('on',s.id==='tab-'+k));
+  document.querySelectorAll('#tabbar button').forEach(b=>b.classList.toggle('on',b.dataset.tab===k));
+  window.scrollTo({top:0});
+  try{ localStorage.setItem('yeren_tab',k); }catch(e){}
+}
+$('tabbar').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(b) switchTab(b.dataset.tab);
+});
+
+/* ── 数据 ── */
 async function fetchReport(){
   const r=await fetch('/api/result?top=20&limit=260',{cache:'no-store'});
   if(!r.ok) throw new Error('HTTP '+r.status);
   return await r.json();
 }
 function loadCache(){
-  try{ const c=localStorage.getItem('yeren_mobile'); if(c){ REPORT=JSON.parse(c);
-       const ts=localStorage.getItem('yeren_mobile_ts')||'';
-       render(true,ts); return true; } }catch(e){}
+  try{ const c=localStorage.getItem('yeren_mobile');
+    if(c){ REPORT=JSON.parse(c);
+      const ts=localStorage.getItem('yeren_mobile_ts')||'';
+      render(true,ts); const t=localStorage.getItem('yeren_tab'); if(t) switchTab(t);
+      return true; } }catch(e){}
   return false;
 }
 function saveCache(){
   try{ localStorage.setItem('yeren_mobile',JSON.stringify(REPORT));
-       localStorage.setItem('yeren_mobile_ts',new Date().toLocaleTimeString('zh-CN',
-         {hour:'2-digit',minute:'2-digit'})); }catch(e){}
+    localStorage.setItem('yeren_mobile_ts',new Date().toLocaleTimeString('zh-CN',
+      {hour:'2-digit',minute:'2-digit'})); }catch(e){}
 }
 async function refresh(manual){
   const btn=$('btnRefresh');
@@ -219,18 +270,13 @@ async function refresh(manual){
     render(false,'刚刚');
   }catch(e){
     if(!REPORT){
-      $('loading').style.display='none';
-      $('err').style.display='block';
-      $('err').innerHTML='取不到数据：'+esc(e.message)+
-        '<br>下拉或点右上角刷新重试。';
+      $('loading').style.display='none'; $('err').style.display='block';
+      $('err').innerHTML='取不到数据：'+esc(e.message)+'<br>下拉或点右上角刷新重试。';
     }else{
-      $('hmeta').textContent=$('hmeta').textContent.replace(/ · 联网.*/,'')+' · 联网失败，显示上次结果';
+      $('hmeta').textContent='联网失败 · 显示上次结果';
     }
-  }finally{
-    if(manual){ btn.classList.remove('syncing'); btn.textContent='⟳ 刷新'; }
-  }
+  }finally{ if(manual){ btn.classList.remove('syncing'); btn.textContent='⟳ 刷新'; } }
 }
-/* 没有缓存时：触发扫描并轮询进度 */
 async function startAndPoll(){
   try{ await fetch('/api/start?top=20&limit=260',{cache:'no-store'}); }catch(e){}
   let n=0;
@@ -254,14 +300,11 @@ function render(fromCache,ts){
   const d=REPORT; if(!d||!d.meta) return;
   const m=d.meta, sen=d.sentiment||{}, vol=d.volume||{}, meter=d.meter||{},
         ml=d.mainline||{}, out=d.outlook||{}, pf=d.portfolio||{},
-        mm=sen.metrics||{}, mt=meter.metrics||{};
+        fl=d.flow||{}, sec=d.sectors||{}, mm=sen.metrics||{}, mt=meter.metrics||{};
   $('hmeta').textContent=`v${m.version||'?'} · ${m.date||''}`+
-    (m.session&&m.session.label?' · '+m.session.label:'')+
-    (fromCache?(' · 缓存 '+ts):' · 已更新 '+ts);
+    (m.session&&m.session.label?' · '+m.session.label:'')+(fromCache?(' · 缓存 '+ts):' · '+ts);
 
-  const parts=[];
-
-  /* ① 今日结论 */
+  /* ═══ Tab 1 · 今日 ═══ */
   const canTrade=sen.can_trade&&vol.mode!=='dry';
   const frozen=sen.stage==='unknown';
   const cls=!canTrade?'stop':(frozen?'stop':((sen.stage==='climax'||sen.stage==='follow')?'go':'hold'));
@@ -273,20 +316,22 @@ function render(fromCache,ts){
     :`${sen.label||sen.stage||''}${vol.label?'，'+vol.label:''}${
         mt.seal_rate!=null?('，封板率 '+Math.round(mt.seal_rate*100)+'%'):''}。`;
   const mode=out.mode||{};
-  parts.push(`<section class="hero ${cls}">
+  const sp=meter.space||{};
+  const hist=d.history||{};
+  const histNote=(hist.days!=null&&hist.days<8&&!fromCache)
+    ? `<div class="notice">历史归档正在补齐（已 ${hist.days} 天${
+        hist.rest?('，还剩 '+hist.rest+' 天'):''}）—— 题材记忆需要几天的数据底座，
+        补完后「已连续 N 日活跃」这类判断才准。</div>` : '';
+  let t1=`<section class="hero ${cls}">
     <div class="top"><div class="em">${em}</div>
       <div><h1>${esc(title)}</h1>
         <div class="sub">${esc(sen.label||'')}${vol.label?' · '+esc(vol.label):''}</div></div></div>
     <p>${esc(reason)}</p>
     ${mode.name?`<div class="mode"><b>当前打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:''}
-  </section>`);
-
-  /* ② 情绪三格 */
-  const sp=meter.space||{};
-  const temp=meter.temperature;
-  parts.push(`<div class="stats3">
+  </section>${histNote}
+  <div class="stats3">
     <div class="stat"><div class="t">情绪温度</div>
-      <div class="v">${temp==null?'—':temp+'°'}</div>
+      <div class="v">${meter.temperature==null?'—':meter.temperature+'°'}</div>
       <div class="s">${esc((meter.label||'').replace(/^\S+\s*/,''))||'—'}</div></div>
     <div class="stat"><div class="t">空间板</div>
       <div class="v">${sp.today!=null?sp.today+'板':'—'}</div>
@@ -294,80 +339,134 @@ function render(fromCache,ts){
     <div class="stat"><div class="t">涨停/跌停</div>
       <div class="v"><span class="up">${mt.limit_up!=null?mt.limit_up:'—'}</span><span class="fl" style="font-size:14px">/</span><span class="dn">${mt.limit_down!=null?mt.limit_down:'—'}</span></div>
       <div class="s">炸板 ${mt.broken!=null?mt.broken:'—'}</div></div>
-  </div>`);
-
-  /* ③ 主线题材 */
-  if(ml.theme||ml.label){
-    parts.push(`<div class="card">
-      <div class="label">${esc(ml.label||'题材主线')}</div>
-      <div class="theme">${esc(ml.theme||'未确认')}</div>
-      <p>${esc(ml.verdict_note||ml.summary||'')}</p>
-      ${(ml.streak>=2)?`<div class="mini">该题材已连续 ${ml.streak} 日活跃</div>`:''}
-    </div>`);
+  </div>`;
+  if(out.headline){
+    t1+=`<h2>明日判断 <span class="cnt">${esc(out.date||'')}</span></h2>
+      <div class="card">
+        <div class="theme" style="font-size:16px">${esc(out.headline)}</div>
+        ${(out.watch||[]).length?`<ul class="watchlist">${
+          out.watch.slice(0,4).map(w=>`<li>${esc(w)}</li>`).join('')}</ul>`:''}
+      </div>`;
   }
+  t1+=`<footer>扫描 ${m.scanned||'—'} 只 · ${m.elapsed||'—'} 秒 · 归档 ${hist.days||'—'} 天<br>
+    数据源：东财/腾讯/财联社/开盘红 · 纯本地工具，不构成投资建议</footer>`;
+  $('tab-today').innerHTML=t1;
 
-  /* ④ 候选股 */
+  /* ═══ Tab 2 · 主线 ═══ */
+  let t2='';
+  if(ml.theme||ml.label){
+    t2+=`<h2>题材主线</h2><div class="card">
+      <div class="label">${esc(ml.label||'')}</div>
+      <div class="theme">${esc(ml.theme||'未确认')}</div>
+      <p>${esc(ml.verdict_note||'')}</p>
+      ${ml.streak>=2?`<div class="mini">已连续 ${ml.streak} 日活跃${
+        ml.streak_since?('（'+esc(ml.streak_since)+' 起）'):''}</div>`:''}
+      ${ml.rotation_note?`<div class="mini" style="color:var(--org)">${esc(ml.rotation_note)}</div>`:''}
+    </div>`;
+  }else{
+    t2+=`<h2>题材主线</h2><div class="empty">题材数据积累中</div>`;
+  }
+  const sigs=ml.signals||[];
+  if(sigs.length){
+    t2+=`<h2>五信号体检</h2><div class="card">${sigs.map(s=>`
+      <div class="sigrow"><div class="dot ${esc(s.state||'pending')}"></div>
+        <div><div class="nm">${esc(s.name||s.id||'')}</div>
+          ${s.detail?`<div class="dt">${esc(Array.isArray(s.detail)?s.detail[0]:s.detail)}</div>`:''}</div>
+      </div>`).join('')}</div>`;
+  }
+  const st=sec.strongest||{};
+  if(st.name){
+    t2+=`<h2>最强板块</h2><div class="card">
+      <div class="theme" style="font-size:16px">${esc(st.name)}</div>
+      ${(st.facts||[]).length?`<p>${(st.facts||[]).map(f=>esc(f)).join(' · ')}</p>`:''}
+    </div>`;
+  }
+  const cap=fl.capital||{};
+  if(cap.headline||fl.summary){
+    t2+=`<h2>资金在干什么</h2><div class="card">
+      <div class="theme" style="font-size:15px">${esc(cap.headline||fl.summary||'')}</div>
+      ${(cap.items||[]).length?`<p>${(cap.items||[]).slice(0,4).map(x=>esc(x)).join('；')}</p>`:''}
+    </div>`;
+  }
+  if(!t2) t2='<div class="empty">主线数据加载中…</div>';
+  $('tab-theme').innerHTML=t2;
+
+  /* ═══ Tab 3 · 选股 ═══ */
   const picks=d.picks||[];
-  parts.push(`<h2>候选股 <span class="cnt">${picks.length} 只 · 点开看买卖点</span></h2>`);
+  let t3=`<h2>候选股 <span class="cnt">${picks.length} 只 · 按打分排序 · 点开看买卖点</span></h2>`;
   if(!picks.length){
-    parts.push('<div class="card fl" style="font-size:13px">今日没有符合条件的候选</div>');
+    t3+='<div class="empty">今日没有符合条件的候选<br>（退潮期或数据不足时很正常）</div>';
   }
   picks.forEach((p,i)=>{
     const bs=(p.buy_signals||[])[0]||{};
     const tags=[];
     if(p.zt_boards) tags.push(`<span class="tag red">${p.zt_boards}板</span>`);
-    if(p.hot_rank) tags.push(`<span class="tag org">人气第${p.hot_rank}名${p.hot_tag?'·'+esc(p.hot_tag):''}</span>`);
+    if(p.hot_rank) tags.push(`<span class="tag org">人气第${p.hot_rank}</span>`);
     if(p.fund_style==='institutional') tags.push('<span class="tag blu">机构票</span>');
     else if(p.fund_style==='hot_money') tags.push('<span class="tag blu">游资票</span>');
     const mr=(p.moneyflow||{}).main;
     if(mr) tags.push(`<span class="tag ${mr>0?'red':'grn'}">主力${mr>0?'+':''}${num(mr/1e8,2)}亿</span>`);
-    parts.push(`<div class="pick" onclick="openSheet(${i})">
+    t3+=`<div class="pick" onclick="openSheet(${i})">
       <div class="r1"><span class="nm">${esc(p.name||'')}</span>
         <span class="cd">${esc(p.code||'')}</span>
         <span class="pct ${pctCls(p.pct)}">${pctTxt(p.pct)}</span></div>
       ${tags.length?`<div class="r2">${tags.join('')}</div>`:''}
       ${bs.name?`<div class="r3"><b>${esc(bs.name)}</b>：${esc(bs.entry||'')}</div>`:''}
-    </div>`);
+    </div>`;
   });
   window.__picks=picks;
+  const dp=$('dotPicks');
+  if(picks.length){ dp.style.display=''; dp.textContent=picks.length>99?'99+':picks.length; }
+  else dp.style.display='none';
+  $('tab-picks').innerHTML=t3;
 
-  /* ⑤ 持仓 */
-  const holds=pf.holdings||[];
+  /* ═══ Tab 4 · 持仓 ═══ */
+  const holds=pf.holdings||[], watch=pf.watchlist||[], checks=pf.checks||[];
+  let t4='';
   if(holds.length){
-    parts.push(`<h2>持仓 <span class="cnt">${holds.length} 只 · 总盈亏 ${
-      pf.total_pnl_pct==null?'—':pctTxt(pf.total_pnl_pct)}</span></h2>`);
+    t4+=`<h2>持仓 <span class="cnt">${holds.length} 只 · 总盈亏 ${
+      pf.total_pnl_pct==null?'—':pctTxt(pf.total_pnl_pct)}</span></h2>`;
+    t4+=`<div class="stats3">
+      <div class="stat"><div class="t">总市值</div><div class="v" style="font-size:16px">${
+        num((pf.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${
+        num((pf.total_cost||0)/1e4,1)}万</div></div>
+      <div class="stat"><div class="t">总盈亏</div><div class="v ${(pf.total_pnl||0)>=0?'up':'dn'}" style="font-size:16px">${
+        (pf.total_pnl||0)>=0?'+':''}${num((pf.total_pnl||0)/1e4,2)}万</div>
+        <div class="s">${pf.total_pnl_pct==null?'—':pctTxt(pf.total_pnl_pct)}</div></div>
+      <div class="stat"><div class="t">体检告警</div><div class="v" style="font-size:16px">${
+        checks.length}</div><div class="s">${checks.length?'需要处理':'暂无'}</div></div>
+    </div>`;
     holds.forEach(h=>{
       const s0=(h.signals||[])[0]||{};
-      parts.push(`<div class="hold">
+      t4+=`<div class="hold">
         <div class="r1"><span class="nm">${esc(h.name||h.code)}</span>
           <span class="pnl ${pctCls(h.pnl_pct)}">${pctTxt(h.pnl_pct)}</span></div>
         <div class="r2"><span>成本 ${num(h.cost)}</span><span>现价 ${num(h.price)}</span>
           <span>${esc(h.verdict||'')}</span></div>
         ${s0.name?`<div class="act"><b>${esc(s0.name)}</b>：${esc(s0.action||s0.trigger||'')}</div>`:''}
         ${h.unwind?`<div class="unwind">${esc(h.unwind)}</div>`:''}
-      </div>`);
+      </div>`;
     });
+  }else{
+    t4+='<div class="empty">还没有持仓记录<br>在桌面看板里「记持仓」，或直接在这里看自选</div>';
   }
-
-  /* ⑥ 明日判断 */
-  if(out.headline){
-    parts.push(`<h2>明日判断 <span class="cnt">${esc(out.date||'')}</span></h2>
-      <div class="card">
-        <div class="theme" style="font-size:16px">${esc(out.headline)}</div>
-        ${(out.watch||[]).length?`<ul class="watchlist">${
-          out.watch.slice(0,4).map(w=>`<li>${esc(w)}</li>`).join('')}</ul>`:''}
-      </div>`);
+  if(watch.length){
+    t4+=`<h2>自选 <span class="cnt">${watch.length} 只</span></h2><div class="card">${
+      watch.slice(0,12).map(w=>`<div style="display:flex;gap:8px;align-items:center;
+        padding:6px 0;border-bottom:1px solid var(--line2);font-size:13.5px">
+        <b>${esc(w.name||w.code)}</b><span class="fl" style="font-size:11px">${esc(w.code||'')}</span>
+        <span class="${pctCls(w.pct)}" style="margin-left:auto;font-weight:800">${pctTxt(w.pct)}</span>
+      </div>`).join('')}</div>`;
   }
+  const dh=$('dotHold');
+  if(checks.length){ dh.style.display=''; dh.textContent=checks.length>99?'99+':checks.length; }
+  else dh.style.display='none';
+  $('tab-hold').innerHTML=t4;
 
-  /* 底部 */
-  parts.push(`<footer>扫描 ${m.scanned||'—'} 只 · 耗时 ${m.elapsed||'—'} 秒 · 数据源：东财/腾讯/财联社/开盘红<br>
-    纯本地工具，不构成投资建议</footer>`);
-
-  $('app').innerHTML=parts.join('');
   $('app').style.display='block';
 }
 
-/* ── 底部抽屉：候选详情 ── */
+/* ── 抽屉：候选详情 ── */
 function openSheet(i){
   const p=(window.__picks||[])[i]; if(!p) return;
   const buys=p.buy_signals||[], sells=p.sell_signals||[], reasons=p.reasons||[];
@@ -397,24 +496,22 @@ function openSheet(i){
 }
 function closeSheet(){ $('mask').classList.remove('on'); $('sheet').classList.remove('on'); }
 
-/* ── 下拉刷新 ── */
-let ty=0,pulling=false;
+/* ── 手势 ── */
+let ty=0;
 document.addEventListener('touchstart',e=>{ if(window.scrollY<=0) ty=e.touches[0].clientY; },{passive:true});
 document.addEventListener('touchend',e=>{
   if(window.scrollY<=0&&ty){
     const dy=(e.changedTouches[0].clientY-ty);
-    if(dy>90){ refresh(true); }
+    if(dy>90) refresh(true);
   }
   ty=0;
 },{passive:true});
 
 /* ── 启动 ── */
 $('btnRefresh').onclick=()=>refresh(true);
-document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden) refresh(false);
-});
-if(!loadCache()){ startAndPoll(); }
-TIMER=setInterval(()=>{ if(!document.hidden) refresh(false); },60000);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refresh(false); });
+if(!loadCache()) startAndPoll();
+setInterval(()=>{ if(!document.hidden) refresh(false); },60000);
 </script>
 </body>
 </html>

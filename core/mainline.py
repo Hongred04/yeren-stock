@@ -95,6 +95,21 @@ def _fmt_date(d: str) -> str:
     return f"{d[4:6]}-{d[6:8]}" if len(d) == 8 else d
 
 
+def _sector_hit(theme: str, sector: str) -> bool:
+    """题材名匹配（跨口径宽容版）。
+
+    为什么不能精确匹配（2026-10-10 实测）：历史归档有两个来源 ——
+    开盘红回补的是**概念口径**（"固态电池""并购重组"），东财实时池是
+    **行业口径**（"电池""化学制品"）。精确匹配时「电池」在历史里查无此名，
+    streak 直接断掉（手机冷启动就表现为"主线没有记忆"）。
+    放宽为双向包含：「电池」↔「固态电池」视为同一方向 ✓，
+    不相干的（如「并购重组」）仍然不匹配。
+    """
+    if not theme or not sector:
+        return False
+    return theme == sector or theme in sector or sector in theme
+
+
 def _theme_recent_history(real_date: str, lookback: int = 10) -> list[tuple[str, list[dict]]]:
     """近 N 个已归档交易日的**活跃题材榜** [(date, [题材项,...])]，旧→新。
 
@@ -520,7 +535,7 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
     ythemes = _cluster_themes(yp, 103000)
     ytop = ythemes[0]["sector"] if ythemes else ""
     y_active = [t["sector"] for t in ythemes[:3] if _int(t.get("zt"), 0) >= 2]
-    theme_match = bool(theme_name) and theme_name in y_active
+    theme_match = bool(theme_name) and any(_sector_hit(theme_name, s) for s in y_active)
 
     # 近 N 日活跃轨迹 + 连续活跃天数（含今日）
     lookback = max(2, _int(a.get("theme_lookback_days"), 10))
@@ -528,7 +543,7 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
     track: list[dict] = []
     for d, act in hist:
         for t in act:
-            if t["sector"] == theme_name:
+            if _sector_hit(theme_name, t["sector"]):
                 track.append({"date": d, "rank": _int(t.get("rank"), 0),
                               "zt": _int(t.get("zt"), 0),
                               "max_boards": _int(t.get("max_boards"), 0)})
@@ -536,7 +551,7 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
     seen = [x["date"] for x in track]
     prev_streak = 0
     for _d, act in reversed(hist):
-        if any(t["sector"] == theme_name for t in act):
+        if any(_sector_hit(theme_name, t["sector"]) for t in act):
             prev_streak += 1
         else:
             break

@@ -228,12 +228,17 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         real_date = ds.pool_qdate() or date
 
         # ---- 历史归档回补（开盘红）：缺哪天补哪天，补过/试过就不再发请求 ----
+        hist_info = {"days": 0, "rest": 0, "filled": 0}
         try:
             bf = kph_mod.autobackfill(real_date)
             if bf.get("filled"):
                 print(f"[pipeline] 历史归档回补: {', '.join(bf['filled'])}", file=sys.stderr)
+            hist_info = {"days": len(ds.pool_history_dates()),
+                         "rest": int(bf.get("rest") or 0),
+                         "filled": len(bf.get("filled") or [])}
         except Exception as e:
             print(f"[pipeline] 归档回补失败: {e}", file=sys.stderr)
+            hist_info["days"] = len(ds.pool_history_dates())
 
         # ---- 财联社涨停原因：挂到每只涨停股（详情页展示 + 随归档留存） ----
         try:
@@ -434,6 +439,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "sentiment": sentiment,
             "meter": meter,
             "intraday": intraday,
+            "history": hist_info,
             "mainline": ml,
             "sectors": sectors,
             "outlook": next_outlook,

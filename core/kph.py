@@ -211,25 +211,37 @@ def _workdays_before(real_date: str, n: int) -> list[str]:
     return out
 
 
-def autobackfill(real_date: str, lookback: int = 20, max_try: int = 8) -> dict:
+def autobackfill(real_date: str, lookback: int = 20, max_try: int = 30,
+                 budget_sec: float = 45.0) -> dict:
     """把最近 N 个工作日内**缺失**的涨停池归档自动补上。
 
     只补缺（已有归档不覆盖）；拉不到数据的日期（假期等）进会话级失败表，
-    不再重试。每次调用最多尝试 max_try 个日期 —— 首次扫描把缺的补完，
-    之后零请求。lookback 默认 20 个工作日（约 4 周），让题材记忆的
-    连续活跃统计有尽量长的数据底座。
+    不再重试。
+
+    冷启动（新装 App / 换机）的教训（2026-10-10）：原来一次只试 8 个日期，
+    而国庆这类长假占掉一大半工作日 → 首轮只补到 4 天 → 题材 streak 算不出来
+    （手机端表现就是「主线没有记忆」）。现在：
+      · max_try 提到 30（覆盖 20 个工作日 + 夹在中间的假期）；
+      · 加 budget_sec 总时长预算（默认 45 秒）——超时就停，剩下的下一轮继续；
+      · 返回 rest 字段告知调用方还剩多少没补（用于界面提示「补历史中 N/M」）。
     """
     if not real_date:
-        return {"checked": 0, "filled": []}
+        return {"checked": 0, "filled": [], "rest": 0}
     have = set(ds.pool_history_dates())
     cands = [d for d in _workdays_before(real_date, lookback)
              if d not in have and d not in _failed]
     filled: list[str] = []
+    t0 = time.time()
+    tried = 0
     for d in cands[:max_try]:
+        if time.time() - t0 > budget_sec:
+            break
+        tried += 1
         pool = history_pool(d)
         if pool:
             ds.save_pool_history(d, pool)
             filled.append(d)
         else:
             _failed.add(d)
-    return {"checked": min(len(cands), max_try), "filled": filled}
+    rest = len([d for d in cands[tried:] if d not in _failed])
+    return {"checked": tried, "filled": filled, "rest": rest}
