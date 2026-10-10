@@ -42,3 +42,13 @@ data/board_members.json
 # 与股票项目无关的临时探测脚本（留在本地，不入库）
 _probe_dy2.py
 _dy_page.html
+
+# ── 运行数据：每次扫描都会变，只留本机、不进版本库 ──
+# （data/strategy.json 是策略配置，仍然入库 —— 换机要能恢复你的参数）
+data/board_flow_history.json
+data/news_memory.json
+data/pool_history/
+data/sentiment_history.json
+data/signal_journal.json
+data/stage_state.json
+data/zt_history.json
