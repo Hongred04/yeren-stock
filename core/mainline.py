@@ -642,23 +642,48 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
 
 # ---------------------------------------------------------------- 综合判定
 
+def _one_day_note(base: str, day2: dict | None = None) -> str:
+    """「一日游」只适用于**首日启动的新题材**。
+
+    已经连续活跃 ≥2 日的题材谈不上一日游（页面上一边写着"连续3日活跃"
+    一边判"一日游"，自相矛盾）。中军缺失 / 承接不成立在这种题材上的正确
+    语义是「游资行情、容量有限」：可以做，但当短线看、不重仓、不格局，
+    别用长线思维拿 —— 这正是野人说的存量资金博弈下的题材玩法。
+    """
+    streak = _int((day2 or {}).get("streak"), 0)
+    if streak >= 2:
+        return (f"该题材已连续 {streak} 日活跃，不是一日游 —— 正确读法是"
+                f"「游资行情、容量有限」：{base}。当短线看、不重仓、不格局，"
+                "更别用长线思维拿")
+    return base
+
+
 def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
              day2: dict | None = None, theme_name: str = "") -> tuple[str, str]:
-    """按用户的规则收敛为四种状态。缺一环就是一日游。"""
+    """按用户的规则收敛为四种状态。缺一环就是一日游。
+
+    「一日游」的判定对首日新题材成立；对已连续活跃多日的题材，
+    缺环的含义降级为「游资行情、容量有限」（见 _one_day_note）。
+    """
     s1v, s2v, s3v, s4v, s5v = s1["state"], s2["state"], s3["state"], s4["state"], s5["state"]
 
     if s1v == "fail":
-        return "one_day", "消息级别不够大（C级/个股公告）撑不起主线 —— 消息不够大，后面都不用看"
+        return "one_day", _one_day_note(
+            "消息级别不够大（C级/个股公告）撑不起主线 —— 消息不够大，后面都不用看", day2)
     if s2v == "fail":
-        return "one_day", "无合力：题材内没有多家齐涨停 = 资金没有集体行动，孤军奋战就是一日游"
+        return "one_day", _one_day_note(
+            "无合力：题材内没有多家齐涨停 = 资金没有集体行动，孤军奋战就是一日游", day2)
     if s3v == "fail":
-        return "one_day", "无中军：百亿大票没参与 = 游资脉冲行情，容量不够，当天冲高就结束"
+        return "one_day", _one_day_note(
+            "无中军：百亿大票没参与 = 游资脉冲行情，容量不够，当天冲高就结束", day2)
     if s5v == "fail":
         if day2 and day2.get("return_day"):
-            return "one_day", ("主线回归承接不成立：空间龙溢价 / 首板留存 / 中军反馈未过线 —— "
-                               "二波接不住，按一日游处理")
-        return "one_day", ("次日检验未通过：空间龙溢价 / 首板留存 / 中军反馈至少一项不合格 —— "
-                           "主线地位不成立，按一日游处理")
+            return "one_day", _one_day_note(
+                "主线回归承接不成立：空间龙溢价 / 首板留存 / 中军反馈未过线 —— 二波接不住",
+                day2)
+        return "one_day", _one_day_note(
+            "次日检验未通过：空间龙溢价 / 首板留存 / 中军反馈至少一项不合格 —— 主线地位不成立",
+            day2)
 
     if s5v == "pass" and s2v == "pass" and s4v != "weak":
         if s1v == "unknown":
@@ -786,11 +811,21 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
     signals = [s1, s2, s3, s4, s5]
 
     status, note = _verdict(s1, s2, s3, s4, s5, day2, theme_name)
+    # 连续活跃多日的题材不该在界面上写「一日游」—— 换成容量口径的标签
+    streak_now = _int((day2 or {}).get("streak"), 0)
+    label = STATUS_CN[status]
+    if status == "one_day" and streak_now >= 2:
+        label = f"游资行情 · 容量有限 · 已连续{streak_now}日活跃"
 
     checks = []
     if status == "one_day":
-        checks.append({"level": "yellow", "item": "题材主线一日游特征",
-                       "action": f"{note}；题材内不接力，只看不动"})
+        if streak_now >= 2:
+            checks.append({"level": "yellow",
+                           "item": f"题材主线容量不足（已连续 {streak_now} 日活跃，非一日游）",
+                           "action": f"{note}；盘面按短线节奏处理，去弱留强"})
+        else:
+            checks.append({"level": "yellow", "item": "题材主线一日游特征",
+                           "action": f"{note}；题材内不接力，只看不动"})
     elif status == "day1_pending":
         if day2.get("return_day"):
             checks.append({"level": "yellow", "item": "题材主线回归日",
@@ -805,7 +840,7 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
                        "action": f"主线题材「{theme_name}」五信号共振，可按主线节奏参与"})
 
     return {
-        "enabled": True, "status": status, "label": STATUS_CN[status],
+        "enabled": True, "status": status, "label": label,
         "verdict_note": note, "theme": theme_name,
         "message_auto": suggestion or {"found": False},
         "signals": signals, "themes": themes[:6],

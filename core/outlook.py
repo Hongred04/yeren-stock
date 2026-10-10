@@ -117,7 +117,11 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         t_note = (f"主线「{theme}」首日启动、还没确认 —— 明日开盘三件事："
                   f"空间龙溢价、首板留存、中军反馈；过线才叫主线")
     elif ml_status == "one_day":
-        t_note = "题材一日游特征 —— 明日不接力，等下一个方向自己走出来"
+        _st = int(_f(ml.get("streak"), 0))
+        t_note = (f"「{theme}」已连续 {_st} 日活跃，不是一日游 —— 但主线不成立"
+                  f"（游资行情、容量有限）：明日轻仓短炒或不参与，当短线看、不格局"
+                  if _st >= 2 else
+                  "题材一日游特征 —— 明日不接力，等下一个方向自己走出来")
     elif ml_status == "watch":
         streak = int(_f(ml.get("streak")))
         if streak >= 2 and theme:
