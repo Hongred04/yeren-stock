@@ -79,6 +79,71 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ok($('tab-hold').textContent.includes('还没有持仓记录'), '无持仓时给引导文案');
   }
 
+  // ④ 资金卡 items 渲染（回归：曾把对象当字符串拼出 [object Object]）
+  const capItems = (((report.flow || {}).capital || {}).items) || [];
+  if (capItems.length) {
+    const themeTxt = $('tab-theme').textContent;
+    ok(!themeTxt.includes('[object Object]'), '资金卡无 [object Object]（已修）');
+    ok(themeTxt.includes(String(capItems[0].k || '')), '资金卡正确显示 k 字段');
+  }
+
+  // ⑤ 持仓/自选：添加按钮 + 表单 + 提交
+  ok($('tab-hold').textContent.includes('记持仓'), '持仓 Tab 有「＋ 记持仓」');
+  ok($('tab-hold').textContent.includes('加自选'), '持仓 Tab 有「＋ 加自选」');
+  w.openHoldForm();
+  ok($('sheet').classList.contains('on') && !!$('fCode'), '记持仓表单能打开（含代码输入框）');
+  ok(!!$('fCost') && !!$('fShares'), '表单含成本/股数输入');
+
+  // 提交（mock POST，断言 payload 正确）
+  w.fetch = async (u, opt) => {
+    const url = String(u);
+    if (url.includes('/api/portfolio') && opt && opt.method === 'POST') {
+      w.__lastPost = JSON.parse(opt.body);
+      return { ok: true, status: 200,
+               json: async () => ({ ok: true, portfolio: report.portfolio }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  $('fCode').value = '600000';            // 不带前缀，测自动归一
+  $('fCost').value = '10.5';
+  $('fShares').value = '1000';
+  await w.submitHold();
+  await new Promise(r => setTimeout(r, 50));
+  ok(w.__lastPost && w.__lastPost.action === 'add'
+     && w.__lastPost.code === 'sh600000', '提交持仓：代码自动归一 sh 前缀');
+  ok(w.__lastPost && w.__lastPost.cost === 10.5 && w.__lastPost.shares === 1000,
+     '提交持仓：成本/股数解析正确');
+  ok(!$('sheet').classList.contains('on'), '提交后抽屉自动关闭');
+
+  // 自选同理（只看 payload）
+  w.openWatchForm();
+  $('fCode').value = 'sz000001';
+  await w.submitWatch();
+  await new Promise(r => setTimeout(r, 50));
+  ok(w.__lastPost && w.__lastPost.action === 'watch_add'
+     && w.__lastPost.code === 'sz000001', '提交自选：action/code 正确');
+
+  // ⑥ 数据源提醒条：受限时要说人话（不摆冷却秒数/让出次数等技术细节）
+  w.fetch = async (u, opt) => {
+    const url = String(u);
+    if (url.includes('/api/sources')) {
+      return { ok: true, status: 200, json: async () => ({
+        blocked: [{ api: 'push2.eastmoney.com/ulist.np', fails: 3, seconds_left: 120 }],
+        push2: { cooling_seconds: 120, budget_skipped: 5, budget_max: 15, budget_used: 15 },
+        cookie: {}, }) };
+    }
+    return { ok: true, status: 200, json: async () => report };
+  };
+  await w.refresh(true);
+  await new Promise(r => setTimeout(r, 80));
+  const todayTxt = $('tab-today').textContent;
+  ok(todayTxt.includes('数据源暂时受限'), '数据源受限时显示提醒条');
+  ok(todayTxt.includes('东财'), '提醒条指名道姓（东财）');
+  const warnEl = w.document.querySelector('#tab-today .srcwarn');
+  const warnTxt = warnEl ? warnEl.textContent : '';
+  ok(warnEl && !/冷却|让出|push2|ulist|\.com/.test(warnTxt),
+     '提醒条只说人话（不含冷却秒数/接口名/让出次数）');
+
   // 全局无 NaN / undefined
   const allTxt = $('tab-today').textContent + $('tab-theme').textContent
     + $('tab-picks').textContent + $('tab-hold').textContent;

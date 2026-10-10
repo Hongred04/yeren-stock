@@ -184,6 +184,37 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:20px 0 6px;line-
   border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.7}
 .notice{background:var(--blu-bg);color:var(--blu);border-radius:10px;
   padding:9px 12px;font-size:12px;line-height:1.7;margin-top:10px}
+
+/* ── 持仓/自选操作 ── */
+.btnrow{display:flex;gap:9px;margin:4px 0 14px}
+.btnmain{flex:1;background:var(--blu);color:#fff;border:0;border-radius:11px;
+  padding:12px;font-size:14px;font-weight:800;font-family:inherit;min-height:44px}
+.btnmain:active{opacity:.85}
+.btnghost{flex:1;background:var(--card);color:var(--blu);border:1px solid var(--blu);
+  border-radius:11px;padding:12px;font-size:14px;font-weight:800;font-family:inherit;min-height:44px}
+.btnghost:active{opacity:.7}
+.xbtn{flex:none;background:none;border:0;color:var(--tx3);font-size:19px;
+  padding:0 4px;line-height:1;min-width:30px;min-height:30px}
+.xbtn:active{color:var(--red)}
+.fin{width:100%;background:var(--sk);border:1px solid var(--line);border-radius:10px;
+  padding:11px 13px;font-size:15px;font-family:inherit;color:var(--tx);margin-top:5px}
+.fin:focus{outline:none;border-color:var(--blu)}
+.capitem{padding:6px 0;border-bottom:1px solid var(--line2);font-size:12.5px;line-height:1.6}
+.capitem:last-child{border-bottom:0}
+.capitem .k3{font-weight:800;margin-right:6px}
+.capitem .v3{color:var(--tx2)}
+.capitem .n3{font-size:11px;color:var(--tx3);margin-top:2px;line-height:1.6}
+#toast{position:fixed;left:50%;transform:translateX(-50%);
+  bottom:calc(var(--tabh) + env(safe-area-inset-bottom) + 18px);
+  background:rgba(20,24,32,.92);color:#fff;padding:9px 18px;border-radius:20px;
+  font-size:13px;z-index:60;opacity:0;transition:opacity .2s;pointer-events:none;
+  max-width:80vw;text-align:center}
+#toast.on{opacity:1}
+
+/* ── 数据源提醒条 ── */
+.srcwarn{margin:0 0 10px;background:var(--org-bg);color:var(--org);border-radius:12px;
+  padding:10px 13px;font-size:12.5px;line-height:1.65;border-left:4px solid var(--org)}
+.srcwarn .n{font-size:11px;color:var(--tx3);margin-top:3px}
 </style>
 </head>
 <body>
@@ -220,15 +251,22 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:20px 0 6px;line-
 
 <div id="mask" onclick="closeSheet()"></div>
 <div id="sheet"><div class="grab"></div><div id="sheetBody"></div></div>
+<div id="toast"></div>
 
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=(v,d=2)=>{ if(v==null||v===''||isNaN(Number(v)))return'—'; return Number(v).toFixed(d); };
+// 脏值过滤：任何 [object Object] / undefined / NaN 都不许渲染到界面上
+// （用户实测踩过：items 对象数组被当字符串拼 → 一串 [object Object]）
+const dirty=v=>{ if(v==null) return true;
+  const s=String(v); return !s || s==='undefined' || s==='null' || s==='NaN'
+    || s.includes('[object') || s.includes('NaN'); };
+const safe=v=>dirty(v)?'':String(v);
 const pctCls=v=>(Number(v)>0?'up':(Number(v)<0?'dn':'fl'));
 const pctTxt=v=>v==null?'—':((Number(v)>=0?'+':'')+num(v,2)+'%');
-let REPORT=null, POLL=null, CUR_TAB='today';
+let REPORT=null, POLL=null, CUR_TAB='today', SRCINFO=null;
 
 /* ── Tab 切换 ── */
 function switchTab(k){
@@ -248,6 +286,36 @@ async function fetchReport(){
   if(!r.ok) throw new Error('HTTP '+r.status);
   return await r.json();
 }
+async function fetchSources(){
+  try{
+    const r=await fetch('/api/sources',{cache:'no-store'});
+    if(r.ok) SRCINFO=await r.json();
+  }catch(e){}
+}
+function srcVendor(api){
+  const s=String(api||'').toLowerCase();
+  if(s.includes('push2')||s.includes('eastmoney')||s.includes('ulist')||s.includes('clist')) return '东财';
+  if(s.includes('sina')) return '新浪';
+  if(s.includes('gtimg')||s.includes('tencent')) return '腾讯';
+  if(s.includes('cls')) return '财联社';
+  if(s.includes('kaipanhong')||s.includes('kph')) return '开盘红';
+  if(s.includes('10jqka')) return '同花顺';
+  return '未知源';
+}
+/* 数据源提醒条 —— 只说人话：哪家受限 + 已自动处理，不摆秒数/接口名/让出次数
+   （用户明确要求：技术性描述不要出现在界面上） */
+function srcWarnHtml(){
+  const blocked=(SRCINFO&&SRCINFO.blocked)||[];
+  const p2=(SRCINFO&&SRCINFO.push2)||{};
+  const names=[...new Set(blocked.map(b=>srcVendor(b.api)))];
+  if(names.length){
+    return `<div class="srcwarn">⚠️ ${esc(names.join('、'))}数据源暂时受限 —— 系统已自动切换备用源，结论不受影响</div>`;
+  }
+  if(p2.cooling_seconds>0){
+    return `<div class="srcwarn">⚠️ 数据源暂时受限 —— 已自动切换备用源，稍后自动恢复</div>`;
+  }
+  return '';
+}
 function loadCache(){
   try{ const c=localStorage.getItem('yeren_mobile');
     if(c){ REPORT=JSON.parse(c);
@@ -265,7 +333,8 @@ async function refresh(manual){
   const btn=$('btnRefresh');
   if(manual){ btn.classList.add('syncing'); btn.textContent='⟳ 同步中'; }
   try{
-    REPORT=await fetchReport(); saveCache();
+    const [rep] = await Promise.all([fetchReport(), fetchSources()]);
+    REPORT=rep; saveCache();
     $('loading').style.display='none'; $('err').style.display='none';
     render(false,'刚刚');
   }catch(e){
@@ -322,7 +391,7 @@ function render(fromCache,ts){
     ? `<div class="notice">历史归档正在补齐（已 ${hist.days} 天${
         hist.rest?('，还剩 '+hist.rest+' 天'):''}）—— 题材记忆需要几天的数据底座，
         补完后「已连续 N 日活跃」这类判断才准。</div>` : '';
-  let t1=`<section class="hero ${cls}">
+  let t1=`${srcWarnHtml()}<section class="hero ${cls}">
     <div class="top"><div class="em">${em}</div>
       <div><h1>${esc(title)}</h1>
         <div class="sub">${esc(sen.label||'')}${vol.label?' · '+esc(vol.label):''}</div></div></div>
@@ -382,10 +451,20 @@ function render(fromCache,ts){
     </div>`;
   }
   const cap=fl.capital||{};
-  if(cap.headline||fl.summary){
+  const capItems=(cap.items||[]).map(x=>{
+    if(x==null) return null;
+    if(typeof x==='string') return dirty(x)?null:{k:'',v:x,note:''};
+    const k=safe(x.k), v=safe(x.v), n=safe(x.note);
+    if(!k && !v) return null;
+    return {k, v, note:n, level:safe(x.level)};
+  }).filter(Boolean).slice(0,4);
+  if(cap.headline||capItems.length||fl.summary){
     t2+=`<h2>资金在干什么</h2><div class="card">
-      <div class="theme" style="font-size:15px">${esc(cap.headline||fl.summary||'')}</div>
-      ${(cap.items||[]).length?`<p>${(cap.items||[]).slice(0,4).map(x=>esc(x)).join('；')}</p>`:''}
+      <div class="theme" style="font-size:15px">${esc(safe(cap.headline)||safe(fl.summary))}</div>
+      ${capItems.length?`<div style="margin-top:8px">${capItems.map(x=>`
+        <div class="capitem"><span class="k3 ${x.level==='red'?'up':(x.level==='blu'?'fl':'')}">${esc(x.k)}</span>
+          <span class="v3">${esc(x.v)}</span>
+          ${x.note?`<div class="n3">${esc(x.note)}</div>`:''}</div>`).join('')}</div>`:''}
     </div>`;
   }
   if(!t2) t2='<div class="empty">主线数据加载中…</div>';
@@ -405,7 +484,7 @@ function render(fromCache,ts){
     if(p.fund_style==='institutional') tags.push('<span class="tag blu">机构票</span>');
     else if(p.fund_style==='hot_money') tags.push('<span class="tag blu">游资票</span>');
     const mr=(p.moneyflow||{}).main;
-    if(mr) tags.push(`<span class="tag ${mr>0?'red':'grn'}">主力${mr>0?'+':''}${num(mr/1e8,2)}亿</span>`);
+    if(mr) tags.push(`<span class="tag ${mr>0?'red':'grn'}">主力${mr>0?'+':''}${num(mr,2)}亿</span>`);
     t3+=`<div class="pick" onclick="openSheet(${i})">
       <div class="r1"><span class="nm">${esc(p.name||'')}</span>
         <span class="cd">${esc(p.code||'')}</span>
@@ -422,7 +501,10 @@ function render(fromCache,ts){
 
   /* ═══ Tab 4 · 持仓 ═══ */
   const holds=pf.holdings||[], watch=pf.watchlist||[], checks=pf.checks||[];
-  let t4='';
+  let t4=`<div class="btnrow">
+    <button class="btnmain" onclick="openHoldForm()">＋ 记持仓</button>
+    <button class="btnghost" onclick="openWatchForm()">＋ 加自选</button>
+  </div>`;
   if(holds.length){
     t4+=`<h2>持仓 <span class="cnt">${holds.length} 只 · 总盈亏 ${
       pf.total_pnl_pct==null?'—':pctTxt(pf.total_pnl_pct)}</span></h2>`;
@@ -440,7 +522,8 @@ function render(fromCache,ts){
       const s0=(h.signals||[])[0]||{};
       t4+=`<div class="hold">
         <div class="r1"><span class="nm">${esc(h.name||h.code)}</span>
-          <span class="pnl ${pctCls(h.pnl_pct)}">${pctTxt(h.pnl_pct)}</span></div>
+          <span class="pnl ${pctCls(h.pnl_pct)}">${pctTxt(h.pnl_pct)}</span>
+          <button class="xbtn" onclick="delRow('${esc(h.code)}','hold')" title="删除">×</button></div>
         <div class="r2"><span>成本 ${num(h.cost)}</span><span>现价 ${num(h.price)}</span>
           <span>${esc(h.verdict||'')}</span></div>
         ${s0.name?`<div class="act"><b>${esc(s0.name)}</b>：${esc(s0.action||s0.trigger||'')}</div>`:''}
@@ -448,14 +531,15 @@ function render(fromCache,ts){
       </div>`;
     });
   }else{
-    t4+='<div class="empty">还没有持仓记录<br>在桌面看板里「记持仓」，或直接在这里看自选</div>';
+    t4+='<div class="empty">还没有持仓记录<br>点上面「＋ 记持仓」录入，系统会用同一套卖出信号帮你盯</div>';
   }
   if(watch.length){
     t4+=`<h2>自选 <span class="cnt">${watch.length} 只</span></h2><div class="card">${
-      watch.slice(0,12).map(w=>`<div style="display:flex;gap:8px;align-items:center;
-        padding:6px 0;border-bottom:1px solid var(--line2);font-size:13.5px">
+      watch.map(w=>`<div style="display:flex;gap:8px;align-items:center;
+        padding:7px 0;border-bottom:1px solid var(--line2);font-size:13.5px">
         <b>${esc(w.name||w.code)}</b><span class="fl" style="font-size:11px">${esc(w.code||'')}</span>
         <span class="${pctCls(w.pct)}" style="margin-left:auto;font-weight:800">${pctTxt(w.pct)}</span>
+        <button class="xbtn" onclick="delRow('${esc(w.code)}','watch')" title="删除">×</button>
       </div>`).join('')}</div>`;
   }
   const dh=$('dotHold');
@@ -495,6 +579,89 @@ function openSheet(i){
   $('mask').classList.add('on'); $('sheet').classList.add('on');
 }
 function closeSheet(){ $('mask').classList.remove('on'); $('sheet').classList.remove('on'); }
+
+/* ── 持仓 / 自选：增删 ── */
+function toast(msg){
+  const t=$('toast'); t.textContent=msg; t.classList.add('on');
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('on'),2200);
+}
+function normCode(v){
+  v=String(v||'').trim().toLowerCase().replace(/\s/g,'');
+  if(/^(sh|sz|bj)\d{6}$/.test(v)) return v;
+  if(/^\d{6}$/.test(v))
+    return ((v[0]==='6')?'sh':((v[0]==='4'||v[0]==='8')?'bj':'sz'))+v;
+  return v;
+}
+function _sheetOpen(){ $('mask').classList.add('on'); $('sheet').classList.add('on'); }
+function openHoldForm(){
+  $('sheetBody').innerHTML=`<h3>记一笔持仓</h3>
+    <div class="sect">
+      <div class="k">股票代码（必填）</div>
+      <input class="fin" id="fCode" placeholder="sh600519 / sz000001 / bj430047" autocapitalize="off" autocomplete="off">
+      <div class="k" style="margin-top:10px">名称（可留空，自动取）</div>
+      <input class="fin" id="fName" placeholder="贵州茅台">
+      <div style="display:flex;gap:10px">
+        <div style="flex:1"><div class="k" style="margin-top:10px">成本价</div>
+          <input class="fin" id="fCost" type="number" step="0.01" inputmode="decimal" placeholder="0.00"></div>
+        <div style="flex:1"><div class="k" style="margin-top:10px">股数</div>
+          <input class="fin" id="fShares" type="number" step="100" inputmode="numeric" placeholder="100"></div>
+      </div>
+      <div class="k" style="margin-top:10px">备注（可留空）</div>
+      <input class="fin" id="fNote" placeholder="买入理由 / 计划">
+      <button class="btnmain" style="width:100%;margin-top:14px" onclick="submitHold()">保存</button>
+      <div class="fl" style="font-size:11px;margin-top:8px;text-align:center">纯本地记录，只用来帮你盯卖点</div>
+    </div>`;
+  _sheetOpen();
+}
+function openWatchForm(){
+  $('sheetBody').innerHTML=`<h3>加自选</h3>
+    <div class="sect">
+      <div class="k">股票代码（必填）</div>
+      <input class="fin" id="fCode" placeholder="sh600519 / sz000001" autocapitalize="off" autocomplete="off">
+      <div class="k" style="margin-top:10px">名称（可留空，自动取）</div>
+      <input class="fin" id="fName" placeholder="贵州茅台">
+      <button class="btnmain" style="width:100%;margin-top:14px" onclick="submitWatch()">保存</button>
+    </div>`;
+  _sheetOpen();
+}
+async function _postPortfolio(body){
+  const r=await fetch('/api/portfolio',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  return await r.json();
+}
+async function submitHold(){
+  const code=normCode($('fCode').value);
+  if(!/^(sh|sz|bj)\d{6}$/.test(code)){ toast('代码格式不对（如 sh600519）'); return; }
+  try{
+    const j=await _postPortfolio({action:'add', code, name:($('fName').value||'').trim(),
+      cost:parseFloat($('fCost').value)||0, shares:parseFloat($('fShares').value)||0,
+      note:($('fNote').value||'').trim()});
+    if(j.error){ toast(j.error); return; }
+    if(j.portfolio){ REPORT.portfolio=j.portfolio; saveCache(); render(false,'刚刚'); }
+    closeSheet(); toast('已记入持仓');
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+async function submitWatch(){
+  const code=normCode($('fCode').value);
+  if(!/^(sh|sz|bj)\d{6}$/.test(code)){ toast('代码格式不对（如 sh600519）'); return; }
+  try{
+    const j=await _postPortfolio({action:'watch_add', code,
+      name:($('fName').value||'').trim()});
+    if(j.error){ toast(j.error); return; }
+    if(j.portfolio){ REPORT.portfolio=j.portfolio; saveCache(); render(false,'刚刚'); }
+    closeSheet(); toast('已加入自选');
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+async function delRow(code, kind){
+  const label=kind==='hold'?'持仓':'自选';
+  if(!confirm('从'+label+'里删除 '+code+'？')) return;
+  try{
+    const j=await _postPortfolio({action:kind==='hold'?'remove':'watch_remove', code});
+    if(j.error){ toast(j.error); return; }
+    if(j.portfolio){ REPORT.portfolio=j.portfolio; saveCache(); render(false,'刚刚'); }
+    toast('已从'+label+'删除');
+  }catch(e){ toast('删除失败：'+e.message); }
+}
 
 /* ── 手势 ── */
 let ty=0;
