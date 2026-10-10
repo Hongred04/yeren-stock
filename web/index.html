@@ -970,7 +970,8 @@ function render(){
     :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水');
   const reason=!canTrade
     ?(sen.can_trade? vol.advice : (sen.note||'情绪已进入退潮期'))
-    : `${STAGE_CN[sen.stage]||sen.label}，${VOL_CN[vol.mode]||vol.label}。${mt.checks[0]?mt.checks[0].action:''}`;
+    : `${STAGE_CN[sen.stage]||sen.label}，${VOL_CN[vol.mode]||vol.label}。${
+        mt.checks[0]?('纪律：'+mt.checks[0].action):''}`;
   const acts=[
     {k:'总仓位',v:(pos.target_total*100).toFixed(0)+'%'},
     {k:'候选股票',v:REPORT.picks.length+' 只'},

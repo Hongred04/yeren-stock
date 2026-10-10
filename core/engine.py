@@ -856,8 +856,8 @@ def evaluate_earnings(cfg: dict) -> dict:
         "rules": EARNINGS_RULES,
         "focus": focus,
         "advice": ("业绩披露期不碰无业绩题材（AI应用/算力低位='黄鼠狼给鸡拜年'）；"
-                   "节前波段持币过节，节后只做大金融（有业绩）或缩在自己短线舒适区；"
-                   "披露完毕后立马变多头"),
+                   "仓位只给有业绩的方向（大金融）或自己的短线舒适区；"
+                   "披露完毕立马变多头"),
         "hold_cash": m.get("hold_cash_before_holiday", True),
         "note": f"当前{'处于' if in_window else '不在'}业绩披露专规则窗口",
     }
@@ -888,14 +888,24 @@ def evaluate_discipline(cfg: dict, sentiment: dict, volume: dict,
         checks.append({"level": "yellow", "item": "宏观处于加息/风险区",
                        "action": "不加杠杆，降低仓位"})
     if earnings.get("in_window"):
+        _focus = "、".join(earnings.get("focus") or ["大金融", "大科技"])
         checks.append({"level": "yellow", "item": "业绩披露期",
-                       "action": "不碰无业绩题材，只做有大金融/大科技"})
+                       "action": f"不碰没有业绩支撑的题材，只做有业绩的方向（{_focus}）"})
     if mainline and mainline.get("enabled", True):
         ml_status = mainline.get("status")
         if ml_status == "one_day":
-            checks.append({"level": "yellow", "item": "题材主线一日游特征",
-                           "action": (mainline.get("verdict_note") or "")
-                                     + " 题材内不接力，只看不动"})
+            # item 也要跟着连续活跃天数走 —— 上一次只改了主线卡的 label，
+            # 这里的「一日游特征」漏了，又变成「连续4日活跃 + 一日游」自相矛盾
+            try:
+                _sk = int(mainline.get("streak") or 0)
+            except (TypeError, ValueError):
+                _sk = 0
+            _item = (f"题材主线容量不足（已连续 {_sk} 日活跃，非一日游）"
+                     if _sk >= 2 else "题材主线一日游特征")
+            _tail = "题材内不接力，只看不动" if _sk < 2 else "按短线节奏处理，去弱留强"
+            checks.append({"level": "yellow", "item": _item,
+                           "action": (mainline.get("verdict_note") or "").rstrip("。，； ")
+                                     + "。" + _tail})
         elif ml_status == "day1_pending":
             checks.append({"level": "yellow", "item": "题材主线待次日验证",
                            "action": "首日启动成立但主线未确认 —— 明日开盘检验空间龙溢价、"
