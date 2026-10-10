@@ -154,6 +154,11 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             sells = [{"type": "—", "name": "无K线数据", "priority": "C",
                       "trigger": "未取到该股K线", "action": "手动核对", "urgency": "medium"}]
         verdict, level = _verdict(sells, fs)
+        r3 = None
+        if len(bars) >= 4:
+            c0, c3 = _f(bars[-4].get("close")), _f(bars[-1].get("close"))
+            if c0 > 0 and c3 > 0:
+                r3 = round((c3 / c0 - 1) * 100, 1)      # 近 3 日涨幅（去弱留强用）
         out.append({
             "code": code, "name": h.get("name") or snap.get("name", ""),
             "cost": cost, "shares": shares, "date": h.get("date", ""),
@@ -162,6 +167,7 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
             "mv": round(mv, 1), "verdict": verdict, "level": level,
             "signals": sells, "fund_style": fs.get("type", "unknown"),
+            "r3": r3,
         })
         if level in ("critical", "high"):
             checks.append({"level": "red" if level == "critical" else "yellow",
@@ -187,3 +193,43 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
         "note": "持仓体检复用 M3-M10 的卖出信号（退潮清仓/A字杀/机构加速/断板/庄股），"
                 "纯本地记录，不构成投资建议。",
     }
+
+
+def rotation_check(holdings_out: list[dict], ml: dict | None = None,
+                   stage: str = "") -> list[dict]:
+    """去弱留强体检 —— 野人：「手里拿的是后排，前排走得好你就是不换」，
+    「去弱留强最好的时间点是市场不好的时候」。
+
+    口径（只用现有数据，零额外请求）：
+      · 组内对比：持仓里近 3 日涨幅最低者 vs 最高者，差 ≥8 个百分点且弱者为负
+        → 「弱者掉队」提示；
+      · 主线明确时，掉队者单独点名（当前主线「XX」，你手里却是 YY）；
+      · 退潮期（ebb）措辞加硬 —— 那是执行去弱留强的最佳时点。
+    只在持仓 ≥2 只且有有效近3日数据时才判，不凑数、不吓唬人。
+    """
+    ml = ml or {}
+    rows = [(h.get("r3"), h) for h in (holdings_out or [])
+            if h.get("r3") is not None]
+    if len(rows) < 2:
+        return []
+    best = max(rows, key=lambda x: x[0])
+    worst = min(rows, key=lambda x: x[0])
+    gap = round(best[0] - worst[0], 1)
+    out = []
+    if gap < 8 or worst[0] >= 0:
+        return []
+    theme = ml.get("theme") or ""
+    if stage == "ebb":
+        head = (f"去弱留强（退潮期正是换仓时点）：{worst[1].get('name')} 近3日 "
+                f"{worst[0]:+.1f}%，组合内最强 {best[1].get('name')} {best[0]:+.1f}%"
+                f"（差 {gap} 个点）")
+        act = ("掉队的先处理 —— 别主观认定自己手上那个才是核心；"
+               "换不动就至少别再加")
+    else:
+        head = (f"去弱留强：{worst[1].get('name')} 近3日 {worst[0]:+.1f}%，"
+                f"组合内最强 {best[1].get('name')} {best[0]:+.1f}%"
+                f"（差 {gap} 个点）")
+        act = (f"后排换到更强方向{('（当前主线「' + theme + '」）') if theme else ''}；"
+               "卖错了要敢认，别为了证明自己没错去补掉队的")
+    out.append({"level": "yellow", "item": head, "action": act})
+    return out

@@ -716,6 +716,29 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
     top = themes[0] if themes else None
     theme_name = top["sector"] if top else ""
 
+    # 野人周末总结：「AI应用批量上板的时候，固态电池开始掉队」= 存量资金博弈。
+    # 检测「题材跷跷板」：上一交易日活跃第一的题材，今日涨停家数骤减 ≥40%，
+    # 且它已不是当前主线 —— 资金在切换，题材当短线看（不格局）。
+    rotation_note = ""
+    try:
+        hist_dates = [d for d in ds.pool_history_dates() if d < real_date]
+        if hist_dates and theme_name:
+            prev_pool = ds.load_pool_history(hist_dates[-1])
+            if prev_pool and len(prev_pool) >= 10:
+                prev_themes = _cluster_themes(prev_pool, deadline)
+                prev_top = prev_themes[0]["sector"] if prev_themes else ""
+                prev_n = prev_themes[0]["zt"] if prev_themes else 0
+                if prev_top and prev_top != theme_name and prev_n >= 3:
+                    today_n = next((t["zt"] for t in themes
+                                    if t["sector"] == prev_top), 0)
+                    if today_n <= prev_n * 0.6:
+                        rotation_note = (
+                            f"存量资金博弈：上一交易日活跃第一「{prev_top}」今日掉队"
+                            f"（{prev_n}→{today_n} 家涨停），资金切到「{theme_name}」"
+                            "—— 题材当短线看，不格局")
+    except Exception:
+        rotation_note = ""
+
     # S1 消息定级别：手动录入优先；未录入且开启 auto_message 时自动抓快讯定级
     # 窗口按交易日展开：上上个交易日 00:00 起 —— 长假/周末部委发文，
     # 开市首日的题材定级必须能吃到假期消息（自然小时口径会漏）
@@ -786,6 +809,7 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
         "verdict_note": note, "theme": theme_name,
         "message_auto": suggestion or {"found": False},
         "signals": signals, "themes": themes[:6],
+        "rotation_note": rotation_note,
         "dragons": s4.get("dragons", []),
         "day2": day2,
         "streak": _int((day2 or {}).get("streak"), 0),

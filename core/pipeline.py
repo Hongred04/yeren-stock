@@ -314,6 +314,16 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 p["hot_rank"] = h["rank"]
                 if h.get("tag"):
                     p["hot_tag"] = h["tag"]
+            # 野人：资金代表异动，「要信早信」—— 低位 + 主力净流入刚转正 = 资金刚动
+            try:
+                _pos = float((p.get("graph_detail") or {}).get("base_pos") or 1.0)
+                _main = float((p.get("moneyflow") or {}).get("main") or 0)
+            except (TypeError, ValueError):
+                _pos, _main = 1.0, 0.0
+            if 0 < _pos <= 0.4 and _main > 0:
+                p["reasons"].append(
+                    f"低位（60日位置 {_pos*100:.0f}%）+ 主力净流入 "
+                    f"{_main/1e8:+.1f} 亿 —— 资金刚动，要信早信")
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
 
@@ -376,6 +386,13 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         kl_hold = ds.fetch_klines(hold_codes, n=70, workers=8) if hold_codes else {}
         port = portfolio_mod.evaluate(snaps, kl_hold, sentiment, volume, cfg)
         port["raw"] = port_raw   # 原始记录（代码/成本/股数），前端按钮状态与面板要用
+        # 野人：去弱留强 —— 手里是后排、市场有更强方向，就要换（退潮期更要换）
+        rot_checks = portfolio_mod.rotation_check(
+            port.get("holdings") or [], ml,
+            stage=(sentiment or {}).get("stage", ""))
+        if rot_checks:
+            port["rotation_checks"] = rot_checks
+            port["checks"] = (port.get("checks") or []) + rot_checks
 
         # ---- M8 纪律体检：并入 E1-E3 与持仓的告警 ----
         m8 = engine.evaluate_discipline(cfg, sentiment, volume, macro, m7, ml)

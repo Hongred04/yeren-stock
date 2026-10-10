@@ -175,9 +175,31 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
 
     tail = ("明日为工作日估算日期（节假日顺延以交易所公告为准）。"
             "以上是推演不是预测 —— 开盘后以量能和情绪的实际读数修正。")
+    # ---- 野人节奏：随盘面阶段换交易系统 ----
+    # 「熊市不做长线，牛市不做短线……随盘面变化去改变自己的交易系统」。
+    # 把「当前阶段该用什么打法」直接说出来，不让你自己猜。
+    mode_map = {
+        "ebb": ("防守空仓", "空仓或试错仓，不做长线 —— 保存子弹；市场不好的时候"
+                              "恰恰是执行去弱留强的时点"),
+        "ice": ("休息", "休息为主，空仓等启动信号 —— 手痒也别做长线"),
+        "revive": ("轻仓试错", "轻仓试错 + 波段思维 —— 只看低位、资金刚动的地方"
+                              "（要信早信），拿得住"),
+        "probe": ("波段试错", "新方向刚起步 —— 低位+资金刚动的地方跟进去"
+                             "（要信早信），拿得住"),
+        "follow": ("波段持股", "扩散期波段持股 —— 主线内不轻易换，拿得住才有肉"),
+        "ferment": ("波段持股", "发酵期波段持股 —— 主线内不轻易换，吃主升"),
+        "climax": ("短线快枪", "高潮期短线题材思维 —— 存量博弈不格局，快进快出，"
+                              "同时执行去弱留强"),
+    }
+    mode_name, mode_note = mode_map.get(stage, ("观察", "方向未明 —— 先看清阶段，再选打法"))
+    rot = (ml or {}).get("rotation_note") or ""
+    if rot:
+        mode_note = f"{mode_note}。{rot}"
+
     return {
         "date": _next_trade_date(real_date),
         "headline": head, "tone": tone,
+        "mode": {"name": mode_name, "note": mode_note},
         "points": points, "watch": watch, "scenarios": scenarios,
         "note": tail,
     }

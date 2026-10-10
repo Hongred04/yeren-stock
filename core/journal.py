@@ -238,6 +238,34 @@ def _agg(group: list[dict]) -> dict:
     return res
 
 
+def _traps(entries: list[dict]) -> list[dict]:
+    """踩坑雷达 —— 野人：「打交割单，找出反复踩坑的那个点，一定规避掉」。
+
+    对每类信号看最近 8 笔已结算样本（按时间倒序）：亏损 ≥5 笔（胜率≤37.5%）
+    就标红 —— 这不是信号烂，是**你用它的方式在亏钱**，先停用、复盘、规避。
+    """
+    by_key: dict[tuple, list[dict]] = {}
+    for e in entries:
+        if e.get("status") in ("win", "loss"):
+            by_key.setdefault((e.get("signal"), e.get("signal_name")), []).append(e)
+    out = []
+    for (t, name), g in by_key.items():
+        g = sorted(g, key=lambda e: (e.get("date", ""), e.get("id", "")),
+                   reverse=True)[:8]
+        if len(g) < 5:
+            continue
+        losses = sum(1 for e in g if _f(e.get("ret1")) < 0)
+        if losses >= 5:
+            out.append({
+                "type": t or "?", "name": name or t or "?",
+                "recent_n": len(g), "recent_losses": losses,
+                "note": f"最近 {len(g)} 笔亏 {losses} 笔 —— 反复踩同一个坑，"
+                        "先停用这个信号，想清楚为什么亏再碰",
+            })
+    out.sort(key=lambda x: -x["recent_losses"])
+    return out
+
+
 def stats(entries: list[dict]) -> dict:
     by_key: dict[tuple, list[dict]] = {}
     for e in entries:
@@ -252,6 +280,7 @@ def stats(entries: list[dict]) -> dict:
             "status", "skip_reason")
     return {
         "stats": rows,
+        "traps": _traps(entries),
         "overall": _agg(entries),
         "recent": [{k: e.get(k) for k in keys} for e in recent],
     }

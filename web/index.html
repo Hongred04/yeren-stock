@@ -1404,7 +1404,8 @@ function renderDetail(p){
         ${p.warnings.length?`<ul class="ls" style="margin-top:6px">${
           p.warnings.map(w=>`<li class="wn">${esc(w)}</li>`).join('')}</ul>`:''}
         <div style="margin-top:11px;font-size:12px;color:var(--tx3);line-height:1.7">
-          均线：MA5 ${f2(g.ma5)} / MA10 ${f2(g.ma10)} / MA20 ${f2(g.ma20)} / MA60 ${f2(g.ma60)}</div>
+          均线：MA5 ${f2(g.ma5)} / MA10 ${f2(g.ma10)} / MA20 ${f2(g.ma20)} / MA60 ${f2(g.ma60)}
+          <br>技术只作参考 —— 资金才是锚：看懂了要早信，卖错了要敢认</div>
       </div>
       <div>
         <div style="font-size:14px;font-weight:800;margin-bottom:9px;color:var(--red)">其他买入时机</div>
@@ -1654,9 +1655,15 @@ function renderOutlook(){
   }
   const cls=o.tone==='defense'?'stop':(o.tone==='attack'?'go':'hold');
   const emoji=o.tone==='defense'?'🛡️':(o.tone==='attack'?'🚀':'⚖️');
+  // 野人节奏：当前阶段该用什么打法（熊市不做长线，牛市不做短线）
+  const mode=o.mode||{};
+  const modeHtml=mode.name?`<div style="margin-top:12px;padding:10px 13px;border-radius:9px;
+    background:#fffdf8;border-left:4px solid var(--org);font-size:12.5px;line-height:1.7">
+    <b style="color:var(--org)">当前打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:'';
   el.innerHTML=`<div class="verdict ${cls}">
     <div class="hd2"><div class="ic">${emoji}</div>
       <div><div class="ti" style="font-size:18.5px">明日（${esc(o.date||'')}）· ${esc(o.headline)}</div></div></div>
+    ${modeHtml}
     <div class="grid g4" style="margin-top:12px">
       ${(o.points||[]).map(x=>`<div class="act" style="display:block">
         <div class="k">${esc(x.k)}</div>
@@ -1716,6 +1723,12 @@ function renderJournal(){
       <div class="mc o" style="flex:1;min-width:150px"><div class="t">未成交</div><div class="v">${ov.n_skip||0}</div><div class="s">涨停买不到 / 停牌，不计胜率</div></div>
       <div class="mc" style="flex:1;min-width:150px"><div class="t">口径</div><div class="v" style="font-size:14px">T+1开盘 · 含成本 ${((j.cost_pct||0.002)*100).toFixed(2)}%</div><div class="s">收盘结算 · 不复权价</div></div>
     </div>
+    ${(j.traps||[]).length?`<div class="card" style="margin-bottom:12px;border-left:4px solid var(--red);background:#fffbfb">
+      <div style="font-size:13px;font-weight:800;color:var(--red);margin-bottom:6px">踩坑雷达 —— 反复亏钱的地方，先规避</div>
+      ${(j.traps||[]).map(t=>`<div style="font-size:12.5px;line-height:1.8;margin-bottom:5px">
+        <b>${esc(t.name)}</b>：${esc(t.note)}</div>`).join('')}
+      <div class="fl" style="font-size:11px">野人：打交割单，找出反复踩坑的那个点，一定规避掉 —— 样本不足 5 笔的不算</div>
+    </div>`:''}
     <div class="tbl"><table><thead><tr><th>信号</th><th class="num">样本</th><th class="num">结算状态</th>
       <th class="num">1日 胜率/均值</th><th class="num">3日 胜率/均值</th><th class="num">5日 胜率/均值</th></tr></thead>
       <tbody>${rows||'<tr><td colspan="6" class="fl" style="text-align:center;padding:16px">还没有样本 —— 每次扫描会自动记录可执行的买入信号</td></tr>'}</tbody></table></div>
