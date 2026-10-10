@@ -364,7 +364,7 @@ async function startAndPoll(){
       const st=await (await fetch('/api/status',{cache:'no-store'})).json();
       const p=Math.max(0,Math.min(99,Math.round(st.pct||0)));
       $('loadBar').style.width=p+'%';
-      $('loadMsg').textContent=(st.msg||'扫描中')+(st.pct?'（'+p+'%）':'');
+      $('loadMsg').textContent=(st.progress||'扫描中')+(st.pct?'（'+p+'%）':'');
       if(st.done){ clearInterval(POLL); $('loadBar').style.width='100%';
         setTimeout(()=>refresh(false),300); }
       else if(st.error){ clearInterval(POLL); $('loadMsg').textContent='扫描出错：'+st.error; }
@@ -403,6 +403,9 @@ function silentRescan(){
 /* ── 渲染 ── */
 function render(fromCache,ts){
   const d=REPORT; if(!d||!d.meta) return;
+  // 有数据就把加载态收掉 —— 缓存路径（loadCache）不经过 refresh()，
+  // 之前忘了在这里隐藏，进 App 会一直顶着"正在准备…"半屏白（用户实测）
+  $('loading').style.display='none';
   const m=d.meta, sen=d.sentiment||{}, vol=d.volume||{}, meter=d.meter||{},
         ml=d.mainline||{}, out=d.outlook||{}, pf=d.portfolio||{},
         fl=d.flow||{}, sec=d.sectors||{}, mm=sen.metrics||{}, mt=meter.metrics||{};

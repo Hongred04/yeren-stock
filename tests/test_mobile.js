@@ -123,7 +123,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(w.__lastPost && w.__lastPost.action === 'watch_add'
      && w.__lastPost.code === 'sz000001', '提交自选：action/code 正确');
 
-  // ⑥ 数据源提醒条：受限时要说人话（不摆冷却秒数/让出次数等技术细节）
+  // ⑥ 加载态必须收掉（用户实测：进 App 卡在「正在准备…」半屏白，
+  //    根因是缓存路径不经过 refresh()，render 里忘了隐藏 loading）
+  ok($('loading').style.display === 'none', '有数据后加载态已隐藏');
+
+  // ⑦ 进度字段名用服务端的 progress（曾经错写成 msg，文案一直卡在"扫描中"）
+  const mobSrc = html;
+  ok(mobSrc.includes('st.progress') && !mobSrc.includes("st.msg"),
+     '进度字段名为 progress（与 /api/status 一致）');
+
+  // ⑧ 数据源提醒条：受限时要说人话（不摆冷却秒数/让出次数等技术细节）
   w.fetch = async (u, opt) => {
     const url = String(u);
     if (url.includes('/api/sources')) {
