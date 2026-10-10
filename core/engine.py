@@ -865,6 +865,28 @@ def evaluate_earnings(cfg: dict) -> dict:
 
 # ================================================================ M8 纪律检查
 
+# 「大金融/大科技」这类口语大类 → 系统行业名的模糊映射。
+# 配置里 focus 写的是口语（"大科技"），而涨停池/活跃榜用的是行业口径
+# （"软件开发""半导体"），不映射就永远匹配不上（2026-10-10 用户实测抓到）。
+_FOCUS_GROUPS = {
+    "大科技": ("半导体", "软件", "计算机", "通信", "电子", "传媒", "互联网",
+               "IT服务", "光学", "消费电子", "元件", "芯片", "算力", "游戏",
+               "数字媒体", "元器件"),
+    "大金融": ("银行", "证券", "保险", "多元金融", "金融", "信托"),
+}
+
+
+def _focus_alive(focus: list, themes: list) -> list:
+    """focus 里哪些大类方向**今天确实有涨停合力**（活跃榜前 8 内模糊命中）。"""
+    names = [str(t.get("sector") or "") for t in (themes or [])[:8]]
+    alive = []
+    for f in focus or []:
+        kws = _FOCUS_GROUPS.get(str(f)) or (str(f),)
+        if any(any(k in n for k in kws) for n in names if n):
+            alive.append(str(f))
+    return alive
+
+
 def evaluate_discipline(cfg: dict, sentiment: dict, volume: dict,
                         macro: dict, earnings: dict,
                         mainline: dict | None = None) -> dict:
@@ -888,9 +910,18 @@ def evaluate_discipline(cfg: dict, sentiment: dict, volume: dict,
         checks.append({"level": "yellow", "item": "宏观处于加息/风险区",
                        "action": "不加杠杆，降低仓位"})
     if earnings.get("in_window"):
-        _focus = "、".join(earnings.get("focus") or ["大金融", "大科技"])
-        checks.append({"level": "yellow", "item": "业绩披露期",
-                       "action": f"不碰没有业绩支撑的题材，只做有业绩的方向（{_focus}）"})
+        _focus = list(earnings.get("focus") or ["大金融", "大科技"])
+        # 静态方向名不能当"今日机会"喊 —— 必须和当日活跃榜交叉校验：
+        # 有合力才说"当前有表现的是 X"，没有就明说"先观察、别硬上"。
+        # （用户实测：科技当天涨停 0 家，界面却还在喊"做大科技"）
+        _alive = _focus_alive(_focus, (mainline or {}).get("themes") or [])
+        if _alive:
+            _act = (f"业绩期只做有业绩支撑的方向 —— 当前有合力的是：{'、'.join(_alive)}"
+                    f"（其余方向等它自己出现合力）")
+        else:
+            _act = (f"业绩期只做有业绩支撑的方向（关注：{'、'.join(_focus)}）—— "
+                    f"今日这些方向暂无涨停合力，先观察、别硬上")
+        checks.append({"level": "yellow", "item": "业绩披露期", "action": _act})
     if mainline and mainline.get("enabled", True):
         ml_status = mainline.get("status")
         if ml_status == "one_day":
