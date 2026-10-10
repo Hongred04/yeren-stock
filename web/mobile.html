@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#f4f6f9">
+<title>野人体系</title>
+<style>
+:root{
+  --bg:#f4f6f9; --card:#fff; --line:#e4e8ee; --line2:#eef1f5;
+  --tx:#161a21; --tx2:#58616f; --tx3:#9aa3b2;
+  --red:#d92d3f; --red-bg:#fdeef0;
+  --grn:#0f9d58; --grn-bg:#e9f8f0;
+  --org:#e07c1a; --org-bg:#fdf3e5;
+  --blu:#2563d9; --blu-bg:#eaf1fd;
+  --sk:#f0f2f5;
+  --sh:0 1px 3px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#12151a; --card:#1b1f27; --line:#2a3039; --line2:#232830;
+    --tx:#e8ebf0; --tx2:#a3adbd; --tx3:#6b7484;
+    --red:#ff5c67; --red-bg:#3a1e23;
+    --grn:#2fbf71; --grn-bg:#16301f;
+    --org:#f0932b; --org-bg:#3a2a14;
+    --blu:#5b8def; --blu-bg:#182642;
+    --sk:#232830;
+  }
+  body{background:var(--bg)}
+  .hero.go{background:#16301f!important}
+  .hero.hold{background:#3a2a14!important}
+  .hero.stop{background:#3a1e23!important}
+  .stat,.card,.pick,.hold{background:var(--card)}
+  .mode{background:var(--org-bg)!important;border-color:transparent!important}
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--tx);
+  font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+b,strong{font-weight:800}
+.fl{color:var(--tx3)}.up{color:var(--red)}.dn{color:var(--grn)}
+
+/* ── 顶栏 ── */
+header{position:sticky;top:0;z-index:20;
+  padding:calc(9px + env(safe-area-inset-top)) 16px 9px;
+  background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line2);
+  display:flex;align-items:center;gap:10px}
+.brand{font-weight:900;font-size:16px;letter-spacing:.4px}
+.hmeta{font-size:11.5px;color:var(--tx3);flex:1;min-width:0}
+#btnRefresh{margin-left:auto;border:1px solid var(--line);background:var(--card);
+  color:var(--tx2);border-radius:20px;padding:7px 14px;font-size:13px;font-weight:700;
+  min-height:36px;display:flex;align-items:center;gap:5px}
+#btnRefresh:active{opacity:.6}
+#btnRefresh.syncing{color:var(--blu);border-color:var(--blu)}
+
+main{padding:12px 14px 10px;max-width:560px;margin:0 auto}
+h2{font-size:13px;font-weight:800;color:var(--tx2);margin:18px 2px 8px;
+  display:flex;align-items:baseline;gap:7px}
+h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
+
+/* ── ① 结论大卡 ── */
+.hero{border-radius:16px;padding:18px 17px;box-shadow:var(--sh);
+  border:1px solid var(--line2)}
+.hero.go{background:#f0faf4}.hero.hold{background:#fdf8f1}.hero.stop{background:#fdf3f4}
+.hero .top{display:flex;align-items:center;gap:12px}
+.hero .em{font-size:34px;line-height:1}
+.hero h1{font-size:21px;font-weight:900;letter-spacing:.3px}
+.hero .sub{font-size:12.5px;color:var(--tx2);margin-top:3px}
+.hero p{font-size:13px;color:var(--tx2);margin-top:10px;line-height:1.7}
+.mode{margin-top:11px;background:var(--org-bg);border-radius:10px;
+  padding:9px 12px;font-size:12.5px;line-height:1.65}
+.mode b{color:var(--org)}
+
+/* ── ② 情绪三格 ── */
+.stats3{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:11px}
+.stat{background:var(--card);border:1px solid var(--line2);border-radius:13px;
+  padding:11px 12px;box-shadow:var(--sh)}
+.stat .t{font-size:11px;color:var(--tx3);font-weight:700}
+.stat .v{font-size:19px;font-weight:900;margin-top:2px;letter-spacing:.2px}
+.stat .s{font-size:10.5px;color:var(--tx3);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ── ③ 通用卡 ── */
+.card{background:var(--card);border:1px solid var(--line2);border-radius:15px;
+  padding:14px 15px;box-shadow:var(--sh);margin-top:10px}
+.card .label{font-size:12px;font-weight:800;color:var(--org)}
+.card .theme{font-size:19px;font-weight:900;margin-top:2px}
+.card p{font-size:12.5px;color:var(--tx2);line-height:1.7;margin-top:7px}
+.card .mini{font-size:11px;color:var(--tx3);margin-top:6px}
+
+/* ── ④ 候选卡 ── */
+.pick{background:var(--card);border:1px solid var(--line2);border-radius:14px;
+  padding:12px 14px;box-shadow:var(--sh);margin-bottom:9px}
+.pick:active{transform:scale(.985)}
+.pick .r1{display:flex;align-items:center;gap:8px}
+.pick .nm{font-size:16px;font-weight:900}
+.pick .cd{font-size:10.5px;color:var(--tx3);font-weight:600}
+.pick .pct{margin-left:auto;font-size:17px;font-weight:900;letter-spacing:.2px}
+.pick .r2{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.pick .r3{font-size:12px;color:var(--tx2);margin-top:7px;line-height:1.6;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tag{display:inline-block;font-size:10.5px;font-weight:800;border-radius:6px;
+  padding:2px 7px;line-height:1.5}
+.tag.red{background:var(--red-bg);color:var(--red)}
+.tag.blu{background:var(--blu-bg);color:var(--blu)}
+.tag.org{background:var(--org-bg);color:var(--org)}
+.tag.grn{background:var(--grn-bg);color:var(--grn)}
+.tag.gry{background:var(--sk);color:var(--tx2)}
+
+/* ── ⑤ 持仓 ── */
+.hold{background:var(--card);border:1px solid var(--line2);border-radius:14px;
+  padding:12px 14px;box-shadow:var(--sh);margin-bottom:9px}
+.hold .r1{display:flex;align-items:center;gap:8px}
+.hold .nm{font-size:15.5px;font-weight:900}
+.hold .pnl{margin-left:auto;font-size:16px;font-weight:900}
+.hold .r2{display:flex;gap:12px;font-size:11.5px;color:var(--tx3);margin-top:6px}
+.hold .act{font-size:12px;color:var(--tx2);margin-top:7px;line-height:1.6}
+.hold .unwind{font-size:11.5px;color:var(--org);background:var(--org-bg);
+  border-radius:8px;padding:7px 9px;margin-top:7px;line-height:1.65}
+
+/* ── ⑥ 明日判断 ── */
+.watchlist{list-style:none;margin-top:8px}
+.watchlist li{font-size:12.5px;color:var(--tx2);line-height:1.7;padding-left:16px;
+  position:relative;margin-top:5px}
+.watchlist li::before{content:"·";position:absolute;left:5px;font-weight:900;color:var(--blu)}
+
+footer{font-size:11px;color:var(--tx3);text-align:center;margin:22px 0 6px;line-height:1.8}
+
+/* ── 底部抽屉 ── */
+#mask{position:fixed;inset:0;background:rgba(10,14,20,.45);z-index:40;opacity:0;
+  pointer-events:none;transition:opacity .22s}
+#mask.on{opacity:1;pointer-events:auto}
+#sheet{position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--card);
+  border-radius:20px 20px 0 0;padding:8px 18px calc(22px + env(safe-area-inset-bottom));
+  transform:translateY(102%);transition:transform .26s cubic-bezier(.32,.72,.32,1);
+  max-height:82vh;overflow:auto;box-shadow:0 -8px 40px rgba(0,0,0,.18)}
+#sheet.on{transform:translateY(0)}
+.grab{width:38px;height:4px;border-radius:2px;background:var(--line);margin:6px auto 12px}
+#sheet h3{font-size:19px;font-weight:900;display:flex;align-items:center;gap:8px}
+#sheet .sect{margin-top:14px}
+#sheet .sect .k{font-size:11.5px;font-weight:800;color:var(--tx3);margin-bottom:5px}
+#sheet .sect .item{font-size:13px;line-height:1.75;color:var(--tx2);
+  background:var(--sk);border-radius:10px;padding:10px 12px;margin-top:6px}
+#sheet .sect .item b{color:var(--tx)}
+#sheet .kv{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+#sheet .kv>div{background:var(--sk);border-radius:10px;padding:8px 10px}
+#sheet .kv .k2{font-size:10.5px;color:var(--tx3);font-weight:700}
+#sheet .kv .v2{font-size:15px;font-weight:900;margin-top:1px}
+
+/* ── 加载态 ── */
+#loading{text-align:center;padding:56px 20px;color:var(--tx2)}
+#loading .big{font-size:40px;margin-bottom:12px}
+#loading .bar{height:6px;background:var(--sk);border-radius:3px;overflow:hidden;
+  margin:16px auto 0;max-width:260px}
+#loading .bar>div{height:100%;width:0;background:var(--blu);border-radius:3px;
+  transition:width .5s}
+#err{display:none;margin:14px 0;background:var(--red-bg);color:var(--red);
+  border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="brand">野人体系</div>
+    <div class="hmeta" id="hmeta">载入中…</div>
+  </div>
+  <button id="btnRefresh">⟳ 刷新</button>
+</header>
+
+<main>
+  <div id="err"></div>
+  <div id="loading">
+    <div class="big">🐺</div>
+    <div id="loadMsg">正在准备…</div>
+    <div class="bar"><div id="loadBar"></div></div>
+  </div>
+  <div id="app" style="display:none"></div>
+</main>
+
+<div id="mask" onclick="closeSheet()"></div>
+<div id="sheet"><div class="grab"></div><div id="sheetBody"></div></div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num=(v,d=2)=>{ if(v==null||v===''||isNaN(Number(v)))return'—'; return Number(v).toFixed(d); };
+const pctCls=v=>(Number(v)>0?'up':(Number(v)<0?'dn':'fl'));           // 红涨绿跌
+const pctTxt=v=>v==null?'—':((Number(v)>=0?'+':'')+num(v,2)+'%');
+let REPORT=null, TIMER=null, POLL=null;
+
+/* ── 数据获取 ── */
+async function fetchReport(){
+  const r=await fetch('/api/result?top=20&limit=260',{cache:'no-store'});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return await r.json();
+}
+function loadCache(){
+  try{ const c=localStorage.getItem('yeren_mobile'); if(c){ REPORT=JSON.parse(c);
+       const ts=localStorage.getItem('yeren_mobile_ts')||'';
+       render(true,ts); return true; } }catch(e){}
+  return false;
+}
+function saveCache(){
+  try{ localStorage.setItem('yeren_mobile',JSON.stringify(REPORT));
+       localStorage.setItem('yeren_mobile_ts',new Date().toLocaleTimeString('zh-CN',
+         {hour:'2-digit',minute:'2-digit'})); }catch(e){}
+}
+async function refresh(manual){
+  const btn=$('btnRefresh');
+  if(manual){ btn.classList.add('syncing'); btn.textContent='⟳ 同步中'; }
+  try{
+    REPORT=await fetchReport(); saveCache();
+    $('loading').style.display='none'; $('err').style.display='none';
+    render(false,'刚刚');
+  }catch(e){
+    if(!REPORT){
+      $('loading').style.display='none';
+      $('err').style.display='block';
+      $('err').innerHTML='取不到数据：'+esc(e.message)+
+        '<br>下拉或点右上角刷新重试。';
+    }else{
+      $('hmeta').textContent=$('hmeta').textContent.replace(/ · 联网.*/,'')+' · 联网失败，显示上次结果';
+    }
+  }finally{
+    if(manual){ btn.classList.remove('syncing'); btn.textContent='⟳ 刷新'; }
+  }
+}
+/* 没有缓存时：触发扫描并轮询进度 */
+async function startAndPoll(){
+  try{ await fetch('/api/start?top=20&limit=260',{cache:'no-store'}); }catch(e){}
+  let n=0;
+  POLL=setInterval(async()=>{
+    n++;
+    try{
+      const st=await (await fetch('/api/status',{cache:'no-store'})).json();
+      const p=Math.max(0,Math.min(99,Math.round(st.pct||0)));
+      $('loadBar').style.width=p+'%';
+      $('loadMsg').textContent=(st.msg||'扫描中')+(st.pct?'（'+p+'%）':'');
+      if(st.done){ clearInterval(POLL); $('loadBar').style.width='100%';
+        setTimeout(()=>refresh(false),300); }
+      else if(st.error){ clearInterval(POLL); $('loadMsg').textContent='扫描出错：'+st.error; }
+    }catch(e){}
+    if(n>150){ clearInterval(POLL); $('loadMsg').textContent='等待超时，点刷新重试'; }
+  },2000);
+}
+
+/* ── 渲染 ── */
+function render(fromCache,ts){
+  const d=REPORT; if(!d||!d.meta) return;
+  const m=d.meta, sen=d.sentiment||{}, vol=d.volume||{}, meter=d.meter||{},
+        ml=d.mainline||{}, out=d.outlook||{}, pf=d.portfolio||{},
+        mm=sen.metrics||{}, mt=meter.metrics||{};
+  $('hmeta').textContent=`v${m.version||'?'} · ${m.date||''}`+
+    (m.session&&m.session.label?' · '+m.session.label:'')+
+    (fromCache?(' · 缓存 '+ts):' · 已更新 '+ts);
+
+  const parts=[];
+
+  /* ① 今日结论 */
+  const canTrade=sen.can_trade&&vol.mode!=='dry';
+  const frozen=sen.stage==='unknown';
+  const cls=!canTrade?'stop':(frozen?'stop':((sen.stage==='climax'||sen.stage==='follow')?'go':'hold'));
+  const em=!canTrade?'🚫':(frozen?'🧊':(cls==='go'?'✅':'⚠️'));
+  const title=!canTrade?'今天不要买'
+    :(frozen?'暂无涨停信号 —— 空仓等启动'
+    :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水'));
+  const reason=!canTrade?(sen.can_trade?(vol.advice||''):(sen.note||'情绪进入退潮期'))
+    :`${sen.label||sen.stage||''}${vol.label?'，'+vol.label:''}${
+        mt.seal_rate!=null?('，封板率 '+Math.round(mt.seal_rate*100)+'%'):''}。`;
+  const mode=out.mode||{};
+  parts.push(`<section class="hero ${cls}">
+    <div class="top"><div class="em">${em}</div>
+      <div><h1>${esc(title)}</h1>
+        <div class="sub">${esc(sen.label||'')}${vol.label?' · '+esc(vol.label):''}</div></div></div>
+    <p>${esc(reason)}</p>
+    ${mode.name?`<div class="mode"><b>当前打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:''}
+  </section>`);
+
+  /* ② 情绪三格 */
+  const sp=meter.space||{};
+  const temp=meter.temperature;
+  parts.push(`<div class="stats3">
+    <div class="stat"><div class="t">情绪温度</div>
+      <div class="v">${temp==null?'—':temp+'°'}</div>
+      <div class="s">${esc((meter.label||'').replace(/^\S+\s*/,''))||'—'}</div></div>
+    <div class="stat"><div class="t">空间板</div>
+      <div class="v">${sp.today!=null?sp.today+'板':'—'}</div>
+      <div class="s">${sp.prev20?(sp.open?'↑ 破前高'+sp.prev20:'前高'+sp.prev20+'未破'):'—'}</div></div>
+    <div class="stat"><div class="t">涨停/跌停</div>
+      <div class="v"><span class="up">${mt.limit_up!=null?mt.limit_up:'—'}</span><span class="fl" style="font-size:14px">/</span><span class="dn">${mt.limit_down!=null?mt.limit_down:'—'}</span></div>
+      <div class="s">炸板 ${mt.broken!=null?mt.broken:'—'}</div></div>
+  </div>`);
+
+  /* ③ 主线题材 */
+  if(ml.theme||ml.label){
+    parts.push(`<div class="card">
+      <div class="label">${esc(ml.label||'题材主线')}</div>
+      <div class="theme">${esc(ml.theme||'未确认')}</div>
+      <p>${esc(ml.verdict_note||ml.summary||'')}</p>
+      ${(ml.streak>=2)?`<div class="mini">该题材已连续 ${ml.streak} 日活跃</div>`:''}
+    </div>`);
+  }
+
+  /* ④ 候选股 */
+  const picks=d.picks||[];
+  parts.push(`<h2>候选股 <span class="cnt">${picks.length} 只 · 点开看买卖点</span></h2>`);
+  if(!picks.length){
+    parts.push('<div class="card fl" style="font-size:13px">今日没有符合条件的候选</div>');
+  }
+  picks.forEach((p,i)=>{
+    const bs=(p.buy_signals||[])[0]||{};
+    const tags=[];
+    if(p.zt_boards) tags.push(`<span class="tag red">${p.zt_boards}板</span>`);
+    if(p.hot_rank) tags.push(`<span class="tag org">人气第${p.hot_rank}名${p.hot_tag?'·'+esc(p.hot_tag):''}</span>`);
+    if(p.fund_style==='institutional') tags.push('<span class="tag blu">机构票</span>');
+    else if(p.fund_style==='hot_money') tags.push('<span class="tag blu">游资票</span>');
+    const mr=(p.moneyflow||{}).main;
+    if(mr) tags.push(`<span class="tag ${mr>0?'red':'grn'}">主力${mr>0?'+':''}${num(mr/1e8,2)}亿</span>`);
+    parts.push(`<div class="pick" onclick="openSheet(${i})">
+      <div class="r1"><span class="nm">${esc(p.name||'')}</span>
+        <span class="cd">${esc(p.code||'')}</span>
+        <span class="pct ${pctCls(p.pct)}">${pctTxt(p.pct)}</span></div>
+      ${tags.length?`<div class="r2">${tags.join('')}</div>`:''}
+      ${bs.name?`<div class="r3"><b>${esc(bs.name)}</b>：${esc(bs.entry||'')}</div>`:''}
+    </div>`);
+  });
+  window.__picks=picks;
+
+  /* ⑤ 持仓 */
+  const holds=pf.holdings||[];
+  if(holds.length){
+    parts.push(`<h2>持仓 <span class="cnt">${holds.length} 只 · 总盈亏 ${
+      pf.total_pnl_pct==null?'—':pctTxt(pf.total_pnl_pct)}</span></h2>`);
+    holds.forEach(h=>{
+      const s0=(h.signals||[])[0]||{};
+      parts.push(`<div class="hold">
+        <div class="r1"><span class="nm">${esc(h.name||h.code)}</span>
+          <span class="pnl ${pctCls(h.pnl_pct)}">${pctTxt(h.pnl_pct)}</span></div>
+        <div class="r2"><span>成本 ${num(h.cost)}</span><span>现价 ${num(h.price)}</span>
+          <span>${esc(h.verdict||'')}</span></div>
+        ${s0.name?`<div class="act"><b>${esc(s0.name)}</b>：${esc(s0.action||s0.trigger||'')}</div>`:''}
+        ${h.unwind?`<div class="unwind">${esc(h.unwind)}</div>`:''}
+      </div>`);
+    });
+  }
+
+  /* ⑥ 明日判断 */
+  if(out.headline){
+    parts.push(`<h2>明日判断 <span class="cnt">${esc(out.date||'')}</span></h2>
+      <div class="card">
+        <div class="theme" style="font-size:16px">${esc(out.headline)}</div>
+        ${(out.watch||[]).length?`<ul class="watchlist">${
+          out.watch.slice(0,4).map(w=>`<li>${esc(w)}</li>`).join('')}</ul>`:''}
+      </div>`);
+  }
+
+  /* 底部 */
+  parts.push(`<footer>扫描 ${m.scanned||'—'} 只 · 耗时 ${m.elapsed||'—'} 秒 · 数据源：东财/腾讯/财联社/开盘红<br>
+    纯本地工具，不构成投资建议</footer>`);
+
+  $('app').innerHTML=parts.join('');
+  $('app').style.display='block';
+}
+
+/* ── 底部抽屉：候选详情 ── */
+function openSheet(i){
+  const p=(window.__picks||[])[i]; if(!p) return;
+  const buys=p.buy_signals||[], sells=p.sell_signals||[], reasons=p.reasons||[];
+  const g=p.graph_detail||{};
+  const kv=[];
+  kv.push(['位置',g.base_pos!=null?Math.round(g.base_pos*100)+'%':'—']);
+  kv.push(['换手',p.turnover!=null?num(p.turnover,1)+'%':'—']);
+  kv.push(['量能压缩',g.shrink!=null?Math.round(g.shrink*100)+'%':'—']);
+  $('sheetBody').innerHTML=`
+    <h3>${esc(p.name||'')} <span class="fl" style="font-size:12px;font-weight:600">${esc(p.code||'')}</span>
+      <span class="${pctCls(p.pct)}" style="margin-left:auto;font-size:19px">${pctTxt(p.pct)}</span></h3>
+    <div class="kv">${kv.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div>
+    ${p.hot_rank?`<div class="sect"><div class="k">市场人气</div>
+      <div class="item">同花顺人气榜第 <b>${p.hot_rank}</b> 名${p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
+    ${buys.length?`<div class="sect"><div class="k">买点</div>${buys.map(b=>`
+      <div class="item"><b>${esc(b.name)}</b>${b.position?`（${esc(b.position)}）`:''}<br>
+        ${esc(b.entry||'')}${b.stop?`<br><span class="fl">止损：${esc(b.stop)}</span>`:''}
+        ${b.target?`<br><span class="fl">目标：${esc(b.target)}</span>`:''}</div>`).join('')}</div>`:''}
+    ${sells.length?`<div class="sect"><div class="k">卖出提醒</div>${sells.map(s=>`
+      <div class="item"><b>${esc(s.name)}</b>：${esc(s.action||s.trigger||'')}</div>`).join('')}</div>`:''}
+    ${reasons.length?`<div class="sect"><div class="k">为什么选它</div>
+      <div class="item">${reasons.slice(0,5).map(r=>'· '+esc(r)).join('<br>')}</div></div>`:''}
+    ${p.zt_reason?`<div class="sect"><div class="k">涨停原因</div>
+      <div class="item">${esc(p.zt_reason)}</div></div>`:''}
+  `;
+  $('mask').classList.add('on'); $('sheet').classList.add('on');
+}
+function closeSheet(){ $('mask').classList.remove('on'); $('sheet').classList.remove('on'); }
+
+/* ── 下拉刷新 ── */
+let ty=0,pulling=false;
+document.addEventListener('touchstart',e=>{ if(window.scrollY<=0) ty=e.touches[0].clientY; },{passive:true});
+document.addEventListener('touchend',e=>{
+  if(window.scrollY<=0&&ty){
+    const dy=(e.changedTouches[0].clientY-ty);
+    if(dy>90){ refresh(true); }
+  }
+  ty=0;
+},{passive:true});
+
+/* ── 启动 ── */
+$('btnRefresh').onclick=()=>refresh(true);
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) refresh(false);
+});
+if(!loadCache()){ startAndPoll(); }
+TIMER=setInterval(()=>{ if(!document.hidden) refresh(false); },60000);
+</script>
+</body>
+</html>

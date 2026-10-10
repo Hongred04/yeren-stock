@@ -257,12 +257,12 @@ class MainActivity : Activity() {
             ) {
                 if (request?.isForMainFrame == true && error != null) {
                     view?.postDelayed({
-                        if (port != 0) view.loadUrl("http://127.0.0.1:$port/")
+                        if (port != 0) view.loadUrl("http://127.0.0.1:$port/mobile.html")
                     }, 1200)
                 }
             }
         }
-        web.loadUrl("http://127.0.0.1:$port/")
+        web.loadUrl("http://127.0.0.1:$port/mobile.html")
     }
 
     private fun showError(title: String, detail: String) {

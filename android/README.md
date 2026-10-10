@@ -16,22 +16,28 @@
 APK
 ├── lib/arm64-v8a/libpython3.13.so     ← Chaquopy 内置的 CPython
 ├── assets/chaquopy/app.imy            ← 主工程的 core/ + server.py（预编译成 .pyc）
-├── assets/web/index.html              ← 看板页面
+├── assets/web/mobile.html             ← 手机端精简看板（App 加载这个）
+├── assets/web/index.html              ← 桌面版完整页面（App 内不加载，保留备用）
 ├── assets/defaults/strategy.json      ← 桌面调好的默认策略
 └── MainActivity (Kotlin)
         │
         ├─ 1. 把 assets 解到 App 私有目录（Chaquopy 不打包 .py 以外的文件）
         ├─ 2. 启动 Python，调 android_boot.start(...)
         │        └─ 在后台线程里跑 ThreadingHTTPServer，监听 127.0.0.1:8777
-        └─ 3. WebView 打开 http://127.0.0.1:8777/
+        └─ 3. WebView 打开 http://127.0.0.1:8777/mobile.html
 ```
+
+**手机端 UI 是独立设计的**（v1.21 起）：`web/mobile.html` —— 只保留最重要的
+六块（今日结论 / 情绪三格 / 主线题材 / 候选股 / 持仓 / 明日判断），
+候选与持仓点开是底部抽屉详情；支持下拉刷新、深色模式跟随系统。
+桌面版 `index.html` 一个字节都没动。
 
 关键点：**桌面工程一个文件都没改逻辑**。所有安卓特有的差异收在
 `core/paths.py` 一个文件里 —— 桌面下数据写 `data/`，安卓下写 App 私有目录。
 
 ```
 android/app/src/android_glue/android_boot.py   ← 安卓启动引导（注入目录、起服务）
-android/app/src/main/java/.../MainActivity.kt  ← WebView 外壳
+android/app/src/main/java/.../MainActivity.kt  ← WebView 外壳（加载 /mobile.html）
 android/app/build.gradle                       ← 同步任务 + Chaquopy 配置
 ```
 
