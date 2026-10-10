@@ -119,7 +119,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
                    "note": ("明日早盘先看亏钱面积（现在 " + f"{hurt*100:.0f}%" +
                             "）：回落代表修复，继续抬升就是退潮延续"
                             if stage == "ebb" else
-                            "情绪位置决定仓位：起步期试错、高潮期防退潮")})
+                            "情绪位置决定仓位：启动期试错、高潮期防退潮")})
 
     vol_note = (f"现在 {vol_amt:.0f} 亿（{volume.get('basis') or ''}）。"
                 if vol_amt else "")

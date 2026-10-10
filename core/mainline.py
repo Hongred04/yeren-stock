@@ -178,7 +178,9 @@ def _signal_message(a: dict, theme_name: str = "",
     lv = a.get("message_level") or "auto"
     info = MESSAGE_LEVELS.get(lv, MESSAGE_LEVELS["auto"])
     note = (a.get("message_note") or "").strip()
-    rules = ["先判断消息分量：消息级别决定行情空间的上限，消息不够大，后面都不用看"]
+    # detail 首行必须是「本次判到了什么」，不能是「规则怎么写的」——
+    # 用户要看结论，规则说明放「调策略」里就够了（2026-10-10 通读文案时改）
+    rules: list[str] = []
 
     ev_head = (suggestion or {}).get("evidence", [])[:2]
     ev_str = "；".join(f"{str(e.get('time',''))[5:16]} {str(e.get('text',''))[:46]}"
@@ -200,17 +202,18 @@ def _signal_message(a: dict, theme_name: str = "",
                 if today_lv and today_lv != mem["level"]:
                     ev += f"；今日快讯最高仅 {today_lv} 级"
                 ev += (f"：{ev_str}" if ev_str else "")
-                detail = rules + [
-                    "大级别政策不会因为日历翻页失效（有效期：S级记20天 / A级10天 / B级5天）；"
-                    "快讯池只能翻两三天，靠消息记忆兜住 —— "
-                    "这就是「前几天发的政策，今天还认」的机制"]
+                detail = [f"命中消息记忆：{mem_day} 的 {_lv_name(mem['level'])}"
+                          f"（{mem.get('days', 0)} 天前，仍在有效期内）"] + [
+                    "大级别政策不会因为日历翻页失效（S 20天 / A 10天 / B 5天）；"
+                    "快讯池只能翻两三天，靠消息记忆兜住"]
             else:
                 since = suggestion.get("since") or ""
                 ev = (f"自动定级 {s_info['name']}（依据{suggestion.get('scanned', 0)}条快讯"
                       f"与主题材的关联匹配，覆盖至 {since}）"
                       + (f"：{ev_str}" if ev_str else ""))
-                detail = rules + ["自动定级按关键词规则：国家战略S → 部委政策A → 行业事件B → "
-                                  "个股公告C；只统计与主题材相关的快讯，如有出入请手动录入覆盖"]
+                detail = [f"自动定级：{s_info['name']}（关联快讯 {suggestion.get('scanned', 0)} 条）"] + [
+                    "定级规则：国家战略S → 部委政策A → 行业事件B → 个股公告C；"
+                    "只统计与主题材相关的快讯，有出入可手动录入覆盖"]
         else:
             state = "unknown"
             ev = "消息级别：未定级。" + (
@@ -218,7 +221,8 @@ def _signal_message(a: dict, theme_name: str = "",
                 f"消息记忆（近20日）里也没有"
                 if a.get("auto_message", True)
                 else "自动定级已关闭，请在「调策略」→「高级参数」→ M9 录入消息级别")
-            detail = rules + ["盘中快速轮动启动的题材，快讯可能滞后 —— 人工确认后可手动录入"]
+            detail = ["未发现达到门槛的消息 —— 按「未定级」处理",
+                      "盘中快速轮动启动的题材，快讯可能滞后；人工确认后可手动录入"]
     else:
         state = "pass" if info["gate_ok"] else "fail"
         ev = f"消息级别：{info['name']}。{info['ceiling']}"
@@ -231,7 +235,8 @@ def _signal_message(a: dict, theme_name: str = "",
         elif suggestion and suggestion.get("found"):
             s_info = MESSAGE_LEVELS.get(suggestion["level"], MESSAGE_LEVELS["auto"])
             ev += f"｜快讯扫描也见{s_info['name']}" + (f"：{ev_str}" if ev_str else "")
-        detail = rules
+        detail = [f"手动录入：{info['name']}" + (f"｜{note}" if note else ""),
+                  info.get("ceiling", "")]
 
     return {"id": "S1", "name": "消息定级别", "state": state, "evidence": ev,
             "detail": detail}
@@ -657,7 +662,7 @@ def _signal_next_day(a: dict, real_date: str, snaps: dict[str, dict],
 
 # ---------------------------------------------------------------- 综合判定
 
-def _one_day_note(base: str, day2: dict | None = None) -> str:
+def _one_day_note(base: str, day2: dict | None = None, short: str = "") -> str:
     """「一日游」只适用于**首日启动的新题材**。
 
     已经连续活跃 ≥2 日的题材谈不上一日游（页面上一边写着"连续3日活跃"
@@ -667,9 +672,12 @@ def _one_day_note(base: str, day2: dict | None = None) -> str:
     """
     streak = _int((day2 or {}).get("streak"), 0)
     if streak >= 2:
-        return (f"该题材已连续 {streak} 日活跃，不是一日游 —— 正确读法是"
-                f"「游资行情、容量有限」：{base}。当短线看、不重仓、不格局，"
-                "更别用长线思维拿")
+        # 连续活跃题材：缺环的含义是「容量有限、走不远」，不是「今天就死」——
+        # base 里"当天冲高就结束"那种一步游措辞直接套会自相矛盾
+        #（都连涨 4 天了，哪来"当天就结束"），所以这里改用 short 的简因。
+        why = short or base
+        return (f"该题材已连续 {streak} 日活跃、不是一日游；但主线地位不成立 —— {why}。"
+                "按「游资行情、容量有限」对待：做短线、不重仓、不格局，别用长线思维拿")
     return base
 
 
@@ -684,21 +692,24 @@ def _verdict(s1: dict, s2: dict, s3: dict, s4: dict, s5: dict,
 
     if s1v == "fail":
         return "one_day", _one_day_note(
-            "消息级别不够大（C级/个股公告）撑不起主线 —— 消息不够大，后面都不用看", day2)
+            "消息级别不够大（C级/个股公告）撑不起主线 —— 消息不够大，后面都不用看",
+            day2, short="消息级别不够大，撑不起主线行情")
     if s2v == "fail":
         return "one_day", _one_day_note(
-            "无合力：题材内没有多家齐涨停 = 资金没有集体行动，孤军奋战就是一日游", day2)
+            "无合力：题材内没有多家齐涨停 = 资金没有集体行动，孤军奋战就是一日游",
+            day2, short="题材内没有多家齐涨停，资金没形成集体行动")
     if s3v == "fail":
         return "one_day", _one_day_note(
-            "无中军：百亿大票没参与 = 游资脉冲行情，容量不够，当天冲高就结束", day2)
+            "无中军：百亿大票没参与 = 游资脉冲行情，容量不够，当天冲高就结束",
+            day2, short="没有中军（百亿大票没参与），容量不够、行情走不远")
     if s5v == "fail":
         if day2 and day2.get("return_day"):
             return "one_day", _one_day_note(
                 "主线回归承接不成立：空间龙溢价 / 首板留存 / 中军反馈未过线 —— 二波接不住",
-                day2)
+                day2, short="二波承接不成立（空间龙溢价/首板留存/中军反馈未过线）")
         return "one_day", _one_day_note(
             "次日检验未通过：空间龙溢价 / 首板留存 / 中军反馈至少一项不合格 —— 主线地位不成立",
-            day2)
+            day2, short="承接检验未过（空间龙溢价/首板留存/中军反馈）")
 
     if s5v == "pass" and s2v == "pass" and s4v != "weak":
         if s1v == "unknown":
@@ -941,7 +952,9 @@ def sector_view(ml: dict, flow: dict | None = None,
             return ""
         hit = cls_mod.match_heat(name, winds)      # 复用匹配逻辑（精确/别名/唯一包含）
         if hit and hit.get("catalyst"):
-            return "催化：" + hit["catalyst"][:38]
+            # 不再二次截断 —— cls 侧已按完整句子裁到 ≤78 字，
+            # 这里再切会切出"…同比增"这种半句（2026-10-10 通读时抓到）
+            return "催化：" + hit["catalyst"]
         return ""
 
     def _pct_txt(v) -> str:

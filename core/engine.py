@@ -305,8 +305,8 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
         else:
             note = "退潮期：无条件清仓，停止一切低吸和打板，管住手"
     elif st["state"] == "watch":
-        note = (f"退潮预警未确认（亏钱面积 {hurt_area*100:.0f}%，原始信号"
-                f"{st['raw_streak']} 次）—— 先降仓、别急着清，等确认")
+        note = (f"退潮预警未确认（亏钱面积 {hurt_area*100:.0f}%，"
+                f"原始信号已触发 {st['raw_streak']} 次）—— 先降仓、别急着清，等确认")
     else:
         note = "可按周期节奏操作"
 

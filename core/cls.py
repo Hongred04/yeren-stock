@@ -298,6 +298,26 @@ _HEAT_ALIASES = {
 }
 
 
+def _clip_sentence(text: str, limit: int = 78) -> str:
+    """把催化剂解读截到一句完整的话 —— 别切出「国庆假期，全国服务」这种半截句。
+
+    优先在 limit 内的最后一个句末标点处切；退而求其次在分号/逗号处切（加省略号）；
+    实在没有标点才硬截。"""
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    head = t[:limit]
+    for mark in ("。", "！", "？"):
+        i = head.rfind(mark)
+        if i >= 18:
+            return head[:i + 1]
+    for mark in ("；", "，"):
+        i = head.rfind(mark)
+        if i >= 24:
+            return head[:i] + "…"
+    return head + "…"
+
+
 def match_heat(name: str, heats: list[dict] | None = None) -> dict | None:
     """在热度榜里匹配一个板块名。精确 → 别名表 → 唯一包含；否则返回 None。"""
     if not name:
@@ -374,7 +394,7 @@ def market_wind() -> list[dict]:
             name = (it.get("title") or it.get("plate_name") or "").strip()
             cat = (it.get("interpret") or it.get("catalyst") or "").strip()
             if name:
-                out.append({"name": name, "catalyst": cat[:60]})
+                out.append({"name": name, "catalyst": _clip_sentence(cat)})
         return out
     try:
         return ds.cached("cls:wind", 600, producer)

@@ -329,11 +329,11 @@ def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,
 
     # 数据源受限时，指名道姓
     if not boards_all:
-        source_note = "板块数据受限：东财 ulist.np 限速冷却中、新浪兜底不可用"
+        source_note = "板块数据暂不可用（东财限速中，新浪兜底也没取到）"
     elif board_src == "sina":
         source_note = "板块数据来自新浪（东财被限速）：没有主力净额，只有涨幅/成交额/领涨股"
     else:
-        source_note = "板块数据来自东财 ulist.np（行业+概念）"
+        source_note = "板块数据来自东财"
 
     checks = []
     hot = sec_in[0] if sec_in else None
