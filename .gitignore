@@ -56,3 +56,7 @@ _server_log.txt
 
 # 上次扫描结果的磁盘缓存（重启后秒开用，可再生成）
 data/last_report.json
+
+# 服务运行日志
+logs/
+_server_log.txt
