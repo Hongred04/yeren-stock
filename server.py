@@ -238,18 +238,24 @@ class Handler(BaseHTTPRequestHandler):
                     if snap.get("started") else 0
                 self._send_json(snap)
             elif path == "/api/result":
-                # 只读缓存，绝不同步计算（否则会锁住 pipeline 导致后台任务卡死）
+                # 只读缓存，绝不同步计算（否则会锁住 pipeline 导致后台任务卡死）。
+                # 新鲜缓存优先；过期/服务重启后回落到磁盘上的上次结果（标 stale、
+                # 前端显示"上次结果"并自动后台重扫）—— 不再直接甩 204。
                 cached = pipeline.get_cached()
                 if cached:
                     self._send_json(cached)
                 else:
-                    # 204: 无缓存。前端据此转后台任务
-                    body = b'{"cached": false}'
-                    self.send_response(204)
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    disk = pipeline.get_disk_report()
+                    if disk:
+                        self._send_json(disk)
+                    else:
+                        # 204: 连磁盘底都没有（真正首次使用）。前端据此转后台任务
+                        body = b'{"cached": false}'
+                        self.send_response(204)
+                        self.send_header("Content-Type", "application/json; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
             elif path == "/api/config":
                 self._send_json({"config": sc.load_config(),
                                  "presets": sc.list_presets()})

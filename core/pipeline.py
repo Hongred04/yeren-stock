@@ -61,6 +61,56 @@ def get_cached() -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------- 磁盘缓存
+# 为什么需要（2026-10-10 用户实测）：内存缓存的 TTL 只有 3 分钟，且进程重启就
+# 丢失 —— 此时 /api/result 返回 204，桌面版能自动转"扫描中"，移动端却直接
+# 报「取不到数据」（用户感受就是"界面加载不出来了"）。落一份盘：
+# 过期/重启后先把**上次的结果**端出来（标 stale），后台照常重扫刷新。
+
+def _disk_cache_path() -> str:
+    try:
+        from . import paths
+        return paths.data_path("last_report.json")
+    except Exception:
+        return ""
+
+
+def save_disk_report(report: dict) -> None:
+    """扫描完成后落盘（失败静默——绝不影响主流程）。"""
+    p = _disk_cache_path()
+    if not p:
+        return
+    try:
+        import json
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "report": report}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def get_disk_report() -> dict | None:
+    """读上次落盘的结果（标 stale=true 供前端识别）。没有/损坏返回 None。"""
+    p = _disk_cache_path()
+    if not p:
+        return None
+    try:
+        import json
+        import os
+        if not os.path.exists(p):
+            return None
+        with open(p, encoding="utf-8") as f:
+            obj = json.load(f)
+        rep = obj.get("report")
+        if not isinstance(rep, dict) or not rep.get("meta"):
+            return None
+        rep = dict(rep)
+        rep["stale"] = True
+        rep["stale_ts"] = obj.get("ts")
+        return rep
+    except Exception:
+        return None
+
+
 def invalidate():
     """使结果缓存失效。"""
     global _result_ts
@@ -454,8 +504,9 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "limit_up_pool": sorted(zt, key=lambda x: -x.get("boards", 1))[:30],
             "config": cfg,
         }
-        # 写缓存（持锁，极短）
+        # 写缓存（持锁，极短）；同时落盘 —— 过期/重启后还能先端出上次结果
         with _lock:
             _result_cache = report
             _result_ts = time.time()
+        save_disk_report(report)
         return report

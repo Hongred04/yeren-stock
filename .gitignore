@@ -53,3 +53,6 @@ data/signal_journal.json
 data/stage_state.json
 data/zt_history.json
 _server_log.txt
+
+# 上次扫描结果的磁盘缓存（重启后秒开用，可再生成）
+data/last_report.json

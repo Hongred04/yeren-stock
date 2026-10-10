@@ -283,6 +283,7 @@ $('tabbar').addEventListener('click',e=>{
 /* ── 数据 ── */
 async function fetchReport(){
   const r=await fetch('/api/result?top=20&limit=260',{cache:'no-store'});
+  if(r.status===204) return null;          // 首次使用（无内存也无磁盘底）→ 走扫描
   if(!r.ok) throw new Error('HTTP '+r.status);
   return await r.json();
 }
@@ -334,9 +335,17 @@ async function refresh(manual){
   if(manual){ btn.classList.add('syncing'); btn.textContent='⟳ 同步中'; }
   try{
     const [rep] = await Promise.all([fetchReport(), fetchSources()]);
+    if(!rep){                        // 首次使用：没有历史结果 → 显示进度并扫描
+      $('loading').style.display=''; $('err').style.display='none';
+      $('loadMsg').textContent='首次使用，正在扫描…';
+      $('loadBar').style.width='2%';
+      startAndPoll();
+      return;
+    }
     REPORT=rep; saveCache();
     $('loading').style.display='none'; $('err').style.display='none';
-    render(false,'刚刚');
+    render(!!rep.stale, rep.stale?_staleLabel(rep):'刚刚');
+    if(rep.stale) silentRescan();    // 端出来的是上次结果 → 后台静默重扫
   }catch(e){
     if(!REPORT){
       $('loading').style.display='none'; $('err').style.display='block';
@@ -364,6 +373,33 @@ async function startAndPoll(){
   },2000);
 }
 
+/* ── 过期缓存（上次结果）与后台静默重扫 ── */
+let _rescanning=false;
+function _staleLabel(d){
+  const ts=d&&d.stale_ts;
+  if(!ts) return '上次结果';
+  try{ return new Date(ts*1000).toLocaleTimeString('zh-CN',
+    {hour:'2-digit',minute:'2-digit'}); }catch(e){ return '上次结果'; }
+}
+/* 先让用户看到上次结果，后台重扫，扫完自动刷新（不显示进度、不打断浏览） */
+function silentRescan(){
+  if(_rescanning) return;
+  _rescanning=true;
+  (async()=>{
+    try{ await fetch('/api/start?top=20&limit=260',{cache:'no-store'}); }
+    catch(e){ _rescanning=false; return; }
+    let n=0;
+    const t=setInterval(async()=>{
+      n++;
+      try{
+        const st=await (await fetch('/api/status',{cache:'no-store'})).json();
+        if(st.done){ clearInterval(t); _rescanning=false; refresh(false); }
+        else if(st.error||n>120){ clearInterval(t); _rescanning=false; }
+      }catch(e){ if(n>120){ clearInterval(t); _rescanning=false; } }
+    },3000);
+  })();
+}
+
 /* ── 渲染 ── */
 function render(fromCache,ts){
   const d=REPORT; if(!d||!d.meta) return;
@@ -371,7 +407,8 @@ function render(fromCache,ts){
         ml=d.mainline||{}, out=d.outlook||{}, pf=d.portfolio||{},
         fl=d.flow||{}, sec=d.sectors||{}, mm=sen.metrics||{}, mt=meter.metrics||{};
   $('hmeta').textContent=`v${m.version||'?'} · ${m.date||''}`+
-    (m.session&&m.session.label?' · '+m.session.label:'')+(fromCache?(' · 缓存 '+ts):' · '+ts);
+    (m.session&&m.session.label?' · '+m.session.label:'')+
+    (fromCache?(' · 上次结果 '+(ts||'')+'（后台刷新中）'):(' · 已更新 '+ts));
 
   /* ═══ Tab 1 · 今日 ═══ */
   const canTrade=sen.can_trade&&vol.mode!=='dry';
