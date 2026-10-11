@@ -24,6 +24,14 @@
 M10 主导资金分类（fundstyle）：同一趋势主导资金不同离场点完全不同 ——
   机构票突然拉涨停=出货冲顶立刻减仓；游资票跟断板节奏、节奏破坏就撤；
   庄股断崖式下跌盈亏比极差，不参与。
+
+buy_signals 的返回值契约：
+  列表里**既有可执行买点，也有"当日别买"的提示**，靠 kind 字段区分：
+    · kind="buy"  → 可执行买点（B0/B1/B2/B3/B4），带 entry/stop/position；
+    · kind="block"→ 禁买/不买提示（HOLD，blocked=True），只有"为什么别买"。
+  消费者（前端 / journal）必须按 kind 或 blocked 过滤，不能把 block 当买点展示
+  —— 以前前端把"涨停不追"塞进「其他买入时机」列表，自相矛盾。
+sell_signals 全是可执行动作，无 block 语义。
 """
 from __future__ import annotations
 
@@ -103,14 +111,22 @@ def _stop_price(structure_low: float, close: float, max_loss: float = 0.07) -> f
 
     首板的最低点有时离现价很远（低开拉板），单用结构位止损幅度过大；
     用 max(前低-1%, 现价×(1-max_loss)) 保证单笔试错亏损有上限。
+
+    **止损必须落在现价下方**：结构位若已在现价之上（如破位票的 10 日线），
+    取 max 会得到一个"高于现价的止损"，页面上还会显示成 +3.3% 的"亏损"——
+    那是把止损写成了止盈。这里直接剔除 >= 现价的候选，保证返回值恒 < close。
     """
-    cands = [x for x in (structure_low * 0.99 if structure_low else 0.0,
-                         close * (1 - max_loss)) if x > 0]
-    return max(cands) if cands else close * (1 - max_loss)
+    floor = close * (1 - max_loss)
+    cands = [x for x in (structure_low * 0.99 if structure_low else 0.0, floor)
+             if 0 < x < close]
+    return max(cands) if cands else floor
 
 
 def _loss_pct(stop: float, close: float) -> str:
+    """止损相对现价的百分比（负数是亏损）。止损 >= 现价说明该止损无效，返回 '—'。"""
     try:
+        if stop >= close:
+            return "—"
         return f"{(stop / close - 1) * 100:.1f}%"
     except ZeroDivisionError:
         return "—"
@@ -144,6 +160,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             if boards <= 1:
                 return [{
                     "type": "B0", "name": "退潮试错仓", "priority": "B",
+                    "kind": "buy",
                     "trigger": f"退潮期试错：{sentiment.get('note') or ''}",
                     "entry": (f"只做首板，单笔不超过 {pos_cn(tw)}；"
                               f"不是首板就别碰"),
@@ -156,6 +173,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
                 }]
             return [{
                 "type": "HOLD", "name": "退潮期只做首板", "priority": "A",
+                "kind": "block",
                 "trigger": f"该股已 {boards} 连板 —— 退潮期不接力",
                 "entry": f"退潮期只允许首板试错，上限 {pos_cn(tw)}；已连板的不参与",
                 "stop": "—",
@@ -167,6 +185,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         reason = "情绪退潮期" if not sentiment.get("can_trade", True) else "极度缩量"
         return [{
             "type": "HOLD", "name": "禁止开仓", "priority": "A",
+            "kind": "block",
             "trigger": f"{reason}：{sentiment.get('note') or volume.get('advice','')}",
             "entry": "不新开仓位；已持仓按卖出信号执行",
             "stop": "—",
@@ -181,6 +200,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     if fs.get("type") == "zhuang":
         return [{
             "type": "HOLD", "name": "庄股不参与", "priority": "A",
+            "kind": "block",
             "trigger": "；".join(fs.get("evidence", [])[:2]) or "庄股特征",
             "entry": "不参与",
             "stop": "若已持仓，遇断崖式下跌无条件出，绝不反包",
@@ -190,28 +210,45 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "blocked": True,
         }]
 
-    # B1 首板试错：处于首板且情绪非退潮
+    # B1 首板试错：处于首板且情绪允许出手。
+    # 门禁必须与「今日结论」一致：页面对 probe/follow/climax 都写着"可以出手 /
+    # 小仓位试水"，却只在 probe/follow 给首板买点，climax 期一个买点都不给
+    # —— 系统自己前后矛盾。首板的**次日竞价口径**在任何非退潮阶段都成立，
+    # 故放宽到 probe/follow/climax（ebb/disabled 早已在上面的许可检查里挡掉）。
     sess = market_session()
     premarket = sess["phase"] in ("pre_open", "auction", "rest")
     # 盘前/竞价/休市时当日涨停还没发生，涨停池里的 boards 是上一交易
     # 日的 —— 只按实时涨幅判"今日已涨停"，否则盘前满屏假"涨停不追"
     at_limit = (stock.get("pct", 0) >= thr
                 or (stock.get("zt_boards", 0) >= 1 and not premarket))
-    open_prefix = "今日" if premarket else "次日"
+    # 进场时点要说准：盘前/竞价 → 就是今天这一场；周末/节假日休市 →
+    # 下一场是「下个交易日」；盘中/盘后 → 涨停发生在今天，买点在「次日」。
+    if sess["phase"] in ("pre_open", "auction"):
+        open_prefix = "今日"
+    elif sess["phase"] == "rest":
+        open_prefix = "下个交易日"
+    else:
+        open_prefix = "次日"
     low1 = low_of(bars[-1])
     stop1 = _stop_price(low1, close)
-    if stock.get("zt_boards", 0) == 1 and sentiment.get("stage") in ("probe", "follow"):
+    if (stock.get("zt_boards", 0) == 1
+            and sentiment.get("stage") in ("probe", "follow", "climax")):
         note = "新周期一定是首板，二板还属于老周期"
         if at_limit:
             note += "；今日已封板，不追当日价，按次日口径执行"
         out.append({
             "type": "B1", "name": "首板试错",
             "priority": "A",
+            "kind": "buy",
             "trigger": (f"新周期首板（{stock.get('sector') or '题材内'}）—— "
                         f"{open_prefix}竞价高开 0~3% 是预期内的，＞5% 就是抢筹过头"),
-            "entry": (f"分两笔：① {open_prefix}竞价高开 0~3% → 先买一半；"
-                      f"② 高开＞5% 不追，等回踩 {close*0.98:.2f} 附近补另一半；"
-                      f"低开跌破 {close*0.95:.2f} 直接放弃"),
+            # 分两笔的口径必须自洽：高开 0~3% 才买第一笔；高开 3~5% 先观望、
+            # 回踩站稳再补；>5% 抢筹过头不追；低开破位直接放弃。
+            # （原文写"高开>5% 等回踩补另一半"，可那时第一笔根本没成交，
+            #   "补另一半"无从谈起。）
+            "entry": (f"{open_prefix}竞价分两笔：① 高开 0~3% 先买一半；"
+                      f"② 高开 3~5% 先观望，回踩 {close*0.98:.2f} 站稳再补另一半；"
+                      f"③ 高开＞5% 属抢筹过头不追；低开跌破 {close*0.95:.2f} 直接放弃"),
             "stop": (f"跌破 {stop1:.2f}（约 {_loss_pct(stop1, close)}）无条件走 —— "
                      f"试错失败只亏很小一笔"),
             "target": "看二板：封住二板继续持有，二板炸板走人",
@@ -224,11 +261,15 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     if at_limit:
         boards_now = stock.get("zt_boards", 0)
         board_txt = f"，{boards_now}板" if boards_now else ""
+        nxt = ("首板次日看竞价：高开 0~3% 是预期内、＞5% 属抢筹过头"
+               if boards_now <= 1 else
+               f"{boards_now} 连板属高位，次日只看竞价强弱与能否回封，断板就走")
         out.append({
             "type": "HOLD", "name": "涨停不追", "priority": "A",
+            "kind": "block",
             "trigger": (f"今日已封涨停（+{stock.get('pct',0):.1f}%{board_txt}）"
                         "，当日不给追买建议"),
-            "entry": "涨停板上买入=追明牌，炸板就是日内大面；次日按回踩/接力口径再看",
+            "entry": f"涨停板上买入=追明牌，炸板就是日内大面；要买等次日 —— {nxt}",
             "stop": "已持仓：次日炸板转弱按卖出信号离场，不恋战",
             "target": "—",
             "position": "0%（当日新增）",
@@ -246,17 +287,23 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     ma5 = ind.ma([b["close"] for b in bars], 5)
     ma10 = ind.ma([b["close"] for b in bars], 10)
     hold_before = cfg.get("M5_position", {}).get("hold_before_boards", 5)
-    if 2 <= boards_recent < hold_before and ma5 and close <= ma5 * 1.03 and close >= ma5 * 0.95:
-        stop2 = max(ma10, close * 0.93) if ma10 else close * 0.93
+    # 回踩成立的前提是**趋势没坏**：现价必须还在 10 日线上方。
+    # 否则（现价已在 10 日线下方）那是破位不是回踩 —— 同时会与 S3 破位止损
+    # 打架（同一只票既说"回踩可买"又说"破位离场"），且止损位会高于现价。
+    if (2 <= boards_recent < hold_before and ma5 and ma10 and close > ma10
+            and close <= ma5 * 1.03 and close >= ma5 * 0.95):
+        # 止损 = max(10日线, 现价×(1-7%))：10日线是结构位，-7% 是单笔最大亏损上限
+        stop2 = _stop_price(ma10, close)
         out.append({
             "type": "B2", "name": "龙头回踩",
             "priority": "A",
+            "kind": "buy",
             "trigger": (f"近5日 {boards_recent} 次涨停的龙头回踩，现价 {close:.2f} "
                         f"贴近5日线 {ma5:.2f}（缩量不破）"),
             "entry": (f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳；"
                       f"直接高开走强不追，等回踩再说"),
             "stop": (f"有效跌破 {stop2:.2f}（约 {_loss_pct(stop2, close)}，"
-                     f"10日线/前低双保险）离场"),
+                     f"10日线与最大亏损双保险）离场"),
             "target": f"龙头走到 {hold_before} 板前不折腾，吃主升",
             "position": "去弱留强后最强者的加仓位（40-60%）",
             "note": "去弱留强不带幻想，砍错不心疼",
@@ -268,6 +315,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B3", "name": "缩量红盘低吸",
             "priority": "B",
+            "kind": "buy",
             "trigger": (f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 "
                         f"{stock.get('pct',0):.2f}%，控盘好、筹码结构稳"),
             "entry": (f"不追高：回落到 {close*0.99:.2f} 附近分两笔低吸"
@@ -287,6 +335,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B4", "name": "尾盘博弈",
             "priority": "C",
+            "kind": "buy",
             "trigger": f"节前最后交易日（距下一交易日 {gap} 天），已到尾盘窗口（14:00后）",
             "entry": "现在到 14:30 之间小仓位入场，避开假期消息面的不确定性",
             "stop": "次日低开超3% 走人",

@@ -1,0 +1,147 @@
+# -*- coding: utf-8 -*-
+"""买卖点契约测试 —— 详情页「买点清晰化」的回归护栏。
+
+背景（用户实测反馈）：股票详情页「买点不清晰、逻辑有错误」。
+根因与修复见 core/trading.py 顶部注释，本测试把四条契约钉死：
+
+  1. B1 首板试错的门禁必须与「今日结论」一致：页面对 probe/follow/climax
+     都写着"可以出手 / 小仓位试水"，就必须都给首板买点；ebb 不给（退潮
+     只允许试错仓）。以前只在 probe/follow 给，climax 期一个买点都没有。
+  2. buy_signals 用 kind 区分「可执行买点(buy)」与「禁买提示(block)」，
+     且可执行买点永远排在前面 —— 消费者不能把 block 当买点展示。
+  3. B1 的「分两笔」口径自洽：高开>5% 时第一笔根本没成交，不能写
+     "补另一半"（原文的逻辑错误）。
+  4. 当日涨停时首板仍给 B1（次日口径），同时给一条 block 提示，
+     两者并存且互不矛盾。
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ["STOCK_DATA_DIR"] = tempfile.mkdtemp(prefix="buycontract_")
+
+from core import strategy_config as sc   # noqa: E402
+from core import trading                # noqa: E402
+
+okc = badc = 0
+
+
+def ok(cond, msg):
+    global okc, badc
+    if cond:
+        okc += 1
+        print("  OK  " + msg)
+    else:
+        badc += 1
+        print("  XX  " + msg)
+
+
+CFG = sc.default_config() if hasattr(sc, "default_config") else None
+if CFG is None:
+    CFG = sc.load_config()
+
+BARS = [{"date": f"2026-09-{i:02d}", "open": 10, "close": 10 + i * 0.01,
+         "high": 10.1, "low": 9.9, "volume": 100000} for i in range(1, 40)]
+
+VOL = {"mode": "comfort_short", "advice": "量能舒适", "red_flag": False}
+
+
+def sent(stage, can_trade=True, trial_only=False, tw=0.05):
+    return {"stage": stage, "can_trade": can_trade, "trial_only": trial_only,
+            "ebb_trial_weight": tw, "note": "note", "label": stage, "signals": []}
+
+
+def stock(boards=1, pct=10.0):
+    return {"code": "sh600000", "name": "测试", "sector": "电池",
+            "price": 10.4, "pct": pct, "zt_boards": boards,
+            "turnover": 5.0, "fund_style": {"type": "unknown"}}
+
+
+def kinds(sigs):
+    return [(s.get("type"), s.get("kind"), bool(s.get("blocked"))) for s in sigs]
+
+
+def main():
+    print("[1] 首板：probe / follow / climax 都给 B1（与「可以出手」一致）")
+    for st in ("probe", "follow", "climax"):
+        sig = trading.buy_signals(stock(1), BARS, sent(st), VOL, CFG)
+        first = sig[0] if sig else {}
+        ok(first.get("type") == "B1" and first.get("kind") == "buy",
+           f"{st} → 首条是可执行的 B1（实际 {kinds(sig)[:1]}）")
+
+    print("\n[2] 首板 + 退潮：只给试错仓 B0，不给 B1")
+    s = sent("ebb", can_trade=False, trial_only=True)
+    sig = trading.buy_signals(stock(1), BARS, s, VOL, CFG)
+    ok(len(sig) == 1 and sig[0].get("type") == "B0", "退潮首板 → 唯一一条 B0 试错仓")
+    ok(sig[0].get("kind") == "buy" and sig[0].get("trial") is True, "B0 是可执行买点且标记试错")
+
+    print("\n[3] 连板（2板）+ climax：不给买点，只给 block 提示")
+    sig = trading.buy_signals(stock(2), BARS, sent("climax"), VOL, CFG)
+    ok(sig and sig[0].get("type") == "HOLD", "2板 → HOLD")
+    ok(sig[0].get("kind") == "block" and sig[0].get("blocked") is True, "标记为 block/blocked")
+
+    print("\n[4] 契约：kind ∈ {buy, block}，blocked ⟺ kind=='block'，买点永远在前")
+    cases = [(stock(1), sent("climax")), (stock(2), sent("climax")),
+             (stock(1), sent("ebb", can_trade=False, trial_only=True))]
+    for stk, se in cases:
+        sig = trading.buy_signals(stk, BARS, se, VOL, CFG)
+        ok(all(s.get("kind") in ("buy", "block") for s in sig),
+           f"kind 合法：{kinds(sig)}")
+        ok(all((s.get("kind") == "block") == bool(s.get("blocked")) for s in sig),
+           "block ⟺ blocked")
+        seen_block = False
+        bad_order = False
+        for s in sig:
+            if s.get("kind") == "block":
+                seen_block = True
+            elif seen_block:
+                bad_order = True
+        ok(not bad_order, "可执行买点没有被 block 提示挤到后面")
+
+    print("\n[5] B1「分两笔」口径自洽（高开>5% 不是补另一半）")
+    sig = trading.buy_signals(stock(1), BARS, sent("climax"), VOL, CFG)
+    e = sig[0].get("entry", "")
+    ok("① 高开 0~3% 先买一半" in e, "第一笔：高开 0~3% 先买一半")
+    ok("② 高开 3~5% 先观望" in e, "第二笔：高开 3~5% 观望后再补")
+    ok("③ 高开＞5%" in e and "不追" in e, "高开>5% 明确不追（不是补另一半）")
+
+    print("\n[6] 当日涨停：首板 B1 与「涨停不追」并存且不矛盾")
+    sig = trading.buy_signals(stock(1, pct=10.04), BARS, sent("climax"), VOL, CFG)
+    types = [s.get("type") for s in sig]
+    ok(types[0] == "B1" and "HOLD" in types, f"既有 B1 也有 HOLD：{types}")
+    hold = next(s for s in sig if s.get("type") == "HOLD")
+    ok(any(k in hold.get("entry", "") for k in ("次日", "今日", "下个交易日")),
+       "「涨停不追」给出次日/下一场的观察口径")
+
+    print("\n[7] 止损必须落在现价下方（否则会把止损写成止盈）")
+    # 结构位在现价之上（破位票的 10 日线）：不能取 max 得到一个高于现价的"止损"
+    sp = trading._stop_price(12.0, 10.0)
+    ok(sp < 10.0, f"_stop_price(结构位12, 现价10) = {sp:.2f} < 现价")
+    ok(trading._stop_price(9.0, 10.0) < 10.0, "正常结构位也在现价下方")
+    ok(trading._loss_pct(9.04, 8.75) == "—",
+       "止损高于现价 → 百分比显示 '—'（不是 +3.3%）")
+    ok(trading._loss_pct(8.14, 8.75) == "-7.0%", "正常止损 → 负数百分比")
+
+    print("\n[8] B2 龙头回踩：现价跌破 10 日线时不算回踩（否则与 S3 破位止损打架）")
+    closes = [10.4] * 5 + [8.6, 9.46, 10.4, 9.5, 9.5]
+    b2b = [{"date": f"2026-09-{i + 1:02d}", "open": c, "close": c,
+            "high": c * 1.005, "low": c * 0.995, "volume": 100000}
+           for i, c in enumerate(closes)]
+    ma5 = sum(closes[-5:]) / 5
+    ma10 = sum(closes[-10:]) / 10
+    close = closes[-1]
+    ok(close < ma10 and ma5 * 0.95 <= close <= ma5 * 1.03,
+       f"构造成立：现价 {close} 在 5 日线带内、但已在 10 日线 {ma10:.2f} 下方")
+    sig = trading.buy_signals(stock(0, pct=-1.0), b2b, sent("climax"), VOL, CFG)
+    ok(not any(s.get("type") == "B2" for s in sig),
+       f"现价在 10 日线下方 → 不出 B2（实际 {[s.get('type') for s in sig]}）")
+
+    print(f"\n===== {okc} 通过 / {badc} 失败 =====")
+    return 1 if badc else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

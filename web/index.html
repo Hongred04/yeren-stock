@@ -1248,20 +1248,31 @@ async function showDetail(code,tr){
 function renderDetail(p){
   const g=p.graph_detail, cfg=CONFIG.M4_aesthetic;
   const blocked=!p.tradable;
-  const buy=(p.buy_signals||[])[0];
-  const buyBlocked=blocked||(buy&&buy.blocked);
+  // 买点列表里混着两类东西：可执行买点（kind=buy）和「当日别买」提示（kind=block）。
+  // 必须先拆开 —— 主行动卡只认可执行买点；禁买提示单独摆，绝不能再混进
+  // 「其他买入时机」（以前"涨停不追"被当成一个买入时机列出来，自相矛盾）。
+  // 兼容旧缓存报告：老数据没有 kind，用 blocked 兜底。
+  const buys=p.buy_signals||[];
+  const actionable=buys.filter(s=>s.kind!=='block'&&!s.blocked);
+  const blockers=buys.filter(s=>s.kind==='block'||s.blocked);
+  const buy=actionable[0];
+  const buyBlocked=blocked||!buy;
+  const blk=blockers[0];
 
   // 顶部行动卡：这一块最重要，直接给"买不买/多少/在哪/亏了走哪"
   let planHtml;
   if(buyBlocked){
+    const why=(blk&&blk.trigger)||p.block_note||'当前不满足买入条件';
+    const nxt=(blk&&blk.entry)||'';
     planHtml=`<div class="plan">
       <div class="pt">今天该怎么处理这只股票</div>
-      <div style="font-size:14px;font-weight:800;color:var(--red);margin-bottom:10px">🚫 不要买</div>
-      <div style="font-size:13px;color:var(--tx2);line-height:1.8">${esc((buy&&buy.trigger)||p.block_note)}</div>
-      ${buy&&buy.stop&&buy.stop!=='—'?`<div style="font-size:12.5px;color:#8b2530;margin-top:7px">※ ${esc(buy.stop)}</div>`:''}</div>`;
+      <div style="font-size:14px;font-weight:800;color:var(--red);margin-bottom:10px">🚫 今天不要买</div>
+      <div style="font-size:13px;color:var(--tx2);line-height:1.8">${esc(why)}</div>
+      ${nxt?`<div style="font-size:12.5px;color:#8b2530;margin-top:7px">※ ${esc(nxt)}</div>`:''}
+      ${blk&&blk.stop&&blk.stop!=='—'?`<div style="font-size:12.5px;color:#8b2530;margin-top:5px">※ ${esc(blk.stop)}</div>`:''}</div>`;
   } else if(buy){
     planHtml=`<div class="plan">
-      <div class="pt">今天该怎么处理这只股票</div>
+      <div class="pt">今天该怎么处理这只股票 <span class="pill red" style="margin-left:6px">${esc(buy.name)} · ${buy.type}</span></div>
       <div class="cols">
         <div class="p4 g"><div class="k">怎么买</div><div class="v" style="font-size:13px">${esc(buy.entry)}</div></div>
         <div class="p4 r"><div class="k">亏了走哪（止损）</div><div class="v" style="font-size:13px">${esc(buy.stop)}</div></div>
@@ -1269,7 +1280,11 @@ function renderDetail(p){
         <div class="p4"><div class="k">什么时候满足</div><div class="v" style="font-size:13px">${esc(buy.trigger)}</div></div>
       </div>
       <div style="font-size:12.5px;color:var(--tx2);margin-top:11px;line-height:1.75">
-        目标：${esc(buy.target)}${buy.note?'<br>※ '+esc(buy.note):''}</div></div>`;
+        目标：${esc(buy.target)}${buy.note?'<br>※ '+esc(buy.note):''}</div>
+      ${blk?`<div style="margin-top:10px;padding-top:9px;border-top:1px dashed var(--line2);
+        font-size:12.5px;color:#8b2530;line-height:1.7">
+        ⚠️ 当日提示 · ${esc(blk.name)}：${esc(blk.entry||blk.trigger)}</div>`:''}
+    </div>`;
   } else {
     planHtml=`<div class="plan"><div class="pt">今天该怎么处理这只股票</div>
       <div style="font-size:14px;font-weight:800;color:var(--org)">⏸ 暂时没有明确的买入信号</div>
@@ -1277,7 +1292,7 @@ function renderDetail(p){
         可以放进观察名单，等出现首板、回踩或缩量红盘等信号再动手。</div></div>`;
   }
 
-  const allBuy=(p.buy_signals||[]).slice(1).map(s=>`
+  const allBuy=actionable.slice(1).map(s=>`
     <div class="sig ${s.priority}">
       <div class="st"><span class="pill ${s.priority==='A'?'red':s.priority==='B'?'org':'blu'}">${s.priority}优先</span>
         <b>${esc(s.name)}</b><span class="fl" style="font-size:11.5px">${s.type}</span></div>
@@ -1418,12 +1433,14 @@ function renderDetail(p){
       </div>
       <div>
         <div style="font-size:14px;font-weight:800;margin-bottom:9px;color:var(--red)">其他买入时机</div>
-        ${allBuy||'<div class="fl" style="font-size:13px">只有上面那一个时机</div>'}
+        ${allBuy||`<div class="fl" style="font-size:13px">${
+          actionable.length?'只有上面那一个时机':'当前没有可执行的买点 —— 等信号出现再动手'}</div>`}
       </div>
     </div>
 
     <div style="margin-top:18px;padding-top:15px;border-top:1px solid var(--line2)">
-      <div style="font-size:14px;font-weight:800;margin-bottom:10px;color:var(--grn)">什么时候卖</div>
+      <div style="font-size:14px;font-weight:800;margin-bottom:10px;color:var(--grn)">什么时候卖
+        <span class="fl" style="font-size:11.5px;font-weight:600">（已持仓才用得上；空仓看上面的买点即可）</span></div>
       ${sellHtml}</div>
 
     <div style="margin-top:18px;padding-top:15px;border-top:1px solid var(--line2)">

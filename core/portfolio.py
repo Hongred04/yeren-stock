@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 
 from . import fundstyle
+from . import indicators as ind
 from . import paths
 from . import trading
 from . import universe
@@ -108,12 +109,15 @@ def watch_remove(code: str) -> dict:
 # ---------------------------------------------------------------- 体检
 
 def _verdict(sell_sigs: list[dict], fund_style: dict) -> tuple[str, str]:
-    """卖出信号 → 行动档位。"""
-    urgent = [s for s in sell_sigs if s.get("urgency") == "critical"]
-    if any(s.get("type") in ("S1", "S4", "S7", "S8") for s in urgent) or urgent:
+    """卖出信号 → 行动档位。
+
+    critical 一律清仓（S1 退潮清仓 / S4 A字杀 / S7 断板节奏破坏 / S8 庄股）。
+    原实现写成 `any(type in (...)) or urgent`，其中 any(...) 恒被 urgent 短路，
+    是死代码，这里按真实语义收拢。
+    """
+    if any(s.get("urgency") == "critical" for s in sell_sigs):
         return "清仓离场", "critical"
-    high = [s for s in sell_sigs if s.get("urgency") == "high"]
-    if high:
+    if any(s.get("urgency") == "high" for s in sell_sigs):
         return "减仓", "high"
     if sell_sigs:
         return "观察/减半", "medium"
@@ -145,10 +149,14 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
         tot_mv += mv
 
         fs = fundstyle.classify(bars, code, _f(snap.get("float_mv")) / 1e8, cfg) if bars else {}
+        # zt_boards 不能写死 0：sell_signals 的 S2（龙头止盈，≥5 连板）就是靠它判的，
+        # 写死 0 等于持仓体检永远不出止盈信号。持仓拿不到当日涨停池，就用
+        # K线自己数连板（口径与候选股一致）。
+        boards_now = ind.consecutive_boards(bars, code) if bars else 0
         pseudo = {"code": code, "name": h.get("name") or snap.get("name", ""),
                   "price": price, "pct": _f(snap.get("pct")),
                   "turnover": _f(snap.get("turnover")),
-                  "zt_boards": 0, "fund_style": fs}
+                  "zt_boards": boards_now, "fund_style": fs}
         sells = trading.sell_signals(pseudo, bars, sentiment, volume, cfg) if bars else []
         if not bars:
             sells = [{"type": "—", "name": "无K线数据", "priority": "C",

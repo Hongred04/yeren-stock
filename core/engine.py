@@ -455,9 +455,11 @@ def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict,
         score += 0.08
         reasons.append(f"距60日高回撤{dd*100:.0f}%，洗盘空间充分")
     elif dd < 3:
-        reasons.append(f"处于60日新高（回撤{dd*100:.0f}%），位置偏高、获利盘压力大")
+        # 负向结论要进 warnings —— 详情页「为什么选它」列的是理由，
+        # 把"位置偏高、获利盘压力大"写进理由列，等于自相矛盾
+        warns.append(f"处于60日新高（回撤{dd*100:.0f}%），位置偏高、获利盘压力大")
     elif dd > 60:
-        reasons.append(f"距高点回撤{dd*100:.0f}%，趋势已破，非洗盘而是走弱")
+        warns.append(f"距高点回撤{dd*100:.0f}%，趋势已破，非洗盘而是走弱")
 
     # 筹码分布量化（估算）：获利盘 / 成本乖离 / 集中度 —— 只做小权重加分与提示，
     # 不动选股主口径；详情页展示完整分布
@@ -522,7 +524,7 @@ def _price_mv_score(snap: dict, cfg_a: dict) -> tuple[float, list[str], list[str
         reasons.append(f"流通市值{mv:.1f}亿<{mv_max:.0f}亿，资金撬得动")
     elif mv <= mv_mid:
         score += 0.25
-        reasons.append(f"流通市值{mv:.1f}亿偏大，弹性下降")
+        warns.append(f"流通市值{mv:.1f}亿偏大，弹性下降")
     else:
         score += 0.05
         warns.append(f"流通市值{mv:.1f}亿>={mv_mid:.0f}亿属中军/趋势票，不在短线审美范围")

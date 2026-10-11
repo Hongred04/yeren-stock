@@ -517,12 +517,19 @@ function render(fromCache,ts){
     t3+='<div class="empty">今日没有符合条件的候选<br>（退潮期或数据不足时很正常）</div>';
   }
   picks.forEach((p,i)=>{
-    const bs=(p.buy_signals||[])[0]||{};
+    // 优先展示可执行买点；全是「当日别买」提示时才退回第一条，别再当买点看
+    const allB=p.buy_signals||[];
+    const bs=allB.find(x=>x.kind!=='block'&&!x.blocked)||allB[0]||{};
     const tags=[];
     if(p.zt_boards) tags.push(`<span class="tag red">${p.zt_boards}板</span>`);
     if(p.hot_rank) tags.push(`<span class="tag org">人气第${p.hot_rank}</span>`);
-    if(p.fund_style==='institutional') tags.push('<span class="tag blu">机构票</span>');
-    else if(p.fund_style==='hot_money') tags.push('<span class="tag blu">游资票</span>');
+    // fund_style 是对象（{type,label,...}），不是字符串 —— 以前拿它跟
+    // 'institutional'/'hot_money' 直接比，恒为 false，标签永远不显示；
+    // 且游资的键名是 hotmoney 不是 hot_money。两处都修。
+    const fst=(p.fund_style||{}).type;
+    if(fst==='institutional') tags.push('<span class="tag blu">机构票</span>');
+    else if(fst==='hotmoney') tags.push('<span class="tag blu">游资票</span>');
+    else if(fst==='zhuang') tags.push('<span class="tag gry">庄股·回避</span>');
     const mr=(p.moneyflow||{}).main;
     if(mr) tags.push(`<span class="tag ${mr>0?'red':'grn'}">主力${mr>0?'+':''}${num(mr,2)}亿</span>`);
     t3+=`<div class="pick" onclick="openSheet(${i})">
@@ -593,7 +600,10 @@ function render(fromCache,ts){
 /* ── 抽屉：候选详情 ── */
 function openSheet(i){
   const p=(window.__picks||[])[i]; if(!p) return;
-  const buys=p.buy_signals||[], sells=p.sell_signals||[], reasons=p.reasons||[];
+  // 拆开「可执行买点」与「当日别买提示」—— 别把"涨停不追"当买点列出来
+  const allB=p.buy_signals||[], sells=p.sell_signals||[], reasons=p.reasons||[];
+  const buys=allB.filter(x=>x.kind!=='block'&&!x.blocked);
+  const blocks=allB.filter(x=>x.kind==='block'||x.blocked);
   const g=p.graph_detail||{};
   const kv=[];
   kv.push(['位置',g.base_pos!=null?Math.round(g.base_pos*100)+'%':'—']);
@@ -608,7 +618,10 @@ function openSheet(i){
     ${buys.length?`<div class="sect"><div class="k">买点</div>${buys.map(b=>`
       <div class="item"><b>${esc(b.name)}</b>${b.position?`（${esc(b.position)}）`:''}<br>
         ${esc(b.entry||'')}${b.stop?`<br><span class="fl">止损：${esc(b.stop)}</span>`:''}
-        ${b.target?`<br><span class="fl">目标：${esc(b.target)}</span>`:''}</div>`).join('')}</div>`:''}
+        ${b.target?`<br><span class="fl">目标：${esc(b.target)}</span>`:''}</div>`).join('')}</div>`
+      :`<div class="sect"><div class="k">买点</div><div class="item fl">当前没有可执行的买点 —— 等信号出现再动手</div></div>`}
+    ${blocks.length?`<div class="sect"><div class="k">当日提示</div>${blocks.map(b=>`
+      <div class="item"><b>${esc(b.name)}</b>：${esc(b.entry||b.trigger||'')}</div>`).join('')}</div>`:''}
     ${sells.length?`<div class="sect"><div class="k">卖出提醒</div>${sells.map(s=>`
       <div class="item"><b>${esc(s.name)}</b>：${esc(s.action||s.trigger||'')}</div>`).join('')}</div>`:''}
     ${reasons.length?`<div class="sect"><div class="k">为什么选它</div>
