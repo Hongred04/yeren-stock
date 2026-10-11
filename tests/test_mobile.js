@@ -132,8 +132,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(mobSrc.includes('st.progress') && !mobSrc.includes("st.msg"),
      '进度字段名为 progress（与 /api/status 一致）');
 
-  // ⑧ 数据源提醒条：受限时要说人话（不摆冷却秒数/让出次数等技术细节）
-  w.fetch = async (u, opt) => {
+  // ⑧ 东财受限 → 引导去网页做滑块验证（可操作，不是一条死提示）
+  let confirmCalls = 0, openedUrl = '';
+  w.confirm = () => { confirmCalls++; return false; };   // 记录弹窗，但不真的跳转
+  w.open = (u) => { openedUrl = String(u); return {}; };
+  w.fetch = async (u) => {
     const url = String(u);
     if (url.includes('/api/sources')) {
       return { ok: true, status: 200, json: async () => ({
@@ -145,13 +148,67 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   };
   await w.refresh(true);
   await new Promise(r => setTimeout(r, 80));
-  const todayTxt = $('tab-today').textContent;
-  ok(todayTxt.includes('数据源暂时受限'), '数据源受限时显示提醒条');
-  ok(todayTxt.includes('东财'), '提醒条指名道姓（东财）');
-  const warnEl = w.document.querySelector('#tab-today .srcwarn');
+
+  const bar = $('srcBar');
+  ok(!!bar && bar.textContent.includes('东财') && bar.textContent.includes('受限'),
+     '东财受限时显示提醒条');
+  const warnEl = bar && bar.querySelector('.srcwarn');
+  ok(!!warnEl, '提醒条挂在 #srcBar（独立于 Tab，缓存路径也能提示）');
   const warnTxt = warnEl ? warnEl.textContent : '';
-  ok(warnEl && !/冷却|让出|push2|ulist|\.com/.test(warnTxt),
-     '提醒条只说人话（不含冷却秒数/接口名/让出次数）');
+  ok(!/冷却|让出|ulist|\.com/.test(warnTxt),
+     '提醒条不摆技术细节（冷却秒数/接口名/让出次数）');
+  ok(/打开东财网页/.test(warnTxt) && /我已验证/.test(warnTxt),
+     '提醒条给出「打开东财验证」「我已验证重试」两个入口');
+  ok(confirmCalls >= 1, '检测到受限会弹窗申请打开东财网页');
+  w.openEmPage();
+  ok(/quote\.eastmoney\.com/.test(openedUrl),
+     '「打开东财网页」指向东财行情页：' + openedUrl);
+
+  // 同一轮受限不重复打扰（1 小时节流）—— 否则每次轮询都弹窗
+  const before = confirmCalls;
+  await w.fetchSources();
+  ok(confirmCalls === before, '同一轮受限不会反复弹窗（节流生效）');
+
+  // 抽屉里同样有入口（横幅被划走/想看 Cookie 状态时用）
+  await w.openSrcSheet();
+  const sheetTxt = $('sheetBody').textContent;
+  ok($('sheet').classList.contains('on') && sheetTxt.includes('打开东财网页')
+     && sheetTxt.includes('Cookie'), '数据源抽屉可打开，含去验证与 Cookie 入口');
+  w.closeSheet();
+
+  // 非东财受限（新浪）→ 不给"去东财验证"入口（人工验证只对东财成立）
+  w.fetch = async (u) => {
+    if (String(u).includes('/api/sources')) {
+      return { ok: true, status: 200, json: async () => ({
+        blocked: [{ api: 'vip.stock.finance.sina.com.cn/x', fails: 2, seconds_left: 60 }],
+        push2: { cooling_seconds: 0, budget_max: 15, budget_used: 3 }, cookie: {} }) };
+    }
+    return { ok: true, status: 200, json: async () => report };
+  };
+  await w.fetchSources();
+  const barTxt2 = $('srcBar').textContent;
+  ok(barTxt2.includes('新浪') && !barTxt2.includes('打开东财网页'),
+     '只有东财受限才给"去东财验证"入口');
+
+  // 一切正常 → 提醒条不占地方
+  w.fetch = async (u) => (String(u).includes('/api/sources')
+    ? { ok: true, status: 200, json: async () => ({
+        blocked: [], push2: { cooling_seconds: 0, budget_max: 15, budget_used: 2 }, cookie: {} }) }
+    : { ok: true, status: 200, json: async () => report });
+  await w.fetchSources();
+  ok($('srcBar').textContent.trim() === '', '数据源正常时不显示提醒条');
+
+  // ⑨ 数值格式化：非有限数不许漏成 "—%"（pctTxt 曾把 NaN 拼成 "—%"）
+  const probe = JSON.parse(JSON.stringify(report));
+  probe.picks[0].pct = 'abc';          // 非数字 → 必须显示 '—'
+  probe.picks[0].turnover = null;
+  w.fetch = async (u) => ({ ok: true, status: 200,
+    json: async () => (String(u).includes('/api/sources') ? {} : probe) });
+  await w.refresh(true);
+  await new Promise(r => setTimeout(r, 60));
+  const picksTxt = $('tab-picks').textContent;
+  ok(!/—%/.test(picksTxt), '非数字涨跌幅不会渲染成 "—%"');
+  ok(!/Infinity|NaN/.test(picksTxt), '候选列表不出现 Infinity/NaN');
 
   // 全局无 NaN / undefined
   const allTxt = $('tab-today').textContent + $('tab-theme').textContent

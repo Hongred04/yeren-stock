@@ -599,7 +599,7 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
 let REPORT=null, CONFIG=null, SEL=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const f2=(v,d=2)=>(v==null||isNaN(v))?'—':Number(v).toFixed(d);
+const f2=(v,d=2)=>(v==null||!isFinite(Number(v)))?'—':Number(v).toFixed(d);
 const pct=v=>v>0?'up':(v<0?'dn':'fl');
 const STAGE_CN={probe:'新周期刚起步',climax:'情绪高潮，主升阶段',follow:'扩散跟风阶段',
   ebb:'退潮期',unknown:'数据不足',disabled:'已关闭',idle:'待命'};

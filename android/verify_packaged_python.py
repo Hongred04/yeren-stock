@@ -44,8 +44,10 @@ def main():
 
     print("[1] 从 APK 里解出 assets（模拟 MainActivity.extractAssets）")
     # MainActivity.knownAssets 声明的关键资源 —— 必须与 APK 内的实际路径对得上，
-    # 否则清单会静默失配（v1.12.0 的 404 就是这类问题）
-    KNOWN = ["assets/web/index.html", "assets/defaults/strategy.json"]
+    # 否则清单会静默失配（v1.12.0 的 404 就是这类问题）。
+    # mobile.html 是 App 真正加载的页面，必须在清单里。
+    KNOWN = ["assets/web/index.html", "assets/web/mobile.html",
+             "assets/defaults/strategy.json"]
     assets_dir = os.path.join(files_dir, "assets")
     web_dir = os.path.join(assets_dir, "web")
     os.makedirs(web_dir, exist_ok=True)
@@ -94,6 +96,18 @@ def main():
        f"服务返回的页面与 APK 内资源逐字节一致 ({len(page_bytes)}B vs {len(apk_html)}B)")
     ok(len(page_bytes) == os.path.getsize(os.path.join(PROJ, "web", "index.html")),
        "与桌面 web/index.html 同源同版本")
+
+    # App 实际加载的是 mobile.html —— 必须也能取到、且与 APK 内资源一致
+    with urllib.request.urlopen(base + "/mobile.html", timeout=20) as r:
+        mob_bytes = r.read()
+        mob_status = r.status
+    ok(mob_status == 200 and b"<html" in mob_bytes[:400].lower(),
+       f"mobile.html 可访问（{len(mob_bytes)}B）")
+    with open(os.path.join(web_dir, "mobile.html"), "rb") as f:
+        apk_mob = f.read()
+    ok(mob_bytes == apk_mob, "mobile.html 与 APK 内资源逐字节一致")
+    ok(len(mob_bytes) == os.path.getsize(os.path.join(PROJ, "web", "mobile.html")),
+       "与桌面 web/mobile.html 同源同版本")
 
     with urllib.request.urlopen(base + "/api/health", timeout=20) as r:
         h = json.loads(r.read().decode("utf-8"))

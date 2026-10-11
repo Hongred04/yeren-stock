@@ -1,7 +1,9 @@
 package com.yeren.stock
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -131,6 +133,7 @@ class MainActivity : Activity() {
      */
     private val knownAssets = listOf(
         "web/index.html",
+        "web/mobile.html",        // App 实际加载的就是它 —— 漏了清单会只剩目录扫描兜底
         "defaults/strategy.json"
     )
 
@@ -157,11 +160,15 @@ class MainActivity : Activity() {
         runCatching { copyAssetDir("", dst) }
             .onFailure { Log.w(TAG, "目录树扫描失败（已忽略）", it) }
 
+        // App 实际加载的是 mobile.html —— 两个页面都要在。只校验 index.html
+        // 时，mobile.html 缺失会表现为「能连上却没内容」，很难查。
         val index = File(dst, "web/index.html")
-        if (!index.exists() || index.length() <= 0L) {
+        val mobile = File(dst, "web/mobile.html")
+        val bad = listOf(index, mobile).filter { !it.exists() || it.length() <= 0L }
+        if (bad.isNotEmpty()) {
             throw IllegalStateException(
-                "解包后没有可用的看板页面。\n" +
-                    "缺失资源: ${missing.joinToString().ifEmpty { "(清单都读到了)" }}\n" +
+                "解包后没有可用的看板页面（缺: " + bad.joinToString { it.name } + "）。\n" +
+                    "清单缺失: ${missing.joinToString().ifEmpty { "(清单都读到了)" }}\n" +
                     "assets 顶层: " + assets.list("").orEmpty().joinToString() + "\n" +
                     "解包目录: " + dst.absolutePath + "\n" +
                     "web 目录: " + (File(dst, "web").list().orEmpty().joinToString())
@@ -251,6 +258,19 @@ class MainActivity : Activity() {
                 web.visibility = View.VISIBLE
             }
 
+            // 外部链接交给系统浏览器 —— 关键：东财的滑块验证只能在真浏览器里做，
+            // WebView 里做不了；而 window.open() 在未开多窗口支持时返回 null、
+            // 静默失效。页面侧因此用 window.open → location.href 兜底，
+            // 这里把非本地地址拦下来转交系统浏览器，看板本身留在 WebView 不动。
+            override fun shouldOverrideUrlLoading(
+                view: WebView?, request: android.webkit.WebResourceRequest?
+            ): Boolean = handleExternalUrl(request?.url)
+
+            // 旧签名（API < 24）仍会被部分 ROM 调用，保留
+            @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
+                handleExternalUrl(url?.let { Uri.parse(it) })
+
             override fun onReceivedError(
                 view: WebView?, request: android.webkit.WebResourceRequest?,
                 error: android.webkit.WebResourceError?
@@ -263,6 +283,24 @@ class MainActivity : Activity() {
             }
         }
         web.loadUrl("http://127.0.0.1:$port/mobile.html")
+    }
+
+    /**
+     * 非本地地址 → 用系统浏览器打开并拦下（返回 true）。
+     * 本地地址（看板自身）返回 false，交给 WebView 正常加载。
+     * 打不开浏览器时返回 false，至少不让点击变成"没反应"。
+     */
+    private fun handleExternalUrl(uri: Uri?): Boolean {
+        if (uri == null) return false
+        val host = uri.host ?: return false
+        if (host == "127.0.0.1" || host == "localhost") return false
+        return try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "无法用系统浏览器打开: $uri", t)
+            false
+        }
     }
 
     private fun showError(title: String, detail: String) {

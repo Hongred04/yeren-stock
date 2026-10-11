@@ -35,6 +35,12 @@ APK
 关键点：**桌面工程一个文件都没改逻辑**。所有安卓特有的差异收在
 `core/paths.py` 一个文件里 —— 桌面下数据写 `data/`，安卓下写 App 私有目录。
 
+**外部链接走系统浏览器**（v1.23.0）：`MainActivity` 的 `shouldOverrideUrlLoading`
+把非 `127.0.0.1` 的地址一律交给系统浏览器，看板本身留在 WebView 不动。原因：东财
+被限速时要在**网页**上做滑块验证，WebView 里做不了；而 `window.open()` 在未开
+多窗口支持时返回 `null`、静默失效，所以页面侧用 `window.open → location.href`
+兜底，再由这里拦下来转交系统浏览器。
+
 ```
 android/app/src/android_glue/android_boot.py   ← 安卓启动引导（注入目录、起服务）
 android/app/src/main/java/.../MainActivity.kt  ← WebView 外壳（加载 /mobile.html）
@@ -147,9 +153,13 @@ Android 的 `AssetManager` 对带前导斜杠的路径一律返回空列表，�
 接着 `STOCK_WEB_DIR` 根本没被设置，Python 退回只读的源码目录找 `web/` → 404。
 
 现在：空 path 不再加斜杠；解包改为**按显式清单**（`web/index.html`、
-`defaults/strategy.json`）为主、目录树扫描为兜底，不再依赖各家 ROM 的
-`AssetManager` 目录语义；解包失败会**把缺失清单和目录内容直接摆到屏幕上**，
-而不是落到一个看不出所以然的 404 页面。
+`web/mobile.html`、`defaults/strategy.json`）为主、目录树扫描为兜底，不再依赖
+各家 ROM 的 `AssetManager` 目录语义；解包失败会**把缺失清单和目录内容直接摆到
+屏幕上**，而不是落到一个看不出所以然的 404 页面。
+
+> ⚠️ 清单里**必须**有 `web/mobile.html`（App 加载的就是它）。原来只列了
+> `index.html`，mobile.html 全靠目录扫描兜底 —— 扫描一旦失配就是"能连上却没内容"。
+> 改前端入口时同步 `MainActivity.knownAssets` 与 `test_asset_walk.py` 的 `KNOWN`。
 
 ---
 

@@ -26,8 +26,9 @@ import tempfile
 
 # 模拟 APK 的 assets 目录结构
 ASSETS = {
-    "web": ["index.html"],
+    "web": ["index.html", "mobile.html"],
     "web/index.html": b"<html>ok</html>",
+    "web/mobile.html": b"<html>mobile ok</html>",
     "defaults": ["strategy.json"],
     "defaults/strategy.json": b'{"preset":"yeren"}',
 }
@@ -99,7 +100,8 @@ def copy_fixed(am, asset_path, dst):
             copy_fixed(am, child, d)
 
 
-KNOWN = ["web/index.html", "defaults/strategy.json"]
+# 与 MainActivity.knownAssets 保持一致（App 实际加载的是 mobile.html）
+KNOWN = ["web/index.html", "web/mobile.html", "defaults/strategy.json"]
 
 
 def extract_fixed(am, dst):
@@ -118,9 +120,12 @@ def extract_fixed(am, dst):
         copy_fixed(am, "", dst)
     except Exception:
         pass
-    idx = os.path.join(dst, "web", "index.html")
-    if not os.path.exists(idx) or os.path.getsize(idx) == 0:
-        raise RuntimeError(f"解包后没有可用页面；缺失={missing}")
+    # App 实际加载 mobile.html —— 两个页面都要校验（与 MainActivity 一致）
+    bad = [rel for rel in ("web/index.html", "web/mobile.html")
+           if not os.path.exists(os.path.join(dst, rel))
+           or os.path.getsize(os.path.join(dst, rel)) == 0]
+    if bad:
+        raise RuntimeError(f"解包后没有可用页面；缺={bad}；清单缺失={missing}")
     return dst
 
 
@@ -129,7 +134,7 @@ def main():
 
     print("[1] 确认 FakeAssets 还原了那个坑")
     ok(am.list("") == ["web", "defaults"], 'list("") 返回顶层')
-    ok(am.list("web") == ["index.html"], 'list("web") 正常')
+    ok(am.list("web") == ["index.html", "mobile.html"], 'list("web") 正常')
     ok(am.list("/web") == [], 'list("/web") 返回空（前导斜杠的坑）')
     try:
         am.open("/web")
@@ -153,11 +158,15 @@ def main():
     d2 = tempfile.mkdtemp(prefix="fixed_")
     extract_fixed(am, d2)
     idx = os.path.join(d2, "web", "index.html")
+    mob = os.path.join(d2, "web", "mobile.html")
     sj = os.path.join(d2, "defaults", "strategy.json")
     ok(os.path.exists(idx), "web/index.html 已解出")
+    ok(os.path.exists(mob), "web/mobile.html 已解出（App 加载的就是它）")
     ok(os.path.exists(sj), "defaults/strategy.json 已解出")
     with open(idx, "rb") as f:
         ok(f.read() == ASSETS["web/index.html"], "index.html 内容正确")
+    with open(mob, "rb") as f:
+        ok(f.read() == ASSETS["web/mobile.html"], "mobile.html 内容正确")
     shutil.rmtree(d2, ignore_errors=True)
 
     print("\n[4] 清单兜底：即使目录扫描全废也能出页面")
@@ -168,6 +177,8 @@ def main():
     extract_fixed(BrokenList(), d3)      # 目录枚举残废，但 open() 还正常
     ok(os.path.exists(os.path.join(d3, "web", "index.html")),
        "目录枚举失效时，靠显式清单仍能解出页面")
+    ok(os.path.exists(os.path.join(d3, "web", "mobile.html")),
+       "目录枚举失效时，mobile.html 也靠清单解出")
     shutil.rmtree(d3, ignore_errors=True)
 
     print(f"\n===== {ok_cnt} 通过 / {bad_cnt} 失败 =====")
