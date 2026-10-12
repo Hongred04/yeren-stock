@@ -345,6 +345,59 @@ STAGE_CN = {
 }
 
 
+def verdict(sw: dict, rg: dict | None = None) -> dict:
+    """波段「能不能买」结论 —— 把「节点 × 波段阶段」翻译成一句人话。
+
+    详情页顶部要**直接回答**：能不能买、为什么、依据是什么（以前只罗列
+    阶段与入场点，用户得自己拼结论）。can ∈ yes/watch/no。
+      · 节点不允许做长 → 不能买（是节点的问题，不是这只票形态的问题）；
+      · 阶段是入场点 且 节点允许 → 可以买；
+      · 洗盘中 / 滞涨破位 / 无入场点 → 观察或不能买。
+    口径与 trading 的波段买点门禁同源（节点都读 core/regime.py），不会打架。
+    """
+    rg = rg or {}
+    if not sw or not sw.get("ok"):
+        return {"can": "no", "label": "数据不足",
+                "reason": (sw or {}).get("note") or "K线不足 25 根，波段判定做不了",
+                "why": ""}
+    stage = sw.get("stage")
+    node = rg.get("node_label", "")
+    mode = rg.get("mode_name", "")
+    if not rg.get("allow_swing", True):
+        return {"can": "no", "label": "当前节点不做长",
+                "reason": f"{node}（{mode}）—— 波段（做长）当前不成立，题材只按短线纪律做",
+                "why": "同样的票，主升期捂是机会，退潮/缩量期捂是绞肉机 —— "
+                       "不是标的的事，是节点的事"}
+    if stage in ("first", "second", "wave2") and sw.get("entry"):
+        e = sw["entry"]
+        if e.get("type") == "W3":
+            reason = (f"第二波接入：第一波涨 {e.get('gain', 0)*100:.0f}%、"
+                      f"回调 {e.get('pullback', 0)*100:.0f}%，5日线重新拐头、"
+                      f"均线{'高度粘合' if e.get('converged') else '尚未粘合'} —— "
+                      "等放量大阳突破后的**回调**介入")
+        elif e.get("type") == "W2":
+            reason = (f"第二入场点：回踩 20 日线 {e.get('level')} 附近介入"
+                      f"（{'缩量回踩·弱庄形态更可靠' if e.get('shrink') else '量能待确认'}）")
+        else:
+            reason = (f"第一入场点：5日线上穿所有均线 + 20日线拐头向上，"
+                      f"回踩 {e.get('line')} {e.get('level')} 建第一笔"
+                      f"（{'爆量确认' if e.get('burst_ok') else '量能待确认'}）")
+        return {"can": "yes", "label": f"可以买（{e.get('name', '波段入场点')}）",
+                "reason": reason,
+                "why": "波段是平常打法 —— 买在相对低点、扛住洗盘震仓，是迎接主升的途径"}
+    if stage == "wash":
+        return {"can": "watch", "label": "观察（洗盘中）",
+                "reason": sw.get("note") or "缩量回踩=洗盘，等企稳信号再说",
+                "why": "缩量回踩是洗盘、放量破位才走 —— 没企稳别急着接"}
+    if stage in ("stall", "break"):
+        return {"can": "no", "label": "不能买（离场信号）",
+                "reason": sw.get("note") or ("高位放量滞涨" if stage == "stall" else "放量破位"),
+                "why": "高位放量滞涨=有人出货，先落袋；放量破位=逻辑坏了，先离场"}
+    return {"can": "watch", "label": "持有（无新入场点）",
+            "reason": sw.get("note") or "当前不在入场点",
+            "why": "已持有则沿 5 日线持有；小阳线爬坡不动手，突然加速=派发"}
+
+
 def evaluate(bars: list[dict], code: str = "", cfg: dict | None = None) -> dict:
     """波段体系综合判定。返回可直接给前端渲染的结构。"""
     c = _cfg(cfg)

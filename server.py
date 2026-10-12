@@ -270,6 +270,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "cookie": ds.cookie_status(),
                                  "blocked": ds.em_blocked(),
                                  "push2": ds.push2_status(),
+                                 # 通达信(mootdx)：K线首选源是否生效（装了+连得上才算）
+                                 "tdx": ds.tdx_status(),
                                  # 数据健康度：哪些关键数据这轮降级/用的旧快照
                                  "health": ds.data_health()})
             elif path == "/api/stock":

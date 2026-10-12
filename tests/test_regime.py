@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import engine          # noqa: E402
 from core import outlook         # noqa: E402
 from core import regime          # noqa: E402
+from core import swing           # noqa: E402
 from core import trading         # noqa: E402
 
 okc = badc = 0
@@ -136,9 +137,37 @@ def main():
     ok("nature" in fit_th and fit_th["key"] in ("swing", "short", "avoid"),
        "nature 不改动既有 key（打法标签保持原样）")
 
+    print("[8] swing.verdict 能不能买（节点 × 波段阶段）")
+    sw_first = {"ok": True, "stage": "first", "note": "状态", "entry": {
+        "type": "W1", "name": "波段第一入场点", "line": "10日线",
+        "level": 10.0, "burst_ok": True}}
+    v_yes = swing.verdict(sw_first, regime.classify({"stage": "follow"}, {"mode": "peak_swing"}))
+    ok(v_yes["can"] == "yes" and "可以买" in v_yes["label"],
+       f'起步/扩散 + 第一入场点 → 可以买（{v_yes["label"]}）')
+    ok("回踩" in v_yes["reason"], "「可以买」的原因给出具体入场位")
+    v_node = swing.verdict(sw_first, regime.classify({"stage": "ebb"}, {"mode": "peak_swing"}))
+    ok(v_node["can"] == "no" and "不做长" in v_node["label"],
+       f'退潮节点 → 不能买（{v_node["label"]}）')
+    sw_stall = {"ok": True, "stage": "stall", "note": "高位放量滞涨"}
+    v_stall = swing.verdict(sw_stall, regime.classify({"stage": "follow"}, {"mode": "peak_swing"}))
+    ok(v_stall["can"] == "no" and "离场" in v_stall["label"],
+       f'滞涨 → 不能买（{v_stall["label"]}）')
+    v_bad = swing.verdict({"ok": False, "note": "K线不足 25 根"}, {})
+    ok(v_bad["can"] == "no" and "数据不足" in v_bad["label"],
+       "K线不足 → 数据不足/不能买")
+
+    print("[9] 通达信软依赖：未装 / 不可用时优雅降级（不抛异常）")
+    from core import datasource as ds
+    ok(isinstance(ds.tdx_status(), dict) and "available" in ds.tdx_status(),
+       "tdx_status() 可查询（数据源面板用）")
+    _saved = ds._TDX_AVAILABLE
+    ds._TDX_AVAILABLE = False
+    ok(ds._kline_from_tdx("sh600519", 10) == [],
+       "通达信不可用 → _kline_from_tdx 返回空列表、不抛异常（自动退回腾讯/新浪）")
+    ds._TDX_AVAILABLE = _saved
+
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     sys.exit(1 if badc else 0)
-
 
 if __name__ == "__main__":
     main()

@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """数据引擎：行情快照 / 日K线 / 情绪池（涨停、跌停、炸板）。
 
-数据源（沙箱内实测可用）：
-  1. 腾讯 qt.gtimg.cn     —— 批量实时快照（60只/请求，0.5s）
-  2. 腾讯 web.ifzq.gtimg.cn —— 前复权日K线（单只/请求）
-  3. 东财 push2ex         —— 涨停池 / 跌停池 / 炸板池
-  4. 腾讯 qt.gtimg.cn     —— 指数快照（量能测算）
+数据源优先级（对齐 a-stock-data 技能：**能不碰东财就不碰**）：
+  1. 通达信 mootdx (TCP)     —— 前复权日K线（**首选**，不在 IP 黑名单；软依赖，
+                                未安装则自动跳过，不影响安卓包）
+  2. 腾讯 qt.gtimg.cn        —— 批量实时快照 / 指数快照（60只/请求）
+  3. 腾讯 web.ifzq.gtimg.cn  —— 日K线次选（多子域自动降级）
+  4. 新浪 quote.../klc_kl.js —— 日K线兜底
+  5. 东财（**仅独有数据，最后手段，必须限速**）：push2ex=涨停/跌停/炸板池；
+     push2 ulist.np=板块/资金流/涨跌家数；datacenter-web=龙虎榜。
+     东财是按频率封（1 分钟 ≥200 次即触发），不是按路径封 —— 少打、别撞。
 """
 from __future__ import annotations
 
@@ -924,6 +928,116 @@ SINA_KLINE = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/
               "CN_MarketData.getKLineData?symbol={code}&scale=240&ma=5&datalen={n}")
 
 
+# ---------------------------------------------------------------- 通达信（mootdx）
+# 数据源优先级（对齐 a-stock-data 技能）：**通达信(mootdx) TCP 不封 IP → 首选**；
+# 腾讯 → 次选；新浪 → 兜底。东财只用于它**独有**的数据（涨停/跌停/炸板池、
+# 龙虎榜、资金流、研报、新闻），且必须限速 —— 东财是按频率封，不是按路径封。
+#
+# mootdx 是**软依赖**：装了就用它打头阵，没装（或连不上 / 连续失败到阈值）
+# 自动退回腾讯/新浪，不硬依赖、不影响安卓打包（安卓包不带 mootdx，直接走腾讯）。
+try:
+    from mootdx.quotes import Quotes as _TdxQuotes
+    _TDX_AVAILABLE = True
+except Exception:
+    _TdxQuotes = None
+    _TDX_AVAILABLE = False
+
+_tdx_local = threading.local()
+_tdx_lock = threading.Lock()
+_tdx_fail = 0
+_tdx_probed = False
+TDX_FAIL_LIMIT = 3      # 连续失败到此数 → 本次会话弃用通达信，防拖慢全市场扫描
+
+
+def _tdx_client():
+    """本线程的 mootdx 连接（惰性建、线程内复用）。不可用/已弃用 → None。
+
+    ★ 一次性健康探测：首次建连后**试拉一次真实K线**，拿不到就立刻全局弃用 ——
+    否则在连不上的网络里，每次 K 线调用都要白等几秒（全市场扫描会明显变慢）。
+    探测只做一次、加锁串行，失败后 _tdx_fail 直接顶到上限。
+    """
+    global _tdx_fail, _tdx_probed
+    if not _TDX_AVAILABLE or _tdx_fail >= TDX_FAIL_LIMIT:
+        return None
+    cli = getattr(_tdx_local, "cli", None)
+    if cli is not None:
+        return cli
+    with _tdx_lock:
+        if _tdx_fail >= TDX_FAIL_LIMIT:
+            return None
+        try:
+            cli = _TdxQuotes.factory(market="std")
+        except Exception:
+            _tdx_fail = TDX_FAIL_LIMIT
+            return None
+        if not _tdx_probed:
+            _tdx_probed = True
+            try:
+                df = cli.bars(symbol="600519", frequency=9, offset=3)
+                if df is None or len(df) == 0:
+                    _tdx_fail = TDX_FAIL_LIMIT
+                    return None
+            except Exception:
+                _tdx_fail = TDX_FAIL_LIMIT
+                return None
+    _tdx_local.cli = cli
+    return cli
+
+
+def tdx_status() -> dict:
+    """通达信可用性（给数据源面板用）。"""
+    return {"available": _TDX_AVAILABLE, "fail": _tdx_fail,
+            "disabled": _tdx_fail >= TDX_FAIL_LIMIT}
+
+
+def _kline_from_tdx(code: str, n: int) -> list[dict]:
+    """通达信(mootdx) 前复权日K —— 首选源。失败返回 []，调用方自动降级。"""
+    global _tdx_fail
+    cli = _tdx_client()
+    if cli is None:
+        return []
+    sym = code[2:] if code[:2].lower() in ("sh", "sz", "bj") else code
+    df = None
+    try:
+        # 新版 mootdx 日线用 frequency=9；老版用 category=4 —— 两个都试。
+        try:
+            df = cli.bars(symbol=sym, frequency=9, offset=n, adjust="qfq")
+        except TypeError:
+            df = cli.bars(symbol=sym, category=4, offset=n)
+    except Exception:
+        _tdx_fail += 1
+        return []
+    if df is None or len(df) == 0:
+        _tdx_fail += 1
+        return []
+    try:
+        df = df.reset_index()          # datetime 可能是索引，摊平成列
+    except Exception:
+        pass
+    out = []
+    try:
+        rows = df.iterrows()
+    except AttributeError:
+        rows = enumerate(df)
+    for _, r in rows:
+        try:
+            d = str(r.get("datetime") or r.get("date") or "")[:10]
+            if len(d) < 10:
+                continue
+            vol = r.get("vol")
+            if vol is None:
+                vol = r.get("volume", 0)
+            out.append({"date": d, "open": float(r["open"]), "close": float(r["close"]),
+                        "high": float(r["high"]), "low": float(r["low"]),
+                        "volume": float(vol or 0)})
+        except Exception:
+            continue
+    out.sort(key=lambda x: x["date"])
+    if out:
+        _tdx_fail = 0
+    return out
+
+
 def _kline_from_tx(code: str, n: int) -> list[dict]:
     """腾讯前复权日K。多域名自动降级（部分子域会限流返回 501）。"""
     for host, _, ref in KLINE_HOSTS:
@@ -967,9 +1081,15 @@ def _kline_from_sina(code: str, n: int) -> list[dict]:
 
 
 def fetch_kline(code: str, n: int = 70) -> list[dict]:
-    """前复权日K。返回 [{date,open,close,high,low,volume}]，按时间正序。"""
+    """前复权日K。返回 [{date,open,close,high,low,volume}]，按时间正序。
+
+    源优先级：**通达信(mootdx, TCP 不封 IP)** → 腾讯 → 新浪。
+    通达信是软依赖，未装 / 连不上时自动退回腾讯/新浪（安卓包即走此路径）。
+    """
     def producer():
-        bars = _kline_from_tx(code, n)
+        bars = _kline_from_tdx(code, n)
+        if len(bars) < 25:
+            bars = _kline_from_tx(code, n)
         if len(bars) < 25:
             bars = _kline_from_sina(code, n)
         return bars

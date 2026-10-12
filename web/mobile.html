@@ -914,7 +914,13 @@ function openSheet(i){
     <div class="kv">${kv.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div>
     <div class="sect"><div class="k">近30日走势</div><div id="kmini"></div></div>
     ${sw.ok?`<div class="sect"><div class="k">波段体系 · ${esc(sw.stage_cn||'')}</div>
-      <div class="item">${esc(sw.note||'')}
+      <div class="item">${sw.verdict?`<div style="margin-bottom:6px;padding:7px 9px;border-radius:8px;background:${
+        sw.verdict.can==='yes'?'#f0fbf5':(sw.verdict.can==='no'?'#fef4f5':'#fefaf3')};border-left:3px solid ${
+        sw.verdict.can==='yes'?'#0a6b3d':(sw.verdict.can==='no'?'#a41c2c':'#9a5a06')}">
+        <b>${sw.verdict.can==='yes'?'✅':(sw.verdict.can==='no'?'🚫':'⚠️')} 能不能买：${esc(sw.verdict.label)}</b>
+        <div style="margin-top:3px">原因：${esc(sw.verdict.reason||'')}</div>
+        ${sw.verdict.why?`<div class="fl" style="margin-top:2px">依据：${esc(sw.verdict.why)}</div>`:''}
+      </div>`:''}${esc(sw.note||'')}
         ${swEntry?`<br><b>可用入场点</b>：${esc(sw.entry.name)} —— ${esc(swEntry)}`:''}
         ${sw.exit?`<br><b>离场点</b>：高位放量 ${sw.exit.vol_ratio} 倍却只涨 ${sw.exit.pct}%
           —— 有人在出货，先装利润进口袋` : ''}

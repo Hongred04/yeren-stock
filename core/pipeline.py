@@ -188,6 +188,8 @@ def stock_detail(code: str) -> dict:
         if _h.get("tag"):
             p["hot_tag"] = _h["tag"]
     p["swing"] = swing_mod.evaluate(bars, code, cfg)
+    # 波段「能不能买」结论（节点 × 阶段）—— 与 trading 波段门禁同源，详情页照着渲染
+    p["swing"]["verdict"] = swing_mod.verdict(p["swing"], regime.classify(sentiment, volume))
     p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
     p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
     p["kline_tail"] = bars[-30:]
@@ -393,6 +395,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             bars = kl.get(p["code"], [])
             # 波段体系先算（买卖点要按打法排序，得先有 swing / style_fit）
             p["swing"] = swing_mod.evaluate(bars, p["code"], cfg)
+            p["swing"]["verdict"] = swing_mod.verdict(
+                p["swing"], regime.classify(sentiment, volume))
             p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
             p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
             p["kline_tail"] = bars[-30:]
