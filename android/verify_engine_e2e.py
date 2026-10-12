@@ -14,7 +14,8 @@ import tempfile
 import time
 import urllib.request
 
-PROJ = r"C:\Users\macro\Desktop\杂物\股票"
+# 从脚本位置反推工程根（脚本在 <工程根>/android/ 下），不写死绝对路径
+PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYNCED = os.path.join(PROJ, "android", "app", "src", "main", "python")
 APK = os.path.join(PROJ, "android", "app", "build", "outputs", "apk",
                    "debug", "app-debug.apk")

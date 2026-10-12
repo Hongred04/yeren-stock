@@ -16,7 +16,9 @@ import time
 import urllib.request
 import zipfile
 
-PROJ = r"C:\Users\macro\Desktop\杂物\股票"
+# 从脚本位置反推工程根（脚本在 <工程根>/android/ 下）。
+# 别写死绝对路径：项目一改名/搬家就失效（已经踩过一次）。
+PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYNCED = os.path.join(PROJ, "android", "app", "src", "main", "python")
 APK = os.path.join(PROJ, "android", "app", "build", "outputs", "apk",
                    "debug", "app-debug.apk")
