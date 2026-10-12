@@ -904,41 +904,67 @@ function openSheet(i){
   const swEntry=(sw.entry)?(sw.entry.type==='W3'
       ? `第一波涨 ${(sw.entry.gain*100).toFixed(0)}%、回调 ${(sw.entry.pullback*100).toFixed(0)}%；5日线${sw.entry.turn5?'已':'未'}重新拐头、均线${sw.entry.converged?'高度粘合':'尚未粘合'} —— 等放量大阳突破后的回调介入`
       : `回踩${sw.entry.line} ${num(sw.entry.level)}（${sw.entry.burst_ok?'爆量确认':'量能待确认'}）`):'';
-  const kv=[];
-  kv.push(['位置',g.base_pos!=null?Math.round(g.base_pos*100)+'%':'—']);
-  kv.push(['换手',p.turnover!=null?num(p.turnover,1)+'%':'—']);
-  kv.push(['量能压缩',g.shrink!=null?Math.round(g.shrink*100)+'%':'—']);
+  // 顶部结论条：先回答「今天要不要买」，细节放后面 —— 别让用户自己去拼
+  const buy0=buys[0], blk0=blocks[0];
+  const conc=buy0
+    ? {c:'yes', ic:'✅', ti:`可以买 · ${buy0.name}`,
+       bd:`${buy0.entry||''}${buy0.stop&&buy0.stop!=='—'?`；止损 ${buy0.stop}`:''}`}
+    : (blk0 ? {c:'no', ic:'🚫', ti:`今天别买 · ${blk0.name}`, bd: blk0.entry||blk0.trigger||''}
+            : {c:'watch', ic:'⏸', ti:'暂时没有买点', bd:'放进观察名单，等出信号再动手'});
+  const CONCBG={yes:'#f0fbf5', no:'#fef4f5', watch:'#fefaf3'};
+  const CONCLN={yes:'#0a6b3d', no:'#a41c2c', watch:'#9a5a06'};
+  // 结论条已经引用了第一条禁买提示（今天别买）—— 当日提示里别再重复同一句
+  const blocksLeft=(!buy0&&blk0)?blocks.slice(1):blocks;
+  const kvg=(t,rows)=>`<div class="sect"><div class="k">${t}</div>
+    <div class="kv">${rows.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div></div>`;
   $('sheetBody').innerHTML=`
     <h3>${esc(p.name||'')} <span class="fl" style="font-size:12px;font-weight:600">${esc(p.code||'')}</span>
       <span class="${pctCls(p.pct)}" style="margin-left:auto;font-size:19px">${pctTxt(p.pct)}</span></h3>
-    <div class="kv">${kv.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div>
-    <div class="sect"><div class="k">近30日走势</div><div id="kmini"></div></div>
-    ${sw.ok?`<div class="sect"><div class="k">波段体系 · ${esc(sw.stage_cn||'')}</div>
-      <div class="item">${sw.verdict?`<div style="margin-bottom:6px;padding:7px 9px;border-radius:8px;background:${
-        sw.verdict.can==='yes'?'#f0fbf5':(sw.verdict.can==='no'?'#fef4f5':'#fefaf3')};border-left:3px solid ${
-        sw.verdict.can==='yes'?'#0a6b3d':(sw.verdict.can==='no'?'#a41c2c':'#9a5a06')}">
-        <b>${sw.verdict.can==='yes'?'✅':(sw.verdict.can==='no'?'🚫':'⚠️')} 能不能买：${esc(sw.verdict.label)}</b>
-        <div style="margin-top:3px">原因：${esc(sw.verdict.reason||'')}</div>
-        ${sw.verdict.why?`<div class="fl" style="margin-top:2px">依据：${esc(sw.verdict.why)}</div>`:''}
-      </div>`:''}${esc(sw.note||'')}
-        ${swEntry?`<br><b>可用入场点</b>：${esc(sw.entry.name)} —— ${esc(swEntry)}`:''}
-        ${sw.exit?`<br><b>离场点</b>：高位放量 ${sw.exit.vol_ratio} 倍却只涨 ${sw.exit.pct}%
-          —— 有人在出货，先装利润进口袋` : ''}
-        ${sw.washout&&sw.washout.note?`<br><b>洗盘/破位</b>：${esc(sw.washout.note)}`:''}
-        <br><span class="fl">${esc(sw.creed||'')}</span></div></div>`:''}
-    ${p.hot_rank?`<div class="sect"><div class="k">市场人气</div>
-      <div class="item">同花顺人气榜第 <b>${p.hot_rank}</b> 名${p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
-    ${buys.length?`<div class="sect"><div class="k">买点</div>${buys.map(b=>`
+
+    <div class="sect"><div class="k">今天怎么做</div>
+      <div style="padding:9px 11px;border-radius:9px;background:${CONCBG[conc.c]};border-left:3px solid ${CONCLN[conc.c]}">
+        <b style="color:${CONCLN[conc.c]}">${conc.ic} ${esc(conc.ti)}</b>
+        <div style="margin-top:4px">${esc(conc.bd)}</div></div></div>
+
+    ${buys.length>1?`<div class="sect"><div class="k">其他买点</div>${buys.slice(1).map(b=>`
       <div class="item"><b>${esc(b.name)}</b>${b.position?`（${esc(b.position)}）`:''}<br>
-        ${esc(b.entry||'')}${b.stop?`<br><span class="fl">止损：${esc(b.stop)}</span>`:''}
-        ${b.target?`<br><span class="fl">目标：${esc(b.target)}</span>`:''}</div>`).join('')}</div>`
-      :`<div class="sect"><div class="k">买点</div><div class="item fl">当前没有可执行的买点 —— 等信号出现再动手</div></div>`}
-    ${blocks.length?`<div class="sect"><div class="k">当日提示</div>${blocks.map(b=>`
+        ${esc(b.entry||'')}${b.stop&&b.stop!=='—'?`<br><span class="fl">止损：${esc(b.stop)}</span>`:''}</div>`).join('')}</div>`:''}
+    ${blocksLeft.length?`<div class="sect"><div class="k">当日提示</div>${blocksLeft.map(b=>`
       <div class="item"><b>${esc(b.name)}</b>：${esc(b.entry||b.trigger||'')}</div>`).join('')}</div>`:''}
-    ${sells.length?`<div class="sect"><div class="k">卖出提醒</div>${sells.map(s=>`
+    ${sells.length?`<div class="sect"><div class="k">什么时候卖 <span class="fl" style="font-weight:600">（已持仓才用得上）</span></div>${sells.map(s=>`
       <div class="item"><b>${esc(s.name)}</b>：${esc(s.action||s.trigger||'')}</div>`).join('')}</div>`:''}
+
+    ${sw.ok?`<div class="sect"><div class="k">波段 · ${esc(sw.stage_cn||'')}</div>
+      <div class="item">${sw.verdict?`<div style="margin-bottom:7px;padding:7px 9px;border-radius:8px;background:${
+        CONCBG[sw.verdict.can==='yes'?'yes':(sw.verdict.can==='no'?'no':'watch')]};border-left:3px solid ${
+        CONCLN[sw.verdict.can==='yes'?'yes':(sw.verdict.can==='no'?'no':'watch')]}">
+        <b>${sw.verdict.can==='yes'?'✅':(sw.verdict.can==='no'?'🚫':'⚠️')} 能不能买：${esc(sw.verdict.label)}</b>
+        <div style="margin-top:3px">${esc(sw.verdict.reason||'')}</div>
+      </div>`:''}${esc(sw.note||'')}
+        ${swEntry?`<br><b>入场点</b>：${esc(sw.entry.name)} —— ${esc(swEntry)}`:''}
+        ${sw.exit?`<br><b>离场点</b>：高位放量 ${sw.exit.vol_ratio} 倍却只涨 ${sw.exit.pct}% —— 有人在出货，先落袋`: ''}
+        ${sw.washout&&sw.washout.note?`<br><b>洗盘/破位</b>：${esc(sw.washout.note)}`:''}</div></div>`:''}
+
+    ${kvg('价格与成交',[
+        ['现价',num(p.price)],['涨跌幅',pctTxt(p.pct)],['换手',p.turnover!=null?num(p.turnover,1)+'%':'—'],
+        ['成交额',p.amount!=null?num(p.amount/1e8,2)+'亿':'—'],
+        ['流通盘',p.float_mv!=null?num(p.float_mv,0)+'亿':'—'],
+        ['量比',p.volume_ratio!=null?num(p.volume_ratio,2):'—']])}
+    ${kvg('资金',[
+        ['主力净额',(p.moneyflow&&p.moneyflow.main!=null)?((p.moneyflow.main>=0?'+':'')+num(p.moneyflow.main,2)+'亿'):'—'],
+        ['主力净占比',(p.moneyflow&&p.moneyflow.main_pct!=null)?num(p.moneyflow.main_pct,1)+'%':'—'],
+        ['人气',p.hot_rank?('第 '+p.hot_rank+' 名'):'—']])}
+    ${kvg('位置与形态',[
+        ['位置',g.base_pos!=null?Math.round(g.base_pos*100)+'%':'—'],
+        ['量能压缩',g.shrink!=null?Math.round(g.shrink*100)+'%':'—'],
+        ['近20日涨停',g.recent_limitups!=null?g.recent_limitups+'次':'—']])}
+
+    <div class="sect"><div class="k">近30日走势</div><div id="kmini"></div></div>
+
     ${reasons.length?`<div class="sect"><div class="k">为什么选它</div>
       <div class="item">${reasons.slice(0,5).map(r=>'· '+esc(r)).join('<br>')}</div></div>`:''}
+    ${(p.warnings&&p.warnings.length)?`<div class="sect"><div class="k">要注意</div>
+      <div class="item fl">${p.warnings.map(w=>'· '+esc(w)).join('<br>')}</div></div>`:''}
     ${p.zt_reason?`<div class="sect"><div class="k">涨停原因</div>
       <div class="item">${esc(p.zt_reason)}</div></div>`:''}
   `;

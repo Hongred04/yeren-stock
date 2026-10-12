@@ -1394,7 +1394,8 @@ function renderDetail(p){
       —— 有人在出货，先把利润装进口袋；若之后跌不下去（货出完股价不跌）= 有人接得住，反而是第二入场点</div>`:''}
     ${sw.washout&&sw.washout.note?`<div class="ln"><b>洗盘/破位：</b>${esc(sw.washout.note)}</div>`:''}
     <div class="ln fl" style="font-size:11.5px;margin-top:5px">
-      心法：${(sw.checklist||[]).map(c=>esc(c.t)).join(' · ')}</div>
+      心法：${(sw.checklist||[]).slice(0,3).map(c=>esc(c.t)).join(' · ')}${
+        (sw.checklist||[]).length>3?`（共 ${(sw.checklist||[]).length} 条，核心是拿得住）`:''}</div>
   </div>`:'';
 
   // 打法适配：这只票适合哪种打法（短线题材 / 中长线波段 / 回避）
@@ -1474,28 +1475,44 @@ function renderDetail(p){
       <span class="fl" style="font-size:11.5px">记入后系统用同一套卖出信号帮你盯着</span>
     </div>
 
-    <div class="kv">
-      <div><div class="k">现价</div><div class="v">${f2(p.price)}</div></div>
-      <div><div class="k">涨跌幅</div><div class="v ${pct(p.pct)}">${f2(p.pct)}%</div></div>
-      ${p.hot_rank?`<div><div class="k">同花顺人气</div><div class="v" style="color:var(--org)">第 ${p.hot_rank} 名${
-        p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
-      <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
-      <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
-      <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
-      ${p.volume_ratio!=null?`<div><div class="k">量比</div><div class="v" style="color:${
-        p.volume_ratio>=2?'var(--red)':(p.volume_ratio<0.8?'var(--tx3)':'var(--tx)')}">${f2(p.volume_ratio)}</div></div>`:''}
-      ${p.avg_price!=null&&p.avg_price>0?`<div><div class="k">日内均价</div><div class="v ${
-        p.price>=p.avg_price?'up':'dn'}">${f2(p.avg_price)}</div></div>`:''}
-      ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main>=0?'up':'dn'}">${p.moneyflow.main>=0?'+':''}${f2(p.moneyflow.main)}亿</div></div>
-      <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct>=0?'up':'dn'}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
-      <div><div class="k">位置（越高越贵）</div><div class="v">${(g.base_pos*100).toFixed(0)}%</div></div>
-      <div><div class="k">量能压缩</div><div class="v">${(g.shrink*100).toFixed(0)}%</div></div>
-      <div><div class="k">洗盘程度</div><div class="v">${f2(g.washout,1)}</div></div>
-      <div><div class="k">近${cfg.recent_limitup_days}日涨停</div><div class="v">${g.recent_limitups}次</div></div>
-      <div><div class="k">历史最高</div><div class="v">${g.history_max_boards}板</div></div>
-      <div><div class="k">60日回撤</div><div class="v">${(g.drawdown60*100).toFixed(0)}%</div></div>
-      <div><div class="k">均线</div><div class="v" style="font-size:12.5px">${
-        g.ma_aligned?'<span class="pill red">多头排列</span>':'<span class="pill gry">未多头</span>'}</div></div>
+    <div style="margin-bottom:13px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--tx2);margin:0 0 7px">价格与成交</div>
+      <div class="kv">
+        <div><div class="k">现价</div><div class="v">${f2(p.price)}</div></div>
+        <div><div class="k">涨跌幅</div><div class="v ${pct(p.pct)}">${f2(p.pct)}%</div></div>
+        <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
+        <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
+        <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
+        ${p.volume_ratio!=null?`<div><div class="k">量比</div><div class="v" style="color:${
+          p.volume_ratio>=2?'var(--red)':(p.volume_ratio<0.8?'var(--tx3)':'var(--tx)')}">${f2(p.volume_ratio)}</div></div>`:''}
+        ${p.avg_price!=null&&p.avg_price>0?`<div><div class="k">日内均价</div><div class="v ${
+          p.price>=p.avg_price?'up':'dn'}">${f2(p.avg_price)}</div></div>`:''}
+      </div>
+    </div>
+
+    <div style="margin-bottom:13px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--tx2);margin:0 0 7px">资金</div>
+      <div class="kv">
+        ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main>=0?'up':'dn'}">${p.moneyflow.main>=0?'+':''}${f2(p.moneyflow.main)}亿</div></div>
+        <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct>=0?'up':'dn'}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
+        ${p.hot_rank?`<div><div class="k">同花顺人气</div><div class="v" style="color:var(--org)">第 ${p.hot_rank} 名${
+          p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
+      </div>
+    </div>
+
+    <div style="margin-bottom:13px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--tx2);margin:0 0 7px">
+        位置与形态 <span style="font-weight:600;color:var(--tx3)">（位置越高越贵，量能压缩 + 洗盘充分才算好形态）</span></div>
+      <div class="kv">
+        <div><div class="k">位置（越高越贵）</div><div class="v">${(g.base_pos*100).toFixed(0)}%</div></div>
+        <div><div class="k">量能压缩</div><div class="v">${(g.shrink*100).toFixed(0)}%</div></div>
+        <div><div class="k">洗盘程度</div><div class="v">${f2(g.washout,1)}</div></div>
+        <div><div class="k">近${cfg.recent_limitup_days}日涨停</div><div class="v">${g.recent_limitups}次</div></div>
+        <div><div class="k">历史最高</div><div class="v">${g.history_max_boards}板</div></div>
+        <div><div class="k">60日回撤</div><div class="v">${(g.drawdown60*100).toFixed(0)}%</div></div>
+        <div><div class="k">均线</div><div class="v" style="font-size:12.5px">${
+          g.ma_aligned?'<span class="pill red">多头排列</span>':'<span class="pill gry">未多头</span>'}</div></div>
+      </div>
     </div>
 
     ${chipHtml}
