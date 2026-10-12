@@ -135,16 +135,25 @@ def stock_detail(code: str) -> dict:
                                        "或直接填 6 位数字如 600519）"}
 
     cfg = sc.load_config()
+    diag: dict = {}
     try:
-        snaps = ds.fetch_snapshots([code], batch=1, workers=1)
+        snaps = ds.fetch_snapshots([code], batch=1, workers=1, diag=diag)
     except Exception as e:
-        return {"ok": False, "error": f"取行情失败：{type(e).__name__}"}
+        return {"ok": False, "retryable": True,
+                "error": f"取行情失败：{type(e).__name__}（网络问题，点「重试」再取一次）"}
     snap = snaps.get(code)
     if not snap:
+        # 必须区分「传输失败」和「这代码真取不到」：前者是网络抖动，重试就好。
+        # 以前一律报"可能是停牌/已退市/代码填错"，实测把 30% 的网络抖动误报成
+        # "这股票不存在"，还引导用户去删自选 —— 用户看到的正是"一会能查到一会查不到"。
+        if diag.get("failed_batches"):
+            return {"ok": False, "retryable": True,
+                    "error": ("行情源这次没响应（网络抖动或限速），不是代码的问题 —— "
+                              "点「重试」再取一次。")}
         return {"ok": False,
-                "error": f"没取到 {code} 的行情 —— 可能是停牌、已退市，"
-                         f"或代码/交易所前缀填错了（{code[:2]} 开头）。"
-                         f"可在「管理」里删掉这条自选后重新添加。"}
+                "error": (f"没取到 {code} 的行情 —— 可能是停牌、已退市，"
+                          f"或代码/交易所前缀填错了（{code[:2]} 开头）。"
+                          f"若确认代码无误，可在「管理」里核对这条记录。")}
 
     try:
         kl = ds.fetch_klines([code], n=70, workers=1)

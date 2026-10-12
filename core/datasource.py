@@ -309,14 +309,17 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
             conn.request("GET", path, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
-            # keep-alive 池里的连接可能已被服务端单方面关闭：此时 request 不报错、
-            # 但读到的是空 body 或缺状态行的残包。长驻进程（看板服务）跑过几轮
-            # 全市场扫描后必然踩到 —— 表现为「明明代码没错却取不到行情」。
+            # 坏包检测必须对**所有**连接生效，不能只管复用连接：
+            #   ① 复用连接可能已被服务端单方面关闭（读到空 body / 缺状态行残包）；
+            #   ② **新建连接**同样可能拿到空 body 或非 200 —— 长驻进程（看板服务）
+            #      走代理出口时尤其常见。以前只判 reused，新建连接的空响应会被当
+            #      成功返回 → 解析出 0 条 → 调用方以为"这只股票不存在"
+            #      （实测 /api/stock 连打 20 次有 6 次报"可能是停牌/已退市"）。
             # 判定为坏包 → 丢弃连接、换一条重试，不让空数据静默流过。
-            if reused and (not data or resp.status != 200):
+            if not data or resp.status != 200:
                 raise http.client.BadStatusLine(
-                    f"stale pooled conn: status={getattr(resp, 'status', '?')} "
-                    f"len={len(data)}")
+                    f"bad response: status={getattr(resp, 'status', '?')} "
+                    f"len={len(data)} reused={reused}")
             if q.qsize() < _POOL_MAX:
                 q.put(conn)
             else:
@@ -530,25 +533,56 @@ def load_last_complete_amount(date_limit: str) -> float:
 
 
 def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
-                    progress=None) -> dict[str, dict]:
-    """批量拉取快照。返回 {code: snapshot}。"""
+                    progress=None, diag: dict | None = None) -> dict[str, dict]:
+    """批量拉取快照。返回 {code: snapshot}。
+
+    diag（可选）：回填 {"failed_batches": n, "attempts": n}。
+    为什么要这个：以前整批传输失败被静默吞掉（`except: return []`），调用方只能
+    看到"这个 code 没数据"，于是把**网络抖动**误报成"停牌/已退市/代码填错"——
+    实测 /api/stock 连打 20 次有 6 次这么误报，还引导用户去删自选。
+    有了 diag，调用方就能区分「传输失败（重试即可）」和「代码本身取不到」。
+    """
     batches = [codes[i:i + batch] for i in range(0, len(codes), batch)]
     result: dict[str, dict] = {}
     total = len(batches)
     done = 0
+    failed = 0        # 传输层失败（网络抖动/限速）—— 重试有意义
+    nomatch = 0       # 腾讯明确回答"没有这个代码"—— 重试没意义
+    attempts = 0
+    _dlock = threading.Lock()
 
     def work(chunk: list[str]):
+        nonlocal failed, nomatch, attempts
         url = "https://qt.gtimg.cn/q=" + ",".join(chunk)
-        try:
-            raw = _get(url, timeout=15).decode("gbk", errors="ignore")
-        except Exception:
-            return []
-        out = []
-        for line in raw.splitlines():
-            rec = _parse_tx_line(line)
-            if rec:
-                out.append(rec)
-        return out
+        # 至多两次：_get 内部已重试 3 次，这里再兜一层，只治"刚好抖一下"
+        for attempt in range(2):
+            with _dlock:
+                attempts += 1
+            raw = ""
+            try:
+                raw = _get(url, timeout=15).decode("gbk", errors="ignore")
+            except Exception:
+                raw = ""
+            if raw.strip():
+                out = []
+                for line in raw.splitlines():
+                    rec = _parse_tx_line(line)
+                    if rec:
+                        out.append(rec)
+                if out:
+                    return out
+                # 腾讯对不存在的代码固定回 `v_pv_none_match="1";` ——
+                # 这是"接口有应答、只是没这个代码"，不是传输失败。
+                # 不区分的话，查一个真不存在的代码会被误报成"网络抖动"。
+                if "v_pv_none_match" in raw:
+                    with _dlock:
+                        nomatch += 1
+                    return []
+            if attempt == 0:
+                time.sleep(0.25 + random.uniform(0.0, 0.15))
+        with _dlock:
+            failed += 1
+        return []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for recs in pool.map(work, batches):
@@ -557,6 +591,10 @@ def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
             done += 1
             if progress and done % 20 == 0:
                 progress(done, total)
+    if diag is not None:
+        diag["failed_batches"] = failed
+        diag["no_match_batches"] = nomatch
+        diag["attempts"] = attempts
     return result
 
 

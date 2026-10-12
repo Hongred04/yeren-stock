@@ -128,6 +128,51 @@ function makeLive(ts) {
   console.log('\n[7] 遮罩开关函数没被污染（重新扫描仍可用）');
   ok(typeof w.load === 'function', 'load() 仍存在');
 
+  // ── ⑧ 自选股详情取数：失败不许"粘住"，网络类错误要自动重试一次 ──
+  //    用户实测「自选股一会能查到一会查不到」：一次网络抖动被永久缓存成
+  //    DETAILS['!'+code]，之后每次点都直接返回 null，只显示"可能是停牌/已退市"。
+  console.log('\n[8] 自选股详情取数：失败不粘住 + 网络类错误自动重试');
+  const WCODE = 'sh603466';
+  let stockCalls = 0;
+  w.fetch = (url) => {
+    const u = String(url);
+    if (u.startsWith('/api/stock')) {
+      stockCalls++;
+      if (stockCalls === 1) {                    // 第一次：网络类可重试失败
+        return Promise.resolve({ status: 200, json: () => Promise.resolve(
+          { ok: false, retryable: true, error: '行情源这次没响应（网络抖动或限速），点「重试」再取一次。' }) });
+      }
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(
+        { ok: true, stock: { code: WCODE, name: '风语筑', score: 60, price: 9.9, pct: 1.0,
+          graph_detail: { base_pos: .5, shrink: .8, washout: .2, recent_limitups: 1,
+            history_max_boards: 2, drawdown60: .1, ma_aligned: false,
+            ma5: 9.8, ma10: 9.7, ma20: 9.6, ma60: 9.5 },
+          reasons: [], warnings: [], buy_signals: [], sell_signals: [],
+          kline_tail: [], fund_style: { type: 'unknown' }, tradable: true, in_pick: false } }) });
+    }
+    return Promise.resolve({ status: 204, json: () => Promise.resolve({}) });
+  };
+  const got = await w.resolveStock(WCODE);
+  ok(stockCalls === 2, `网络类失败会自动重试一次（实际请求 ${stockCalls} 次）`);
+  ok(got && got.code === WCODE, '重试后拿到详情，用户看不到报错');
+
+  // 非可重试（代码本身有问题）→ 不该白重试
+  stockCalls = 0;
+  w.fetch = (url) => {
+    if (String(url).startsWith('/api/stock')) {
+      stockCalls++;
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(
+        { ok: false, error: '没取到 sh999999 的行情 —— 可能是停牌、已退市，或代码/交易所前缀填错了（sh 开头）。' }) });
+    }
+    return Promise.resolve({ status: 204, json: () => Promise.resolve({}) });
+  };
+  const miss = await w.resolveStock('sh999999');
+  ok(miss === null, '真取不到时返回 null（走错误卡片）');
+  ok(stockCalls === 1, `非可重试错误不浪费请求（实际 ${stockCalls} 次）`);
+  // 失败结果有 TTL：连着再点不会打请求，但 TTL 过期后必须能重试（不许永久粘住）
+  const again = await w.resolveStock('sh999999');
+  ok(again === null && stockCalls === 1, '刚失败过 → 短时间内不重复打请求');
+
   console.log(`\n===== ${pass} 通过 / ${fail} 失败 =====`);
   process.exit(fail ? 1 : 0);
 })();
