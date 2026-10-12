@@ -893,6 +893,11 @@ function openSheet(i){
   const buys=allB.filter(x=>x.kind!=='block'&&!x.blocked);
   const blocks=allB.filter(x=>x.kind==='block'||x.blocked);
   const g=p.graph_detail||{};
+  // M11 波段体系（野人《波段体系》7 讲）—— 平常打法的主干
+  const sw=p.swing||{};
+  const swEntry=(sw.entry)?(sw.entry.type==='W3'
+      ? `第一波涨 ${(sw.entry.gain*100).toFixed(0)}%、回调 ${(sw.entry.pullback*100).toFixed(0)}%；5日线${sw.entry.turn5?'已':'未'}重新拐头、均线${sw.entry.converged?'高度粘合':'尚未粘合'} —— 等放量大阳突破后的回调介入`
+      : `回踩${sw.entry.line} ${num(sw.entry.level)}（${sw.entry.burst_ok?'爆量确认':'量能待确认'}）`):'';
   const kv=[];
   kv.push(['位置',g.base_pos!=null?Math.round(g.base_pos*100)+'%':'—']);
   kv.push(['换手',p.turnover!=null?num(p.turnover,1)+'%':'—']);
@@ -902,6 +907,13 @@ function openSheet(i){
       <span class="${pctCls(p.pct)}" style="margin-left:auto;font-size:19px">${pctTxt(p.pct)}</span></h3>
     <div class="kv">${kv.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div>
     <div class="sect"><div class="k">近30日走势</div><div id="kmini"></div></div>
+    ${sw.ok?`<div class="sect"><div class="k">波段体系 · ${esc(sw.stage_cn||'')}</div>
+      <div class="item">${esc(sw.note||'')}
+        ${swEntry?`<br><b>可用入场点</b>：${esc(sw.entry.name)} —— ${esc(swEntry)}`:''}
+        ${sw.exit?`<br><b>离场点</b>：高位放量 ${sw.exit.vol_ratio} 倍却只涨 ${sw.exit.pct}%
+          —— 有人在出货，先装利润进口袋` : ''}
+        ${sw.washout&&sw.washout.note?`<br><b>洗盘/破位</b>：${esc(sw.washout.note)}`:''}
+        <br><span class="fl">${esc(sw.creed||'')}</span></div></div>`:''}
     ${p.hot_rank?`<div class="sect"><div class="k">市场人气</div>
       <div class="item">同花顺人气榜第 <b>${p.hot_rank}</b> 名${p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
     ${buys.length?`<div class="sect"><div class="k">买点</div>${buys.map(b=>`

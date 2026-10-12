@@ -158,6 +158,17 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     thr = ind.limit_up_threshold(code)
     fw = float(cfg.get("M5_position", {}).get("first_weight", 0.20) or 0.20)
 
+    def _ordered(sigs: list[dict]) -> list[dict]:
+        """按打法把匹配的一路排前面：波段票先看 W、短线票先看 B。
+        禁买提示（kind=block）永远排最后 —— 它是"别买"，不该抢在买点前面。"""
+        want_swing = ((stock.get("style_fit") or {}).get("key") == "swing")
+
+        def key(s):
+            blk = 1 if (s.get("kind") == "block" or s.get("blocked")) else 0
+            mism = 0 if ((s.get("style") == "swing") == want_swing) else 1
+            return (blk, mism)
+        return sorted(sigs, key=key)
+
     # 交易许可检查：退潮期 / 极度缩量
     # 退潮期不再一刀切禁止出手 —— 允许 0.5 成试错仓，但**只做首板**：
     # 退潮里唯一有胜率结构的就是新周期第一板，接力/低吸都是接刀子。
@@ -169,7 +180,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             if boards <= 1:
                 return [{
                     "type": "B0", "name": "退潮试错仓", "priority": "B",
-                    "kind": "buy",
+                    "kind": "buy", "style": "short",
                     "trigger": f"退潮期试错：{sentiment.get('note') or ''}",
                     "entry": (f"只做首板，单笔不超过 {pos_cn(tw)}；"
                               f"不是首板就别碰"),
@@ -248,7 +259,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B1", "name": "首板试错",
             "priority": "A",
-            "kind": "buy",
+            "kind": "buy", "style": "short",
             "trigger": (f"新周期首板（{stock.get('sector') or '题材内'}）—— "
                         f"{open_prefix}竞价高开 0~3% 是预期内的，＞5% 就是抢筹过头"),
             # 分两笔的口径必须自洽：高开 0~3% 才买第一笔；高开 3~5% 先观望、
@@ -264,6 +275,55 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "position": f"单票试错仓 {pos_cn(fw)}（分两笔进）",
             "note": note + "；买的是「明天有人接力」的预期，不是今天的涨停板",
         })
+
+    # ---- M11 波段体系：第一/第二入场点、第二波接入（野哥的"平常打法"）----
+    # 野人体系里波段是**常态**、短线只是缩量期的应对打法；而 v1.24.1 之前的买卖点
+    # 全是短线口径。这里把三个波段入场点补进买点体系，并按 style_fit 把匹配的
+    # 一路排在前面（波段票先看 W、短线票先看 B），避免"两套口径打架"。
+    sw = stock.get("swing") or {}
+    if sw.get("ok"):
+        w1 = sw.get("w1")
+        if w1:
+            out.append({
+                "type": "W1", "name": "波段第一入场点", "priority": "A",
+                "kind": "buy", "style": "swing",
+                "trigger": (f"5日线上穿所有均线 + 20日线拐头向上；今日回踩{w1['line']} "
+                            f"{w1['level']}（{'爆量确认' if w1.get('burst_ok') else '量能待确认'}）"),
+                "entry": (f"回踩 {w1['level']} 附近建第一笔；"
+                          f"没量就不动手（有量才有价），不追高"),
+                "stop": (f"有效跌破 {w1['level']} 或 20 日线离场 —— "
+                         f"回踩失败说明这不是第一入场点"),
+                "target": "波段短则3个月、长则半年 —— 买的是信仰/逻辑/题材，不是三天涨跌",
+                "position": "波段可重仓（锁仓=看懂主力意图）；先建一半，站稳再加",
+                "note": "没人能买最低点，只能买相对低点；买完要扛得住洗盘震仓",
+            })
+        w2 = sw.get("w2")
+        if w2:
+            out.append({
+                "type": "W2", "name": "波段第二入场点", "priority": "A",
+                "kind": "buy", "style": "swing",
+                "trigger": (f"{'从5日线急打到' if w2.get('from_ma5') else '回踩到'}"
+                            f"20日线附近 {w2['level']}"
+                            f"（{'缩量回踩·弱庄形态更可靠' if w2.get('shrink') else '量能待确认'}）"),
+                "entry": f"20日线 {w2['level']} 附近介入；缩量回踩的才接",
+                "stop": "放量跌破 20 日线 → 逻辑坏了，走（缩量跌破先看两天）",
+                "target": "第二入场点是主力没走的证据（第一波涨幅不足以出货）",
+                "position": "波段可重仓；沿 5 日线持有，小阴小阳不动手",
+                "note": "强庄沿5日线小阴小阳走，某天从5日线打到20日线附近 = 第二入场点",
+            })
+        w3 = sw.get("w3")
+        if w3 and w3.get("ready"):
+            out.append({
+                "type": "W3", "name": "波段第二波接入点", "priority": "B",
+                "kind": "buy", "style": "swing",
+                "trigger": (f"第一波已涨 {w3['gain']*100:.0f}%、回调 {w3['pullback']*100:.0f}%；"
+                            f"5日线重新拐头向上 + 均线高度粘合（筹码交换充分）"),
+                "entry": "等放量大阳线**突破后的回调**介入 —— 突破当天不追",
+                "stop": "跌破 20 日线（第二波不成立）",
+                "target": "高位横盘是在等 20/30 日均线上来、让获利盘换手；换手充分后面才拉得轻松",
+                "position": "确认后再加，别一次打满",
+                "note": "涨30%后回调主力没走（30%不足以出货）；止跌阳线可先轻仓保持关联",
+            })
 
     # 当日已涨停：B2/B3/B4 全是"当日进场"口径，涨停板上不成立 ——
     # 只保留 B1（次日介入口径），再给一条明确的"涨停不追"提示
@@ -285,7 +345,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "note": "封死了买不到，能轻易买到大概率要炸 —— 明牌不追",
             "blocked": True,
         })
-        return out
+        return _ordered(out)
 
     after = sess["after_hours"]
     gap = pre_holiday_gap()
@@ -306,7 +366,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B2", "name": "龙头回踩",
             "priority": "A",
-            "kind": "buy",
+            "kind": "buy", "style": "short",
             "trigger": (f"近5日 {boards_recent} 次涨停的龙头回踩，现价 {close:.2f} "
                         f"贴近5日线 {ma5:.2f}（缩量不破）"),
             "entry": (f"回踩 {ma5:.2f}~{close*1.01:.2f} 区间分批介入，缩量企稳为佳；"
@@ -324,7 +384,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B3", "name": "缩量红盘低吸",
             "priority": "B",
-            "kind": "buy",
+            "kind": "buy", "style": "short",
             "trigger": (f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 "
                         f"{stock.get('pct',0):.2f}%，控盘好、筹码结构稳"),
             "entry": (f"不追高：回落到 {close*0.99:.2f} 附近分两笔低吸"
@@ -344,7 +404,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         out.append({
             "type": "B4", "name": "尾盘博弈",
             "priority": "C",
-            "kind": "buy",
+            "kind": "buy", "style": "short",
             "trigger": f"节前最后交易日（距下一交易日 {gap} 天），已到尾盘窗口（14:00后）",
             "entry": "现在到 14:30 之间小仓位入场，避开假期消息面的不确定性",
             "stop": "次日低开超3% 走人",
@@ -353,7 +413,7 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "note": "节假日博弈只在尾盘入场，非尾盘时段不出此信号",
         })
 
-    return out
+    return _ordered(out)
 
 
 def low_of(bar: dict) -> float:
@@ -426,6 +486,23 @@ def sell_signals(stock: dict, bars: list[dict], sentiment: dict,
             "note": "竞价强更强定强弱，果断砍弱",
         })
 
+    # ---- M11 波段离场点：高位放量大涨滞涨 = 有人在出货 ----
+    # 野哥的第一离场点。短线体系里没有这条（S2 只看连板高度），而波段票的
+    # 顶部往往不是"连板断了"，是"放量了但价不涨了"。
+    sw = stock.get("swing") or {}
+    ex = sw.get("exit") if sw.get("ok") else None
+    if ex:
+        out.append({
+            "type": "WS1", "name": "波段离场点·高位放量滞涨", "priority": "A",
+            "style": "swing", "urgency": "high",
+            "trigger": (f"高位（60日位置 {ex['pos']*100:.0f}%）放量 {ex['vol_ratio']} 倍，"
+                        f"却只涨 {ex['pct']:+.2f}% —— 有人在出货"),
+            "action": ("先把利润装进口袋（减仓/清仓）。放量大涨的底层逻辑是有人在出货，"
+                       "底下托单维持股价不让你发现"),
+            "note": ("若之后跌不下去（震荡两天、货出完股价不跌）= 有人接得住，"
+                     "那反而是第二入场点 —— 别一刀砍死"),
+        })
+
     # ---- M10 主导资金类型专属离场口径 ----
     fs = stock.get("fund_style") or {}
     if fs.get("type") == "institutional":
@@ -471,7 +548,15 @@ def sell_signals(stock: dict, bars: list[dict], sentiment: dict,
             "note": "做庄失败打回原点，盈亏比极差",
         })
 
-    return out
+    # 排序：critical 永远第一（无条件清仓/立即离场）；其余按打法匹配优先
+    # （波段票先看波段离场点，短线票先看短线的）
+    _want_swing = ((stock.get("style_fit") or {}).get("key") == "swing")
+
+    def _skey(s):
+        crit = 0 if s.get("urgency") == "critical" else 1
+        mism = 0 if ((s.get("style") == "swing") == _want_swing) else 1
+        return (crit, mism)
+    return sorted(out, key=_skey)
 
 
 # ---------------------------------------------------------------- 仓位链

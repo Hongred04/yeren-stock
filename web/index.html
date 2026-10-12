@@ -1359,6 +1359,27 @@ function renderDetail(p){
     <div class="ln">${(fs.evidence||[]).map(e=>esc(e)).join('<br>')}</div>
     <div class="ln fl" style="margin-top:5px">速度即分类：同样五个板，游资一周走完吃情绪溢价，机构一月走完吃波段收益</div></div>`:'';
 
+  // M11 波段体系（野人《波段体系》7 讲）：第一/第二入场点、第二波接入、离场点、洗盘
+  // 野哥的"平常打法"是波段，短线只是缩量期的应对 —— 所以这块是详情页的主干之一。
+  const sw=p.swing;
+  const swStageCol={stall:'red',break:'red',first:'grn',second:'grn',wave2:'blu',wash:'org'}[sw&&sw.stage]||'blu';
+  const swEntryTxt=(sw&&sw.entry)?(sw.entry.type==='W3'
+      ? `第一波涨 ${(sw.entry.gain*100).toFixed(0)}%、回调 ${(sw.entry.pullback*100).toFixed(0)}%；5日线${sw.entry.turn5?'已':'未'}重新拐头、均线${sw.entry.converged?'高度粘合':'尚未粘合'} —— 等放量大阳突破后的**回调**介入`
+      : `回踩${sw.entry.line} ${f2(sw.entry.level)}（${sw.entry.burst_ok?'爆量确认':'量能待确认'}）`):'';
+  const swHtml=(sw&&sw.ok)?`<div class="sig ${sw.stage==='stall'||sw.stage==='break'?'A':'C'}" style="margin-bottom:14px">
+    <div class="st"><span class="pill ${swStageCol}">波段体系</span>
+      <b>${esc(sw.stage_cn)}</b>
+      <span class="fl" style="font-size:11.5px">${esc(sw.creed||'')}</span></div>
+    <div class="tr"><b>现在的状态：</b>${esc(sw.note||'')}</div>
+    ${sw.entry?`<div class="ln"><b>可用入场点 · ${esc(sw.entry.name)}：</b>${esc(swEntryTxt)}</div>`:''}
+    ${sw.exit?`<div class="ln" style="color:#8b2530"><b>离场点 · ${esc(sw.exit.name)}：</b>
+      高位（60日位置 ${(sw.exit.pos*100).toFixed(0)}%）放量 ${sw.exit.vol_ratio} 倍却只涨 ${sw.exit.pct}%
+      —— 有人在出货，先把利润装进口袋；若之后跌不下去（货出完股价不跌）= 有人接得住，反而是第二入场点</div>`:''}
+    ${sw.washout&&sw.washout.note?`<div class="ln"><b>洗盘/破位：</b>${esc(sw.washout.note)}</div>`:''}
+    <div class="ln fl" style="font-size:11.5px;margin-top:5px">
+      心法：${(sw.checklist||[]).map(c=>esc(c.t)).join(' · ')}</div>
+  </div>`:'';
+
   // 打法适配：这只票适合哪种打法（短线题材 / 中长线波段 / 回避）
   const sf=p.style_fit;
   const styleHtml=(sf&&sf.label)?`<div class="sig ${sf.key==='avoid'?'A':(sf.key==='swing'?'C':'B')}">
@@ -1426,6 +1447,8 @@ function renderDetail(p){
     ${planHtml}
 
     ${styleHtml}
+
+    ${swHtml}
 
     ${fsHtml}
 
@@ -2169,6 +2192,7 @@ function renderModules(){
     ['M8_discipline','M8 纪律清单','保命规则，可逐条开关'],
     ['M9_mainline','M9 题材主线五信号','消息定级→合力→中军→老龙→次日验证；缺一环主线不成立（首日新题材=一日游）'],
     ['M10_fundstyle','M10 主导资金分类','机构(中军)/游资(龙头)/庄股——分类定离场：加速减仓·断板节奏·庄股回避'],
+    ['M11_swing','M11 波段体系','平常打法的主干：第一/第二入场点、第二波接入、高位放量滞涨离场、洗盘vs破位（野人《波段体系》7 讲）'],
     ['E1_meter','E1 情绪温度计','连板梯队/炸板率/晋级率/涨跌家数 → 0-100 温度'],
     ['E2_lhb','E2 龙虎榜·游资席位','席位/机构/北向数据 —— 只进「资金在干什么」结论，不在界面展示明细'],
     ['E3_flow','E3 主力资金流','涨停股题材聚合 + 板块主力净流入 + 资金结论'],
@@ -2239,6 +2263,15 @@ function renderModules(){
       num(k,'hot_zt10_min','游资票·近10日涨停下限','连板节奏=游资主导',m.hot_zt10_min)+
       num(k,'zhuang_crash_pct','庄股·断崖跌幅(%)','低波动后单日砸到此=闪崩',m.zhuang_crash_pct)+
       num(k,'zhuang_chop_amp','庄股·断崖前日均波动(%)','无声阴跌/横盘的波动上限',m.zhuang_chop_amp);
+    if(k==='M11_swing') body=sw(k,'enabled','启用')+
+      num(k,'turn_days','20日线拐头·回看天数','今天的MA20高于N天前=拐头向上',m.turn_days)+
+      pctf(k,'pullback_tol','回踩容忍(%)','最低价触到均线上方这个范围内算回踩',(m.pullback_tol||0.02)*100)+
+      num(k,'burst_ratio','爆量倍数','当日量÷近5日均量≥此值=爆量（有量才有价）',m.burst_ratio)+
+      num(k,'shrink_ratio','缩量倍数','≤此值=缩量（缩量回踩=洗盘）',m.shrink_ratio)+
+      pctf(k,'converge_pct','均线粘合阈值(%)','5/10/20/30均线极差÷收盘≤此值=高度粘合',(m.converge_pct||0.03)*100)+
+      pctf(k,'wave_gain','第二波·第一波涨幅门槛(%)','涨够这么多才谈第二波（30%不足以出货→主力没走）',(m.wave_gain||0.30)*100)+
+      pctf(k,'stall_pct','滞涨判定·涨幅上限(%)','放量但涨跌幅在此范围内=滞涨（出货特征）',m.stall_pct)+
+      pctf(k,'high_pos','高位判定·60日位置(%)','区间位置≥此值算高位',(m.high_pos||0.70)*100);
     if(k==='E1_meter') body=sw(k,'enabled','启用')+
       pctf(k,'ebb_hurt_ratio','退潮预警·亏钱面积阈值(%)','亏钱面积超此值+温度骤降→按退潮对待',(m.ebb_hurt_ratio||0.3)*100);
     if(k==='E2_lhb') body=sw(k,'enabled','启用')+

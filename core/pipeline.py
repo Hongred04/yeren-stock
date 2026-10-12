@@ -20,6 +20,7 @@ from . import outlook
 from . import portfolio as portfolio_mod
 from . import sentiment_meter
 from . import strategy_config as sc
+from . import swing as swing_mod
 from . import ths as ths_mod
 from . import trading
 from . import universe
@@ -185,6 +186,7 @@ def stock_detail(code: str) -> dict:
         p["hot_rank"] = _h["rank"]
         if _h.get("tag"):
             p["hot_tag"] = _h["tag"]
+    p["swing"] = swing_mod.evaluate(bars, code, cfg)
     p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
     p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
     p["kline_tail"] = bars[-30:]
@@ -388,6 +390,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         # ---- 买卖点 ----
         for p in picks:
             bars = kl.get(p["code"], [])
+            # 波段体系先算（买卖点要按打法排序，得先有 swing / style_fit）
+            p["swing"] = swing_mod.evaluate(bars, p["code"], cfg)
             p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
             p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
             p["kline_tail"] = bars[-30:]

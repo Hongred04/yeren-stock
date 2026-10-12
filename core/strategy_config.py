@@ -25,6 +25,7 @@ import json
 import os
 
 from . import paths
+from . import swing as swing_mod
 
 CONFIG_PATH = paths.data_path("strategy.json")
 
@@ -67,6 +68,11 @@ _M10_DEFAULTS = {
     "zhuang_crash_pct": -7.0,         # 庄股：断崖单日跌幅
     "zhuang_chop_amp": 2.8,           # 庄股：断崖前日均波动上限（无声阴跌）
 }
+
+# ---- M11 波段体系（野人《波段体系》7 讲，v1.25.0 融合） ----
+# 这是"平常打法"的量化落地：第一/第二入场点、第二波接入、高位滞涨离场。
+# 阈值定义在 core/swing.py 里（与判定逻辑放在一起，改逻辑时不容易漏改阈值）。
+_M11_DEFAULTS = dict(swing_mod.SWING_DEFAULTS)
 
 # ---- 扩展模块（E1-E3，参考 GitHub 同类项目新增，非野人原体系） ----
 _E1_DEFAULTS = {
@@ -175,6 +181,7 @@ PRESETS: dict[str, dict] = {
         },
         "M9_mainline": dict(_M9_DEFAULTS),
         "M10_fundstyle": dict(_M10_DEFAULTS),
+        "M11_swing": dict(_M11_DEFAULTS),
         "E1_meter": dict(_E1_DEFAULTS),
         "E2_lhb": dict(_E2_DEFAULTS),
         "E3_flow": dict(_E3_DEFAULTS),
