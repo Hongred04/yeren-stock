@@ -135,12 +135,16 @@ def _temperature(limit_up: int, max_boards: int, broken_ratio: float,
     return int(max(0, min(100, t1 + t2 + t3 + t4)))
 
 
-def _stage_of(temp: int, ebb: bool, prev_temp: int | None) -> str:
-    if ebb:
-        return "ebb"
-    # 温度从高位骤降 = 退潮预警
-    if prev_temp is not None and prev_temp - temp >= 18 and prev_temp >= 60:
-        return "ebb"
+def _stage_of(temp: int, prev_temp: int | None = None) -> str:
+    """按温度分 0-100 的非退潮档位：climax / ferment / revive / ice。
+
+    ★ 只分**非退潮档位**：退潮与否以 M3 稳定器的确认为准（build() 里的 peek
+    覆盖）—— 原始亏钱面积、温度骤降都只是**预警信号**，不在这里升级成"退潮"
+    阶段。v1.25.2 修：本函数曾收 ebb 入参、拿原始亏钱面积（hurt_area ≥ 阈值，
+    M3 口径）和「温度骤降 18°」直接 return "ebb"，与上述规格字面相悖 ——
+    M3 未经滞回确认（结论卡"情绪高潮·可以出手"）时 E1 已报"退潮"，
+    同屏两把尺子对不上（用户 10-12 实测「自相矛盾」的另一半）。
+    """
     if temp >= 80:
         return "climax"
     if temp >= 62:
@@ -279,12 +283,12 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
 
     temp = _temperature(n_zt, max_boards, broken_ratio, promote_rate, up_ratio)
 
-    # 退潮判定沿用 M3 口径（亏钱面积），这里只用来看是否需要温度骤降预警
+    # 亏钱面积（事实数据，进 metrics）。退潮与否**只由 M3 稳定器确认**（见下方
+    # peek 覆盖）—— E1 不自己拿原始面积强置"退潮"（v1.25.2 修：曾与自身注释相悖）。
     total3 = n_zt + n_dt + n_zb
     hurt_area = (n_dt + n_zb) / total3 if total3 else 0.0
-    ebb_flag = bool(total3 and hurt_area >= _f(a.get("ebb_hurt_ratio"), 0.30))
 
-    # 前一日温度（退潮预警用）
+    # 前一日温度（较上日变化 / 骤降预警信号用）
     hist = _load_hist()
     prev_temp = None
     for h in reversed(hist):
@@ -292,7 +296,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
             prev_temp = h.get("temperature")
             break
 
-    stage = _stage_of(temp, ebb_flag, prev_temp)
+    stage = _stage_of(temp, prev_temp)
     # 退潮与否**以 M3 稳定器的确认为准**（E1 只用自己的温度决定非退潮时的档位）。
     # 两个页面各报一个阶段是"一会能出手一会退潮"的另一个来源，这里统一口径。
     v = stab.peek(real_date)
@@ -306,6 +310,9 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     amt_sum = sum(_f(r.get("amount")) for r in zt)
     avg_seal_ratio = round(fund_sum / amt_sum, 2) if amt_sum > 0 else 0.0
 
+    # 温度骤降预警：只作**事实信号**进 metrics（供界面将来做「较昨日 -18°」提示），
+    # 不升级成"退潮"阶段 —— 退潮判定权归 M3 稳定器（v1.25.2）
+    drop_alert = bool(prev_temp is not None and prev_temp - temp >= 18 and prev_temp >= 60)
     metrics = {
         "limit_up": n_zt, "limit_down": n_dt, "broken": n_zb,
         "seal_rate": round(seal_rate, 3), "broken_ratio": round(broken_ratio, 3),
@@ -315,6 +322,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "height_premium": height_premium, "avg_seal_ratio": avg_seal_ratio,
         "premium_src": premium_src,       # em=东财昨日涨停池 / local=本地归档
         "breadth": breadth, "prev_pool_date": pdate, "prev_temp": prev_temp,
+        "drop_alert": drop_alert,
     }
     delta = (temp - prev_temp) if prev_temp is not None else None
 

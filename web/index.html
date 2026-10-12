@@ -1715,15 +1715,8 @@ function renderMeter(){
     el.innerHTML='<div class="card fl" style="font-size:13px">情绪温度计已关闭或数据不足</div>'; return;}
   const mt=m.metrics, t=m.temperature||0, s=STG[m.stage]||STG.revive;
   // M3（能不能出手，权威口径）与 E1 温度计（量化温度）是两套阶段口径
-  /// （交接单 5-B #9）：温度计报「退潮」而 M3 未确认时，必须说清口径差异 ——
-  // 不能一句「情绪高潮」一句「退潮」让用户觉得自相矛盾（用户 10-12 实测）。
-  const sen0=REPORT.sentiment||{};
-  const calibHtml=(m.stage==='ebb'&&sen0.stage&&sen0.stage!=='ebb')
-    ?`<div class="card" style="margin-top:12px;border-left:4px solid var(--org);background:#fffdf8;
-        font-size:12.5px;line-height:1.8;color:var(--tx2)">
-       <b style="color:var(--org)">口径说明：</b>温度计口径的「退潮」= 亏钱面积越过警戒线（量化温度）；
-       「能不能出手」以 <b>M3 情绪周期</b>（今日结论页）为准 —— 当前未确认退潮。
-       温度计看「今天多少度」，M3 判「能不能出手」，两把尺子，别混。</div>`:'';
+  /// （交接单 5-B #9）；v1.25.2 起 E1 的「退潮」只来自 M3 稳定器确认，
+  // 两把尺子在数据层面已统一，本页不再需要口径说明创可贴。
   const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'° '+(m.delta>=0?'回暖':'降温')+'）';
   const lad=(m.ladder||[]), mx=Math.max(1,...lad.map(x=>x.count));
   const ladHtml=lad.map(x=>`<div style="display:flex;align-items:center;gap:9px;margin:5px 0">
@@ -1769,7 +1762,6 @@ function renderMeter(){
     <div style="height:9px;background:rgba(255,255,255,.65);border-radius:5px;overflow:hidden;margin-top:12px">
       <div style="height:100%;width:${t}%;background:linear-gradient(90deg,#2563d9,#0f9d58,#e07c1a,#d92d3f)"></div></div>
   </div>
-  ${calibHtml}
   <div class="grid g4" style="margin-top:12px">${cards.map(c=>`<div class="mc ${c[3]}" title="${esc(c[4]||'')}">
     <div class="t">${c[0]}</div><div class="v" style="font-size:19px">${c[1]}</div>
     <div class="s">${esc(c[2])}</div></div>`).join('')}</div>

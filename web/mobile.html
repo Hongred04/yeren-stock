@@ -600,16 +600,9 @@ function render(fromCache,ts){
   const sp=meter.space||{};
   // M3 情绪周期（能不能出手，权威口径，经滞回稳定）与 E1 温度计（量化温度）
   // 是两套阶段口径（交接单 5-B #9）：用词相同（高潮/退潮）含义不同。
-  // 温度计报「退潮」而 M3 未确认时，同屏必须说清楚各自是什么口径 ——
-  // 不能让用户看到结论卡一句「情绪高潮」、温度格一句「退潮」，
-  // 觉得系统自相矛盾（用户 10-12 实测）。
-  const m3Ebb=sen.stage==='ebb', e1Ebb=meter.stage==='ebb';
-  const meterSubTxt=meter.temperature==null?'—'
-    :(e1Ebb&&!m3Ebb?'退潮（温度计口径）'
-      :(esc((meter.label||'').replace(/^\S+\s*/,''))||'—'));
-  const calibNote=(e1Ebb&&!m3Ebb)
-    ?`<div class="notice">口径说明：温度计的「退潮」是量化口径（亏钱面积越过警戒线）；
-      「能不能出手」以 M3 情绪周期为准 —— 当前未确认退潮，按上面结论卡执行。</div>`:'';
+  // v1.25.2 起 E1 的「退潮」只可能来自 M3 稳定器确认（sentiment_meter 不再
+  // 拿原始亏钱面积/温度骤降强置 ebb）—— 两把尺子在数据层面已统一，
+  // 同屏不会再出现一句「情绪高潮」一句「退潮」。
   const hist=d.history||{};
   const histNote=(hist.days!=null&&hist.days<8&&!fromCache)
     ? `<div class="notice">历史归档正在补齐（已 ${hist.days} 天${
@@ -625,14 +618,14 @@ function render(fromCache,ts){
   <div class="stats3">
     <div class="stat"><div class="t">情绪温度</div>
       <div class="v">${meter.temperature==null?'—':meter.temperature+'°'}</div>
-      <div class="s">${meterSubTxt}</div></div>
+      <div class="s">${esc((meter.label||'').replace(/^\S+\s*/,''))||'—'}</div></div>
     <div class="stat"><div class="t">空间板</div>
       <div class="v">${sp.today!=null?sp.today+'板':'—'}</div>
       <div class="s">${sp.prev20?(sp.open?'↑ 破前高'+sp.prev20:'前高'+sp.prev20+'未破'):'—'}</div></div>
     <div class="stat"><div class="t">涨停/跌停</div>
       <div class="v"><span class="up">${mt.limit_up!=null?mt.limit_up:'—'}</span><span class="fl" style="font-size:14px">/</span><span class="dn">${mt.limit_down!=null?mt.limit_down:'—'}</span></div>
       <div class="s">炸板 ${mt.broken!=null?mt.broken:'—'}</div></div>
-  </div>${calibNote}`;
+  </div>`;
   if(out.headline){
     t1+=`<h2>明日判断 <span class="cnt">${esc(out.date||'')}</span></h2>
       <div class="card">
