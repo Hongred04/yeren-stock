@@ -124,22 +124,41 @@ def main():
     ok(fr is not None and abs(fr - 0.30) < 0.01, f"60 分钟实测占比 ≈ 0.30（得到 {fr}）")
     ok(ds.intraday_fraction(60, min_days=5) is None, "样本不足 min_days → 返回 None（退回经验曲线）")
 
-    print("\n[7] evaluate_volume：实测曲线优先 + 上一交易日基准偏低要说明")
+    print("\n[7] evaluate_volume：盘中**不给全天外推数字**，只报已成交 + 节奏")
     cfg = sc.load_config()
     sess = {"phase": "morning", "tmin": 60}
-    v_exp = engine.evaluate_volume(cfg, 3000.0, [], session=sess)          # 3000 亿（已成交）
-    v_emp = engine.evaluate_volume(cfg, 3000.0, [], session=sess, frac_hint=0.30)
-    ok("经验曲线" in v_exp["basis"], f"无实测样本 → 用经验曲线：{v_exp['basis']}")
-    ok("近N日实测" in v_emp["basis"], f"有实测样本 → 用实测曲线：{v_emp['basis']}")
-    ok(abs(v_emp["amount"] - 10000.0) < 1.0,
-       f"3000 亿 ÷ 0.30 = 10000 亿（得到 {v_emp['amount']}）")
-    ok(v_emp["amount"] != v_exp["amount"],
-       f"两条曲线确实不同（经验 {v_exp['amount']} vs 实测 {v_emp['amount']}）")
+    v = engine.evaluate_volume(cfg, 3000.0, [], session=sess, frac_hint=0.30)
+    ok(v["amount"] is None, "盘中 amount 必须是 None（拿平均曲线外推全天没有把握）")
+    ok(v["cum_amount"] == 3000.0, "cum_amount = 已成交 3000 亿（事实）")
+    ok(v["intraday"] is True, "标记为盘中")
+    ok(v["pace"] is None and "积累中" in v["pace_txt"], "同期基准不够时明说在积累")
+    ok("暂判" in v["basis"] and "累计" in v["basis"], f"口径写明是累计口径+暂判：{v['basis']}")
+    ok(v["mode"] == "comfort_short",
+       f"3000 亿÷30% = 10000 亿 → 舒适区档（得到 {v['mode']}）")
+    v_big = engine.evaluate_volume(cfg, 6000.0, [], session=sess, frac_hint=0.30)
+    ok(v_big["mode"] == "peak_swing",
+       f"6000 亿÷30% = 20000 亿 → 峰值档（得到 {v_big['mode']}）")
+    # 节奏对比：给了近期基准才出现，且是"事实型"表述
+    v_p = engine.evaluate_volume(cfg, 3000.0, [], session=sess,
+                                 frac_hint=0.30, ref_amount=10000.0)
+    ok(v_p["pace"] is not None and abs(v_p["pace"] - 1.0) < 0.01,
+       f"基准 10000×30% = 3000 → pace ≈ 1.0（得到 {v_p['pace']}）")
+    ok("相当" in v_p["pace_txt"], f"节奏文案：{v_p['pace_txt']}")
+    v_f = engine.evaluate_volume(cfg, 5000.0, [], session=sess,
+                                 frac_hint=0.30, ref_amount=10000.0)
+    ok(v_f["pace"] > 1.25 and "放量" in v_f["pace_txt"],
+       f"快 67% → 明显放量：{v_f['pace_txt']}")
+    # 收盘后才是事实
+    vc = engine.evaluate_volume(cfg, 19000.0, [], session={"phase": "after_close", "tmin": 240})
+    ok(vc["amount"] == 19000.0 and vc["intraday"] is False,
+       "收盘后 amount = 全天终值（事实，不再是预测）")
     pre = {"phase": "pre_open", "tmin": 0}
-    v_f = engine.evaluate_volume(cfg, 0, [], session=pre, fallback_amount=19000.0, fallback_final=False)
-    ok("盘中快照" in v_f["basis"], f"只扫到盘中的基准要说明偏低：{v_f['basis']}")
-    v_t = engine.evaluate_volume(cfg, 0, [], session=pre, fallback_amount=19000.0, fallback_final=True)
-    ok("全天" in v_t["basis"], f"收盘终值才叫全天：{v_t['basis']}")
+    v_fb = engine.evaluate_volume(cfg, 0, [], session=pre, fallback_amount=19000.0,
+                                  fallback_final=False)
+    ok("盘中快照" in v_fb["basis"], f"只扫到盘中的基准要说明偏低：{v_fb['basis']}")
+    v_ft = engine.evaluate_volume(cfg, 0, [], session=pre, fallback_amount=19000.0,
+                                  fallback_final=True)
+    ok("全天" in v_ft["basis"], f"收盘终值才叫全天：{v_ft['basis']}")
 
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0

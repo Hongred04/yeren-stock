@@ -52,7 +52,11 @@ def main(date: str = "", preset: str = "wildman", top: int = 12):
     print(f"\n[M1 宏观周期] {mac['label']}   风险={mac['risk']}")
     print(f"  {mac['note']}  关注: {'/'.join(mac['focus']) or '—'}")
 
-    print(f"\n[M2 量能模式] {vol['label']}  ({vol['amount']:.0f}亿)")
+    # 盘中 amount 是 None（不给全天外推数字）→ 报"已成交"，别炸
+    _vamt = vol.get("amount")
+    _vtxt = (f"全天 {_vamt:.0f}亿" if _vamt is not None
+             else f"已成交 {vol.get('cum_amount') or 0:.0f}亿（盘中累计，不外推全天）")
+    print(f"\n[M2 量能模式] {vol['label']}  ({_vtxt})")
     print(f"  {vol['advice']}")
 
     print(f"\n[M3 情绪周期] {sen['label']}   可出手={sen['can_trade']}")

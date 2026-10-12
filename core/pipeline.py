@@ -340,12 +340,16 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         amt_yi = ds.market_amount_hwm(real_date, amt_yi)
         amount = amt_yi * 1e8
         fb = ds.load_last_amount_meta(real_date)
-        # 盘中折算用**近 N 日实测占比曲线**（写死的经验曲线在不同量能形态下偏差明显）
+        # 盘中折算用**近 N 日实测占比曲线**（写死的经验曲线在不同量能形态下偏差明显）；
+        # ref_amount 给"与近期同期的节奏对比"当基准。注意：盘中**不外推全天额**
+        # （见 engine.evaluate_volume 的说明），界面上只报已成交额 + 节奏。
         volume = engine.evaluate_volume(cfg, amount, hist, session=sess,
                                         fallback_amount=fb["amount"],
                                         fallback_final=fb["final"],
                                         frac_hint=ds.intraday_fraction(
-                                            sess.get("tmin", 240)))
+                                            sess.get("tmin", 240)),
+                                        ref_amount=ds.recent_amount_median(
+                                            8, exclude_date=real_date))
         # 归档当日高水位：既进长期档案（次日盘前的基准），也进日内曲线（供折算校准）
         if amt_yi > 0:
             ds.save_market_amount(

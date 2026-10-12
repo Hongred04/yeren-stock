@@ -74,7 +74,8 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     mm = sentiment.get("metrics") or {}
     mtr = meter.get("metrics") or {}
     vol_mode = volume.get("mode", "unknown")
-    vol_amt = _f(volume.get("amount"))
+    # 盘中 amount 是 None（不给全天外推数字）—— 那就报"已成交"，别显示 0
+    vol_amt = _f(volume.get("amount")) or _f(volume.get("cum_amount"))
     theme = ml.get("theme") or ""
     ml_status = ml.get("status") or ""
     capital = flow.get("capital") or {}

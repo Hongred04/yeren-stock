@@ -113,29 +113,37 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                     session: dict | None = None,
                     fallback_amount: float = 0.0,
                     fallback_final: bool = True,
-                    frac_hint: float | None = None) -> dict:
+                    frac_hint: float | None = None,
+                    ref_amount: float = 0.0) -> dict:
     """M2 量能定模式 —— 整个体系的模式总开关。
 
     session/fallback_amount：量能阈值是「全天成交额」口径，而快照里的
     成交额是当日累计值 —— 集合竞价时约等于零，早盘也只有两三成。
-    盘前/非交易时段改用上一交易日的全天额（本地持久化），
-    盘中按日内占比折算成预估全天额，收盘后直读。口径写进 basis，
-    界面上跟着显示，杜绝"没开盘就说极度缩量"这类假结论。
+    盘前/非交易时段改用上一交易日的全天额（本地持久化），收盘后直读。
+    口径写进 basis，界面上跟着显示，杜绝"没开盘就说极度缩量"这类假结论。
 
     fallback_final：上一交易日那条记录是不是**收盘后**的全天终值。盘中只扫到
     一半的值明显偏低，界面必须说明，不能冒充"全天"。
 
-    frac_hint：由调用方从历史实测曲线算出的「截至当前时刻的累计占比」。给了就用
-    它折算（比写死的经验曲线准得多）；不给则退回内置经验曲线。
+    frac_hint：由调用方从历史实测曲线算出的「截至当前时刻的累计占比」。
+
+    ★ 盘中**不外推全天额**（v1.24.1）：拿一条平均曲线把几十分钟的进度放大到
+    全天，误差大到没有参考价值 —— 实测 10:29 已成交 7795 亿 → 外推 28487 亿，
+    比前一天全天还多 50%，而同期基准当时只有 1 天样本。所以盘中 `amount` 一律
+    返回 None，界面只报"已成交"（事实）+ "与近期同期的节奏对比"（也是事实）；
+    模式判定仍按折算走，但明确标成"暂判"。收盘后 `amount` 才是全天终值。
+    ref_amount：近 N 个已收盘交易日全天额中位数，用于算节奏倍数。
     """
     v = cfg.get("M2_volume", {})
     if not v.get("enabled", True):
         return {"mode": "disabled", "label": "量能模块已关闭", "advice": "自行判断",
-                "short_only": False, "amount": market_amount}
+                "short_only": False, "amount": None, "cum_amount": 0.0,
+                "intraday": False, "pace": None, "pace_txt": "", "basis": ""}
 
     amt_raw = market_amount / 1e8 if market_amount > 1e5 else market_amount
     phase = (session or {}).get("phase", "")
     tmin = (session or {}).get("tmin", 240)
+    intraday = phase in ("morning", "noon", "afternoon", "tail")
 
     if phase in ("pre_open", "auction", "rest"):
         if fallback_amount and fallback_amount > 0:
@@ -148,13 +156,14 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 "advice": ("当前是盘前/非交易时段，当日量能还没形成 —— "
                            "别急着定模式，开盘半小时后再看量能"),
                 "short_only": False,
-                "amount": 0, "raw_amount": round(amt_raw, 0),
+                "amount": None, "cum_amount": 0.0, "intraday": False,
+                "pace": None, "pace_txt": "", "raw_amount": round(amt_raw, 0),
                 "basis": "无（当日数据未形成）", "red_flag": "",
             }
     elif phase in ("just_closed", "after_close"):
         amt = amt_raw
         basis = "当日全天（已收盘）"
-    elif phase in ("morning", "noon", "afternoon", "tail"):
+    elif intraday:
         if amt_raw <= 0:
             # 盘中但累计额为 0：数据未就绪（接口异常/刚开盘第一分钟）
             return {
@@ -162,7 +171,8 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 "advice": ("盘中但成交额数据未形成 —— 等数据就绪后再定模式，"
                            "先不动手"),
                 "short_only": False,
-                "amount": 0, "raw_amount": 0,
+                "amount": None, "cum_amount": 0.0, "intraday": True,
+                "pace": None, "pace_txt": "", "raw_amount": 0,
                 "basis": "无（盘中数据未就绪）", "red_flag": "",
             }
         frac_static = max(_traded_fraction(tmin), 0.02)
@@ -171,16 +181,33 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
             # 实测曲线优先：不同交易日的量能形态差别很大（放量日开盘更集中、
             # 缩量日更平），写死的曲线必然有系统偏差
             frac, frac_src = max(float(frac_hint), 0.02), "近N日实测"
-        est = amt_raw / frac
-        # 早盘外推倍数封顶：9:35 时"已成交额 ×6"已是乐观上限，再多就是拍脑袋
-        cap = amt_raw * 6
-        capped = est > cap
-        amt = min(max(est, amt_raw), cap)
-        basis = (f"盘中预估全天（已成交{amt_raw:.0f}亿 · {frac_src}折算"
-                 f"{'·已按上限收敛' if capped else ''}）")
+        # 内部折算只用于**模式判定**，不对外输出全天数字
+        amt = min(max(amt_raw / frac, amt_raw), amt_raw * 6)
+        basis = f"盘中累计{amt_raw:.0f}亿 · 模式按{frac_src}折算暂判"
     else:
         amt = amt_raw
         basis = "当日实时"
+
+    # 节奏倍数：当前累计 ÷ 「近期同期该有的累计」。这是**事实型**对比，
+    # 比"外推全天额"稳得多，也是界面上真正有用的那句话。
+    pace = None
+    pace_txt = ""
+    if intraday:
+        if ref_amount > 0 and amt_raw > 0:
+            frac_now = max(_traded_fraction(tmin), 0.02)
+            if frac_hint and 0.02 <= float(frac_hint) <= 1.0:
+                frac_now = max(float(frac_hint), 0.02)
+            exp = ref_amount * frac_now
+            if exp > 0:
+                pace = round(amt_raw / exp, 2)
+                if pace >= 1.25:
+                    pace_txt = f"比近期同期快 {(pace-1)*100:.0f}%（明显放量）"
+                elif pace <= 0.8:
+                    pace_txt = f"比近期同期慢 {(1-pace)*100:.0f}%（明显缩量）"
+                else:
+                    pace_txt = "与近期同期相当"
+        else:
+            pace_txt = "同期基准积累中（需 3 个以上交易日）"
 
     peak = v.get("peak_threshold", 15000)
     comfort = v.get("comfort_threshold", 5000)
@@ -220,7 +247,12 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         "label": VOLUME_MODES.get(mode, mode),
         "advice": f"{advice}（量能口径：{basis}）",
         "short_only": short_only,
-        "amount": round(amt, 0),
+        # 全天成交额：**只有收盘后它才是事实**。盘中一律 None —— 界面不给外推数字。
+        "amount": None if intraday else round(amt, 0),
+        "cum_amount": round(amt_raw, 0),      # 盘中"已成交"（事实）
+        "intraday": intraday,
+        "pace": pace,                         # 相对近期同期的节奏倍数（None=基准不够）
+        "pace_txt": pace_txt,
         "raw_amount": round(amt_raw, 0),
         "basis": basis,
         "red_flag": red_flag,

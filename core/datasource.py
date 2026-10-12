@@ -666,6 +666,29 @@ def save_market_amount(date: str, amount_yi: float, final: bool = False) -> None
         pass
 
 
+def recent_amount_median(days: int = 8, exclude_date: str = "") -> float:
+    """近 N 个**已收盘**交易日两市成交额的中位数（亿）。样本不足返回 0。
+
+    用途：给盘中的"节奏对比"当基准 —— 比"拿平均曲线外推全天额"稳得多。
+    排除 exclude_date（今天，还是半天的数）以及 final=False 的盘中记录。
+    """
+    amts = []
+    for e in _amount_entries():
+        d = str(e.get("date", ""))
+        if not d or d == exclude_date:
+            continue
+        if not e.get("final", True):      # 盘中快照（偏低）不能当全天基准
+            continue
+        v = float(e.get("amount") or 0)
+        if v > 0:
+            amts.append(v)
+    if len(amts) < 3:
+        return 0.0
+    amts = sorted(amts)[-days:]
+    n = len(amts)
+    return round(amts[n // 2] if n % 2 else (amts[n // 2 - 1] + amts[n // 2]) / 2, 1)
+
+
 def load_last_complete_amount(date_limit: str) -> float:
     """<= date_limit 的最近一个完整交易日两市成交额（亿）。无记录返回 0。"""
     return load_last_amount_meta(date_limit)["amount"]

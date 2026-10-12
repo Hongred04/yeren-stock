@@ -995,12 +995,22 @@ function render(){
   </div>`;
 
   /* ── ② 关键指标（大白话标签） ── */
+  // 量能：**盘中只报"已成交"**（事实），全天成交额只在收盘后才是事实。
+  // 之前盘中给的是"拿平均曲线把几十分钟进度放大到全天"的外推值 —— 实测 10:29
+  // 已成交 7795 亿被外推成 28487 亿（比前一天全天还多 50%），这种数字没有把握，
+  // 不该出现在界面上。盘中改为报已成交额 + 与近期同期的节奏对比（都是事实）。
+  const volAmtTxt = vol.amount!=null
+      ? Math.round(vol.amount).toLocaleString()+'亿'
+      : (vol.cum_amount ? Math.round(vol.cum_amount).toLocaleString()+'亿' : '—');
+  const volSub = (vol.amount!=null ? '' : '已成交（盘中累计）· ')
+      + (VOL_CN[vol.mode]||vol.label)
+      + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '');
   const cards=[
     {t:'今天能买吗',v:canTrade?'能':'不能',
       s:!canTrade?'退潮期或极度缩量':(pos.chain_stage==='probe'?'可以试错':'按计划操作'),
       c:canTrade?'g':'r'},
-    {t:'两市成交额',v:vol.mode==='pending'?'—':Math.round(vol.amount).toLocaleString()+'亿',
-      s:(VOL_CN[vol.mode]||vol.label)+(vol.basis?' · '+vol.basis:''),
+    {t:vol.amount!=null?'两市成交额':'两市已成交',v:volAmtTxt,
+      s:volSub,
       c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
     {t:'涨停 / 跌停',v:mm.limit_up+' / '+mm.limit_down,
       s:'炸板 '+mm.broken+' 只',c:''},
@@ -1134,9 +1144,13 @@ function render(){
       c:mac.risk==='high'?'bd':(mac.risk==='low'?'ok':'wn'),
       pctv:mac.risk==='low'?100:(mac.risk==='high'?15:55), pc:mac.risk==='low'?'var(--grn)':(mac.risk==='high'?'var(--red)':'var(--org)')},
     {q:'市场的钱够不够多？',
-      a:`两市成交 <b>${Math.round(vol.amount).toLocaleString()}亿</b>，属于<b>${esc(VOL_CN[vol.mode]||vol.label)}</b>。<br>${esc(vol.advice)}`,
+      a:`两市成交 <b>${volAmtTxt}</b>${vol.amount!=null?'':'（盘中累计）'}，属于<b>${
+          esc(VOL_CN[vol.mode]||vol.label)}</b>${vol.intraday?'（暂判）':''}。<br>${
+          vol.intraday&&vol.pace_txt?esc(vol.pace_txt)+'。':''}${esc(vol.advice)}`,
       c:vol.mode==='dry'?'bd':(vol.short_only?'wn':'ok'),
-      pctv:Math.min(100,vol.amount/180), pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
+      pctv:vol.pace!=null?Math.min(100,Math.round(vol.pace*55))
+           :(vol.amount!=null?Math.min(100,vol.amount/180):50),
+      pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
     {q:'大家现在是抢着买还是在跑？',
       a:`<b>${esc(STAGE_CN[sen.stage]||sen.label)}</b>，最高 ${sen.max_boards} 连板，封板率 ${(mm.seal_rate*100).toFixed(0)}%，`
         +`亏钱股票占 ${(mm.hurt_area*100).toFixed(0)}%。<br>${sen.can_trade?'<b>可以按节奏操作</b>':'<b>禁止开仓</b>'}`,
