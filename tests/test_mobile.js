@@ -127,6 +127,40 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   //    根因是缓存路径不经过 refresh()，render 里忘了隐藏 loading）
   ok($('loading').style.display === 'none', '有数据后加载态已隐藏');
 
+  // ⑩ 刷新语义：主动刷新必须真的重扫（用户实测「点刷新页面完全不变」）
+  //    根因：/api/result 有 3 分钟内存缓存（RESULT_TTL=180s），不清缓存时
+  //    render() 用同一份对象重画 → 看起来没刷新。
+  //    放在最前面：主动刷新有 60 秒节流，后面的用例会消费掉这个额度。
+  const calls = [];
+  w.fetch = async (u, opt) => {
+    const url = String(u);
+    calls.push(((opt && opt.method) || 'GET') + ' ' + url.replace(/^.*\/api/, '/api').split('?')[0]);
+    if (url.includes('/api/status')) return { ok: true, status: 200, json: async () => ({ done: true, pct: 100 }) };
+    if (url.includes('/api/sources')) return { ok: true, status: 200, json: async () => ({ blocked: [], push2: {}, cookie: {} }) };
+    if (url.includes('/api/invalidate')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    if (url.includes('/api/start')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    return { ok: true, status: 200, json: async () => report };
+  };
+  calls.length = 0;
+  await w.refresh(true);
+  await new Promise(r => setTimeout(r, 60));
+  ok(calls.some(c => c === 'POST /api/invalidate'), '主动刷新先清结果缓存');
+  ok(calls.some(c => c === 'GET /api/start'), '主动刷新触发全量重扫');
+  ok(calls.indexOf('POST /api/invalidate') < calls.indexOf('GET /api/result'),
+     '清缓存发生在取结果之前（顺序不能反）');
+  w.stopRescan();                        // 收掉后台重扫轮询，别干扰后续用例
+
+  calls.length = 0;                      // 60 秒节流：下拉手势容易误触
+  await w.refresh(true);
+  await new Promise(r => setTimeout(r, 60));
+  ok(!calls.some(c => c === 'POST /api/invalidate'), '60 秒内重复主动刷新不再重扫（防误触）');
+
+  calls.length = 0;                      // 静默刷新（每分钟）不该触发重扫
+  await w.refresh(false);
+  await new Promise(r => setTimeout(r, 60));
+  ok(!calls.some(c => c === 'POST /api/invalidate') && !calls.some(c => c === 'GET /api/start'),
+     '静默刷新只重取结果，不重扫');
+
   // ⑦ 进度字段名用服务端的 progress（曾经错写成 msg，文案一直卡在"扫描中"）
   const mobSrc = html;
   ok(mobSrc.includes('st.progress') && !mobSrc.includes("st.msg"),

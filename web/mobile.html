@@ -456,14 +456,31 @@ function saveCache(){
     localStorage.setItem('yeren_mobile_ts',new Date().toLocaleTimeString('zh-CN',
       {hour:'2-digit',minute:'2-digit'})); }catch(e){}
 }
+/* 主动刷新 vs 静默刷新的区别（用户实测踩过：点刷新页面完全不变）
+   · 静默（每分钟 / 切回前台）→ 只重取结果，命中缓存就命中，不打扰；
+   · 主动（点按钮 / 下拉）→ 用户要的是"最新"，必须先清结果缓存：
+     `/api/result` 有 3 分钟内存缓存（RESULT_TTL=180s），不清的话点多少次
+     都拿回同一份对象，render() 用同样数据重画 → 看起来"刷新不出来"。
+   60 秒节流：下拉手势极易误触（在顶部往上滑就触发），不能每次都全量重扫。 */
+let _lastManualAt=0;
+const MANUAL_SCAN_GAP=60*1000;
+function _btnIdle(){
+  const b=$('btnRefresh'); if(b){ b.classList.remove('syncing'); b.textContent='⟳ 刷新'; }
+}
+
 async function refresh(manual){
   const btn=$('btnRefresh');
   if(manual){ btn.classList.add('syncing'); btn.textContent='⟳ 同步中'; }
+  const wantScan = manual && (Date.now()-_lastManualAt > MANUAL_SCAN_GAP);
+  if(wantScan){
+    _lastManualAt=Date.now();
+    try{ await fetch('/api/invalidate',{method:'POST',cache:'no-store'}); }catch(e){}
+  }
   try{
     const [rep] = await Promise.all([fetchReport(), fetchSources()]);
-    if(!rep){                        // 首次使用：没有历史结果 → 显示进度并扫描
+    if(!rep){                        // 没有历史结果 → 显示进度并扫描
       $('loading').style.display=''; $('err').style.display='none';
-      $('loadMsg').textContent='首次使用，正在扫描…';
+      $('loadMsg').textContent=wantScan?'正在重新扫描…':'首次使用，正在扫描…';
       $('loadBar').style.width='2%';
       startAndPoll();
       return;
@@ -471,7 +488,8 @@ async function refresh(manual){
     REPORT=rep; saveCache();
     $('loading').style.display='none'; $('err').style.display='none';
     render(!!rep.stale, rep.stale?_staleLabel(rep):'刚刚');
-    if(rep.stale) silentRescan();    // 端出来的是上次结果 → 后台静默重扫
+    // 主动刷新（或端出的是上次结果）→ 后台重扫，扫完自动换上新数据
+    if(wantScan || rep.stale) silentRescan();
   }catch(e){
     if(!REPORT){
       $('loading').style.display='none'; $('err').style.display='block';
@@ -479,9 +497,13 @@ async function refresh(manual){
     }else{
       $('hmeta').textContent='联网失败 · 显示上次结果';
     }
-  }finally{ if(manual){ btn.classList.remove('syncing'); btn.textContent='⟳ 刷新'; } }
+  }finally{
+    // 后台还在重扫就保持"同步中"，扫完由 silentRescan 复位
+    if(manual && !_rescanning) _btnIdle();
+  }
 }
 async function startAndPoll(){
+  if(POLL){ clearInterval(POLL); POLL=null; }   // 别叠出第二个轮询
   try{ await fetch('/api/start?top=20&limit=260',{cache:'no-store'}); }catch(e){}
   let n=0;
   POLL=setInterval(async()=>{
@@ -491,37 +513,43 @@ async function startAndPoll(){
       const p=Math.max(0,Math.min(99,Math.round(st.pct||0)));
       $('loadBar').style.width=p+'%';
       $('loadMsg').textContent=(st.progress||'扫描中')+(st.pct?'（'+p+'%）':'');
-      if(st.done){ clearInterval(POLL); $('loadBar').style.width='100%';
+      if(st.done){ clearInterval(POLL); POLL=null; $('loadBar').style.width='100%';
         setTimeout(()=>refresh(false),300); }
-      else if(st.error){ clearInterval(POLL); $('loadMsg').textContent='扫描出错：'+st.error; }
+      else if(st.error){ clearInterval(POLL); POLL=null; $('loadMsg').textContent='扫描出错：'+st.error; }
     }catch(e){}
-    if(n>150){ clearInterval(POLL); $('loadMsg').textContent='等待超时，点刷新重试'; }
+    if(n>150){ clearInterval(POLL); POLL=null; $('loadMsg').textContent='等待超时，点刷新重试'; }
   },2000);
 }
 
 /* ── 过期缓存（上次结果）与后台静默重扫 ── */
-let _rescanning=false;
+let _rescanning=false, _rescanTimer=null;
 function _staleLabel(d){
   const ts=d&&d.stale_ts;
   if(!ts) return '上次结果';
   try{ return new Date(ts*1000).toLocaleTimeString('zh-CN',
     {hour:'2-digit',minute:'2-digit'}); }catch(e){ return '上次结果'; }
 }
+function stopRescan(){
+  if(_rescanTimer){ clearInterval(_rescanTimer); _rescanTimer=null; }
+  _rescanning=false;
+}
 /* 先让用户看到上次结果，后台重扫，扫完自动刷新（不显示进度、不打断浏览） */
 function silentRescan(){
   if(_rescanning) return;
   _rescanning=true;
+  const b=$('btnRefresh'); if(b){ b.classList.add('syncing'); b.textContent='⟳ 扫描中'; }
   (async()=>{
     try{ await fetch('/api/start?top=20&limit=260',{cache:'no-store'}); }
-    catch(e){ _rescanning=false; return; }
+    catch(e){ stopRescan(); _btnIdle(); return; }
+    if(!_rescanning) return;          // 期间被 stopRescan 取消 → 别再挂轮询
     let n=0;
-    const t=setInterval(async()=>{
+    _rescanTimer=setInterval(async()=>{
       n++;
       try{
         const st=await (await fetch('/api/status',{cache:'no-store'})).json();
-        if(st.done){ clearInterval(t); _rescanning=false; refresh(false); }
-        else if(st.error||n>120){ clearInterval(t); _rescanning=false; }
-      }catch(e){ if(n>120){ clearInterval(t); _rescanning=false; } }
+        if(st.done){ stopRescan(); _btnIdle(); refresh(false); }
+        else if(st.error||n>120){ stopRescan(); _btnIdle(); }
+      }catch(e){ if(n>120){ stopRescan(); _btnIdle(); } }
     },3000);
   })();
 }
@@ -529,6 +557,8 @@ function silentRescan(){
 /* ── 渲染 ── */
 function render(fromCache,ts){
   const d=REPORT; if(!d||!d.meta) return;
+  // 静默刷新每分钟会重画一次，别把用户的滚动位置弹走（桌面版也有同样的处理）
+  const _y=window.scrollY||0;
   // 有数据就把加载态收掉 —— 缓存路径（loadCache）不经过 refresh()，
   // 之前忘了在这里隐藏，进 App 会一直顶着"正在准备…"半屏白（用户实测）
   $('loading').style.display='none';
@@ -735,6 +765,7 @@ function render(fromCache,ts){
 
   $('app').style.display='block';
   _afterFirstRender();      // 首屏出来了 → 这时才允许弹「要不要去东财验证」
+  try{ window.scrollTo(0,_y); }catch(e){}
 }
 
 /* ── 抽屉：候选详情 ── */
@@ -870,7 +901,13 @@ document.addEventListener('touchend',e=>{
 /* ── 启动 ── */
 $('btnRefresh').onclick=()=>refresh(true);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refresh(false); });
-if(!loadCache()) startAndPoll();
+if(!loadCache()){
+  startAndPoll();          // 首次：没有历史结果 → 直接扫
+}else{
+  // 有本地缓存：先出内容，紧接着与服务器核对一次 —— 服务器上有更新的一份就换上，
+  // 端出来的是过期结果就自动重扫。否则要干等 60 秒的轮询才更新。
+  refresh(false);
+}
 // 数据源状态独立于报告：缓存路径不经过 refresh()，这里也拉一次
 // —— 受限要在首屏就提示并给出去验证的入口，而不是等 60 秒后的轮询
 fetchSources();
