@@ -611,8 +611,12 @@ const f2=(v,d=2)=>(v==null||!isFinite(Number(v)))?'—':Number(v).toFixed(d);
 const pct=v=>v>0?'up':(v<0?'dn':'fl');
 const STAGE_CN={probe:'新周期刚起步',climax:'情绪高潮，主升阶段',follow:'扩散跟风阶段',
   ebb:'退潮期',unknown:'数据不足',disabled:'已关闭',idle:'待命'};
-const VOL_CN={peak_swing:'量能充沛',comfort_short:'量能舒适',shrink_short:'量能偏小',
-  shrink_red:'极度缩量但红盘',dry:'极度缩量',pending:'量能未就绪（盘前）',disabled:'已关闭'};
+// 与 core/engine.py VOLUME_MODES 保持同一口径：label 只描述**量能状态**，
+// 行动指令/选股口径在 advice 与「今日应对打法」框里 —— 兜底映射和主映射
+// 必须是同一套文案，否则后端一改 label 两边就对不上（用户 10-12 实测：
+// 副标题夹带「中长线波段大票」与打法框「短线快枪」同屏自相矛盾）。
+const VOL_CN={peak_swing:'峰值量能',comfort_short:'量能舒适',shrink_short:'缩量存量',
+  shrink_red:'极致缩量还红盘',dry:'极度缩量',pending:'量能未就绪',disabled:'已关闭'};
 
 // ── 二级菜单：一级=大板块，二级=具体页面（一次只看一页） ──
 const NAV=[
@@ -952,6 +956,12 @@ function render(){
   const m=REPORT.meta, mac=REPORT.macro, vol=REPORT.volume, sen=REPORT.sentiment;
   const pos=REPORT.position, mt=REPORT.discipline;
   const mm=sen.metrics;
+  // 亏钱面积警戒线读配置（M3_sentiment.ebb_hurt_ratio，默认 0.30）——
+  // 不写死：改了配置，界面文案要跟着变（交接单踩坑 #31 同类）。
+  const _msCfg=(CONFIG&&CONFIG.M3_sentiment)||(REPORT.config&&REPORT.config.M3_sentiment)||{};
+  const hurtTh=(_msCfg.ebb_hurt_ratio!=null&&isFinite(Number(_msCfg.ebb_hurt_ratio)))
+    ?Number(_msCfg.ebb_hurt_ratio):0.30;
+  const hurtTxt=(hurtTh*100).toFixed(0)+'%';
   const ml=REPORT.mainline||{status:'disabled',label:'模块已关闭',signals:[],themes:[],dragons:[]};
   const ML_CN={confirmed:['主线成立','go'],day1_pending:['首日启动 · 待次日验证','hold'],
     watch:['信号不全 · 仅观察','hold'],one_day:['一日游特征 · 回避接力','stop'],
@@ -1015,7 +1025,7 @@ function render(){
     {t:'涨停 / 跌停',v:mm.limit_up+' / '+mm.limit_down,
       s:'炸板 '+mm.broken+' 只',c:''},
     {t:'亏钱的股票占比',v:(mm.hurt_area*100).toFixed(0)+'%',
-      s:mm.hurt_area>=0.30?'超过30%警戒线':'低于30%警戒线',c:mm.hurt_area>=0.30?'r':'g'},
+      s:(mm.hurt_area>=hurtTh?'超过':'低于')+hurtTxt+'警戒线',c:mm.hurt_area>=hurtTh?'r':'g'},
     {t:'纪律检查',v:{green:'正常',yellow:'有注意',red:'有冲突'}[mt.status],
       s:mt.checks.length+' 项检查',c:mt.status==='green'?'g':(mt.status==='yellow'?'o':'r')},
     {t:'题材主线',v:(ml.status==='one_day'&&ml.streak>=2)?'容量有限':(ML_ST[ml.status]||'—'),
@@ -1704,6 +1714,16 @@ function renderMeter(){
   if(m.enabled===false||!m.metrics||!Object.keys(m.metrics).length){
     el.innerHTML='<div class="card fl" style="font-size:13px">情绪温度计已关闭或数据不足</div>'; return;}
   const mt=m.metrics, t=m.temperature||0, s=STG[m.stage]||STG.revive;
+  // M3（能不能出手，权威口径）与 E1 温度计（量化温度）是两套阶段口径
+  /// （交接单 5-B #9）：温度计报「退潮」而 M3 未确认时，必须说清口径差异 ——
+  // 不能一句「情绪高潮」一句「退潮」让用户觉得自相矛盾（用户 10-12 实测）。
+  const sen0=REPORT.sentiment||{};
+  const calibHtml=(m.stage==='ebb'&&sen0.stage&&sen0.stage!=='ebb')
+    ?`<div class="card" style="margin-top:12px;border-left:4px solid var(--org);background:#fffdf8;
+        font-size:12.5px;line-height:1.8;color:var(--tx2)">
+       <b style="color:var(--org)">口径说明：</b>温度计口径的「退潮」= 亏钱面积越过警戒线（量化温度）；
+       「能不能出手」以 <b>M3 情绪周期</b>（今日结论页）为准 —— 当前未确认退潮。
+       温度计看「今天多少度」，M3 判「能不能出手」，两把尺子，别混。</div>`:'';
   const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'° '+(m.delta>=0?'回暖':'降温')+'）';
   const lad=(m.ladder||[]), mx=Math.max(1,...lad.map(x=>x.count));
   const ladHtml=lad.map(x=>`<div style="display:flex;align-items:center;gap:9px;margin:5px 0">
@@ -1749,6 +1769,7 @@ function renderMeter(){
     <div style="height:9px;background:rgba(255,255,255,.65);border-radius:5px;overflow:hidden;margin-top:12px">
       <div style="height:100%;width:${t}%;background:linear-gradient(90deg,#2563d9,#0f9d58,#e07c1a,#d92d3f)"></div></div>
   </div>
+  ${calibHtml}
   <div class="grid g4" style="margin-top:12px">${cards.map(c=>`<div class="mc ${c[3]}" title="${esc(c[4]||'')}">
     <div class="t">${c[0]}</div><div class="v" style="font-size:19px">${c[1]}</div>
     <div class="s">${esc(c[2])}</div></div>`).join('')}</div>
@@ -1855,7 +1876,7 @@ function renderOutlook(){
   const mode=o.mode||{};
   const modeHtml=mode.name?`<div style="margin-top:12px;padding:10px 13px;border-radius:9px;
     background:#fffdf8;border-left:4px solid var(--org);font-size:12.5px;line-height:1.7">
-    <b style="color:var(--org)">当前打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:'';
+    <b style="color:var(--org)">今日应对打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:'';
   el.innerHTML=`<div class="verdict ${cls}">
     <div class="hd2"><div class="ic">${emoji}</div>
       <div><div class="ti" style="font-size:18.5px">明日（${esc(o.date||'')}）· ${esc(o.headline)}</div></div></div>

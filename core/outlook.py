@@ -87,6 +87,15 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     money_effect = mtr.get("money_effect")
     temp = meter.get("temperature")
 
+    # 亏钱面积警戒线读配置（M3_sentiment.ebb_hurt_ratio，默认 0.30）——
+    # 不写死：改了配置，界面文案要跟着变（交接单踩坑 #31）。
+    try:
+        hurt_th = float((cfg.get("M3_sentiment", {}) or {}).get("ebb_hurt_ratio", 0.30))
+    except (TypeError, ValueError):
+        hurt_th = 0.30
+    th_txt = f"{hurt_th * 100:.0f}%"
+    watch_th = max(0.0, hurt_th - 0.05)   # 比警戒线低 5 个点就开始盯
+
     def _p(v, suffix="%", d=1):
         return "—" if v is None else f"{_f(v):.{d}f}{suffix}"
 
@@ -175,12 +184,12 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     watch: list[str] = []
     if vol_mode in ("shrink_short", "shrink_red", "dry"):
         watch.append("开盘半小时两市成交额 —— 比今日同期放大才谈进攻")
-    if hurt >= 0.25 or stage == "ebb":
+    if hurt >= watch_th or stage == "ebb":
         watch.append(f"亏钱面积（跌停+炸板占比）—— 现在 {hurt*100:.0f}%，"
-                     f"回落到 30% 以下才算修复")
+                     f"回落到 {th_txt} 以下才算修复")
     else:
         watch.append(f"亏钱面积（跌停+炸板占比）—— 现在 {hurt*100:.0f}%，"
-                     f"上行穿越 30% 就是退潮预警")
+                     f"上行穿越 {th_txt} 就是退潮预警")
     if theme:
         watch.append(f"「{theme}」连板梯队 —— 高度板是否续板、首板还有没有活口")
     if strongest.get("name"):
@@ -189,7 +198,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     # ---- 情景预案 ----
     scenarios: list[dict] = []
     if stage == "ebb" or vol_mode == "dry":
-        scenarios.append({"cond": "若明日开盘亏钱面积回落到 30% 以下、且出现 3 家以上新首板",
+        scenarios.append({"cond": f"若明日开盘亏钱面积回落到 {th_txt} 以下、且出现 3 家以上新首板",
                           "then": "按新周期起步对待：只用试错仓（首板），亏了就走"})
         scenarios.append({"cond": "若跌停家数继续增加、亏钱面积抬升",
                           "then": "继续防守：不接力、不低吸，等新周期首板"})
@@ -208,20 +217,48 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     # ---- 野人节奏：随盘面阶段换交易系统 ----
     # 「熊市不做长线，牛市不做短线……随盘面变化去改变自己的交易系统」。
     # 把「当前阶段该用什么打法」直接说出来，不让你自己猜。
+    # ★ 打法 = M3 阶段（能不能出手）× M2 量能（撬不撬得动大票）的**组合结论**，
+    #   不能只看阶段：高潮期撞上极度缩量时，阶段口径喊「短线快枪」、量能口径喊
+    #   「空仓等待」，同屏两句行动指令必打架（用户 10-12 实测同类问题）。
+    #   优先级：退潮 > 极度缩量 > 缩量切短线 > 阶段默认。
     mode_map = {
         "ebb": ("防守空仓", "空仓或试错仓，不做长线 —— 保存子弹；市场不好的时候"
                               "恰恰是执行去弱留强的时点"),
-        "ice": ("休息", "休息为主，空仓等启动信号 —— 手痒也别做长线"),
-        "revive": ("轻仓试错", "轻仓试错 + 波段思维 —— 只看低位、资金刚动的地方"
-                              "（要信早信），拿得住"),
         "probe": ("波段试错", "新方向刚起步 —— 低位+资金刚动的地方跟进去"
                              "（要信早信），拿得住"),
         "follow": ("波段持股", "扩散期波段持股 —— 主线内不轻易换，拿得住才有肉"),
-        "ferment": ("波段持股", "发酵期波段持股 —— 主线内不轻易换，吃主升"),
         "climax": ("短线快枪", "高潮期短线题材思维 —— 存量博弈不格局，快进快出，"
                               "同时执行去弱留强"),
     }
-    mode_name, mode_note = mode_map.get(stage, ("观察", "方向未明 —— 先看清阶段，再选打法"))
+    # E1 温度计阶段（ice/revive/ferment）不会传进来（sentiment 是 M3 的），
+    # 留着只是防御性映射。
+    mode_map.update({
+        "ice": ("休息", "休息为主，空仓等启动信号 —— 手痒也别做长线"),
+        "revive": ("轻仓试错", "轻仓试错 + 波段思维 —— 只看低位、资金刚动的地方"
+                              "（要信早信），拿得住"),
+        "ferment": ("波段持股", "发酵期波段持股 —— 主线内不轻易换，吃主升"),
+    })
+    if stage == "ebb":
+        mode_name, mode_note = mode_map["ebb"]
+    elif vol_mode == "dry":
+        # 极度缩量压倒阶段：量能不够，什么阶段都只配空仓等
+        mode_name, mode_note = ("防守空仓",
+                                "极度缩量：量能不够说破大天都没用 —— 空仓等量能恢复，"
+                                "手痒=送钱；别用长线思维硬扛")
+    elif vol_mode in ("shrink_short", "shrink_red"):
+        # M2：缩量存量资金撬不动大票 → 切短线中小题材的应对打法，
+        # 平常打法（中长线波段）的主干让位 —— 与 M8 纪律检查同一口径
+        if vol_mode == "shrink_red":
+            mode_name, mode_note = ("缩量低吸应对",
+                                    "极致缩量还红盘 = 控盘好、筹码结构好，可低吸 —— "
+                                    "但这是缩量期的权宜打法，不是常态策略")
+        else:
+            mode_name, mode_note = ("短线应对",
+                                    "缩量存量：资金撬不动大票 —— 只做短线中小题材的应对"
+                                    "打法，降低单票仓位；量能回来再谈中长线波段")
+    else:
+        mode_name, mode_note = mode_map.get(
+            stage, ("观察", "方向未明 —— 先看清阶段，再选打法"))
     rot = (ml or {}).get("rotation_note") or ""
     if rot:
         mode_note = f"{mode_note}。{rot}"
