@@ -1036,7 +1036,7 @@ function render(){
   const pos=REPORT.position, mt=REPORT.discipline;
   const mm=sen.metrics;
   // 亏钱面积警戒线读配置（M3_sentiment.ebb_hurt_ratio，默认 0.30）——
-  // 不写死：改了配置，界面文案要跟着变（交接单踩坑 #31 同类）。
+  // 不写死：改了配置，界面文案要跟着变（硬编码阈值 = 文案与配置脱节）。
   const _msCfg=(CONFIG&&CONFIG.M3_sentiment)||(REPORT.config&&REPORT.config.M3_sentiment)||{};
   const hurtTh=(_msCfg.ebb_hurt_ratio!=null&&isFinite(Number(_msCfg.ebb_hurt_ratio)))
     ?Number(_msCfg.ebb_hurt_ratio):0.30;
@@ -1818,7 +1818,7 @@ function renderMeter(){
     el.innerHTML='<div class="card fl" style="font-size:13px">情绪温度计已关闭或数据不足</div>'; return;}
   const mt=m.metrics, t=m.temperature||0, s=STG[m.stage]||STG.revive;
   // M3（能不能出手，权威口径）与 E1 温度计（量化温度）是两套阶段口径
-  /// （交接单 5-B #9）；v1.25.2 起 E1 的「退潮」只来自 M3 稳定器确认，
+  // （M3 与 E1 同词不同义）；v1.25.2 起 E1 的「退潮」只来自 M3 稳定器确认，
   // 两把尺子在数据层面已统一，本页不再需要口径说明创可贴。
   const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'° '+(m.delta>=0?'回暖':'降温')+'）';
   const lad=(m.ladder||[]), mx=Math.max(1,...lad.map(x=>x.count));

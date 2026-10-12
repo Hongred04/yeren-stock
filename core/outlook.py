@@ -89,7 +89,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     temp = meter.get("temperature")
 
     # 亏钱面积警戒线读配置（M3_sentiment.ebb_hurt_ratio，默认 0.30）——
-    # 不写死：改了配置，界面文案要跟着变（交接单踩坑 #31）。
+    # 不写死：改了配置，界面文案要跟着变（硬编码阈值 = 文案与配置脱节）。
     try:
         hurt_th = float((cfg.get("M3_sentiment", {}) or {}).get("ebb_hurt_ratio", 0.30))
     except (TypeError, ValueError):
