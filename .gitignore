@@ -15,6 +15,9 @@ desktop.ini
 # 每日再生成（有效代码名单缓存）
 data/valid_codes.json
 data/market_amount.json
+# 运行时记忆：关键数据当日兜底快照 / 日内量能曲线（本机积累，换机重新积累即可）
+data/fetch_memory.json
+data/market_amount_curve.json
 
 # 个人持仓 / 自选（本地私有，别进 git）
 data/portfolio.json
