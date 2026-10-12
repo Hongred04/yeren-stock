@@ -627,8 +627,19 @@ def style_fit(cfg: dict, stock: dict, bars: list[dict],
     a = cfg.get("M4_aesthetic", {})
     mv_mid = float(a.get("mv_mid_threshold", 500.0) or 500.0)
 
+    # 「情绪题材 / 业绩配置」二分：机构主导或中大盘趋势票 = 业绩配置（能穿越
+    # 披露期）；游资/小市值/连板基因 = 情绪题材（只配短线，披露期易被证伪）。
+    _is_config = (ftype == "institutional") or (mv >= mv_mid)
+    nature = ({"key": "config", "label": "业绩配置",
+               "note": "机构主导/中大盘趋势票 —— 有业绩兜底，能穿越披露期"}
+              if _is_config else
+              {"key": "theme", "label": "情绪题材",
+               "note": "游资/小市值/连板基因 —— 靠情绪与政策驱动，"
+                       "披露期易被证伪，只配短线"})
+
     if ftype == "zhuang":
         return {"key": "avoid", "label": "庄股 · 不参与",
+                "nature": nature,
                 "note": "做庄失败打回原点，盈亏比极差；断崖式下跌绝不接，已持有的无条件出。"}
 
     bars = bars or []
@@ -641,14 +652,17 @@ def style_fit(cfg: dict, stock: dict, bars: list[dict],
              or (aligned and lus20 <= 1 and mv >= 100.0))
     if swing:
         return {"key": "swing", "label": "中长线波段",
+                "nature": nature,
                 "note": ("平常打法：大资金/趋势票 —— 沿5日线持有、小阳线爬坡不动手；"
                          "突然加速拉涨停 = 派发信号，减仓而不是加仓。")}
 
     if lus20 >= 2:
         return {"key": "short", "label": "短线题材",
+                "nature": nature,
                 "note": ("缩量期的应对打法：有连板基因的题材票 —— 小仓位、快进快出，"
                          "跟着断板节奏走；节奏破坏就撤，不把短线拿成中线。")}
     return {"key": "short", "label": "短线题材",
+            "nature": nature,
             "note": ("缩量期的应对打法：小市值题材票 —— 小仓位、快进快出，"
                      "只做首板与回踩企稳；这是权宜打法，节奏不对就空仓。")}
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from . import regime
 from . import trading
 
 
@@ -221,44 +222,11 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     #   不能只看阶段：高潮期撞上极度缩量时，阶段口径喊「短线快枪」、量能口径喊
     #   「空仓等待」，同屏两句行动指令必打架（用户 10-12 实测同类问题）。
     #   优先级：退潮 > 极度缩量 > 缩量切短线 > 阶段默认。
-    mode_map = {
-        "ebb": ("防守空仓", "空仓或试错仓，不做长线 —— 保存子弹；市场不好的时候"
-                              "恰恰是执行去弱留强的时点"),
-        "probe": ("波段试错", "新方向刚起步 —— 低位+资金刚动的地方跟进去"
-                             "（要信早信），拿得住"),
-        "follow": ("波段持股", "扩散期波段持股 —— 主线内不轻易换，拿得住才有肉"),
-        "climax": ("短线快枪", "高潮期短线题材思维 —— 存量博弈不格局，快进快出，"
-                              "同时执行去弱留强"),
-    }
-    # E1 温度计阶段（ice/revive/ferment）不会传进来（sentiment 是 M3 的），
-    # 留着只是防御性映射。
-    mode_map.update({
-        "ice": ("休息", "休息为主，空仓等启动信号 —— 手痒也别做长线"),
-        "revive": ("轻仓试错", "轻仓试错 + 波段思维 —— 只看低位、资金刚动的地方"
-                              "（要信早信），拿得住"),
-        "ferment": ("波段持股", "发酵期波段持股 —— 主线内不轻易换，吃主升"),
-    })
-    if stage == "ebb":
-        mode_name, mode_note = mode_map["ebb"]
-    elif vol_mode == "dry":
-        # 极度缩量压倒阶段：量能不够，什么阶段都只配空仓等
-        mode_name, mode_note = ("防守空仓",
-                                "极度缩量：量能不够说破大天都没用 —— 空仓等量能恢复，"
-                                "手痒=送钱；别用长线思维硬扛")
-    elif vol_mode in ("shrink_short", "shrink_red"):
-        # M2：缩量存量资金撬不动大票 → 切短线中小题材的应对打法，
-        # 平常打法（中长线波段）的主干让位 —— 与 M8 纪律检查同一口径
-        if vol_mode == "shrink_red":
-            mode_name, mode_note = ("缩量低吸应对",
-                                    "极致缩量还红盘 = 控盘好、筹码结构好，可低吸 —— "
-                                    "但这是缩量期的权宜打法，不是常态策略")
-        else:
-            mode_name, mode_note = ("短线应对",
-                                    "缩量存量：资金撬不动大票 —— 只做短线中小题材的应对"
-                                    "打法，降低单票仓位；量能回来再谈中长线波段")
-    else:
-        mode_name, mode_note = mode_map.get(
-            stage, ("观察", "方向未明 —— 先看清阶段，再选打法"))
+    # 打法 = 节点结论（M3 阶段 × M2 量能），**单一出处见 core/regime.py** ——
+    # trading 的波段买点门禁读同一个函数，两处不会再各算一套而打架。
+    # 优先级（退潮 > 极度缩量 > 缩量 > 阶段默认）也收在 regime 里。
+    rg = regime.classify(sentiment, volume, macro)
+    mode_name, mode_note = rg["mode_name"], rg["mode_note"]
     rot = (ml or {}).get("rotation_note") or ""
     if rot:
         mode_note = f"{mode_note}。{rot}"

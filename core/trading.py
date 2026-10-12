@@ -38,6 +38,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from . import indicators as ind
+from . import regime
 
 
 # ---------------------------------------------------------------- 交易时段
@@ -281,7 +282,13 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
     # 全是短线口径。这里把三个波段入场点补进买点体系，并按 style_fit 把匹配的
     # 一路排在前面（波段票先看 W、短线票先看 B），避免"两套口径打架"。
     sw = stock.get("swing") or {}
-    if sw.get("ok"):
+    # ★ 节点门禁：波段（做长）只在「起步/扩散 + 非缩量」节点成立 ——
+    #   退潮/极干/缩量/高潮期一律撤下波段买点（同样的票，节点不对就是绞肉机）。
+    #   判定与 outlook 的「今日应对打法」同源（core/regime.py），从构造上不分叉。
+    rg = regime.classify(sentiment, volume)
+    _has_swing_setup = bool(sw.get("ok") and (
+        sw.get("w1") or sw.get("w2") or (sw.get("w3") or {}).get("ready")))
+    if sw.get("ok") and rg["allow_swing"]:
         w1 = sw.get("w1")
         if w1:
             out.append({
@@ -324,6 +331,20 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
                 "position": "确认后再加，别一次打满",
                 "note": "涨30%后回调主力没走（30%不足以出货）；止跌阳线可先轻仓保持关联",
             })
+    elif _has_swing_setup and not rg["allow_swing"]:
+        # 有波段形态、但节点不支持做长 —— 不给波段买点，只给一条门禁提示
+        # （短线 B 信号不受影响，上面已按需产生）。
+        out.append({
+            "type": "HOLD", "name": "当前节点不做长", "priority": "A",
+            "kind": "block", "blocked": True,
+            "trigger": f'{rg["node_label"]}：{rg["mode_name"]} —— 波段（做长）当前不成立',
+            "entry": "不新开波段仓；题材按短线纪律处理（快进快出）",
+            "stop": "—",
+            "target": "等节点转好（阶段回到起步/扩散、量能回到峰值）再看波段",
+            "position": "0%（波段新增）",
+            "note": "同样的票，主升期捂是机会，退潮/缩量期捂是绞肉机 —— "
+                    "不是标的的事，是节点的事",
+        })
 
     # 当日已涨停：B2/B3/B4 全是"当日进场"口径，涨停板上不成立 ——
     # 只保留 B1（次日介入口径），再给一条明确的"涨停不追"提示

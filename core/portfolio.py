@@ -19,6 +19,7 @@ from datetime import datetime
 from . import fundstyle
 from . import indicators as ind
 from . import paths
+from . import regime
 from . import trading
 from . import universe
 
@@ -135,6 +136,8 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
     out = []
     tot_cost = tot_mv = 0.0
     checks = []
+    # 节点（今日打法，单一出处 core/regime.py）—— 用来判「今天适不适合做长」
+    rg = regime.classify(sentiment, volume)
     for h in holdings:
         code = h["code"]
         snap = snaps.get(code) or {}
@@ -174,6 +177,16 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             unwind = ("被套参考「扶老太太下楼梯」（适合日内有波动的票）："
                       "开盘先卖 → 低位（-3%~-5%）接回反复磨；出现高开修复才格局、"
                       "冲高回本线卖一半；不符合预期就解套走人、不恋战")
+        # 做长警示：非做长节点下，持仓里的波段属性票 —— 做长=绞肉机。
+        # 波段属性（口径对齐 style_fit）：机构主导 / 中大盘（≥150亿）/ 卖出信号
+        # 里出现 swing 口径 —— 三者任一即视为波段仓。
+        _mv_yi = _f(snap.get("float_mv")) / 1e8
+        _is_swing = (fs.get("type") == "institutional" or _mv_yi >= 150.0
+                     or any((s.get("style") == "swing") for s in sells))
+        swing_alert = ""
+        if not rg["allow_swing"] and _is_swing:
+            swing_alert = (f"当前{rg['node_label']}（{rg['mode_name']}）：做长=绞肉机 "
+                           "—— 波段仓位按短线纪律处理（跌破就走，不幻想回本）")
         out.append({
             "code": code, "name": h.get("name") or snap.get("name", ""),
             "cost": cost, "shares": shares, "date": h.get("date", ""),
@@ -182,12 +195,16 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
             "mv": round(mv, 1), "verdict": verdict, "level": level,
             "signals": sells, "fund_style": fs.get("type", "unknown"),
-            "r3": r3, "unwind": unwind,
+            "r3": r3, "unwind": unwind, "swing_alert": swing_alert,
         })
         if level in ("critical", "high"):
             checks.append({"level": "red" if level == "critical" else "yellow",
                            "item": f"{out[-1]['name']} 持仓告警：{verdict}",
                            "action": (sells[0].get("action", "") if sells else "")})
+        if swing_alert:
+            checks.append({"level": "yellow",
+                           "item": f"{out[-1]['name']} 做长警示：{rg['node_label']}",
+                           "action": swing_alert})
 
     # 自选股快照
     wout = []

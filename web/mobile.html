@@ -765,6 +765,7 @@ function render(fromCache,ts){
           <span>${esc(h.verdict||'')}</span></div>
         ${s0.name?`<div class="act"><b>${esc(s0.name)}</b>：${esc(s0.action||s0.trigger||'')}</div>`:''}
         ${h.unwind?`<div class="unwind">${esc(h.unwind)}</div>`:''}
+        ${h.swing_alert?`<div class="unwind" style="border-color:var(--org)">⚠️ ${esc(h.swing_alert)}</div>`:''}
       </div>`;
     });
   }else{

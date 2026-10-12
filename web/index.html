@@ -1995,7 +1995,9 @@ function renderPort(){
         <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
         <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}${
           h.unwind?`<div style="margin-top:5px;font-size:11px;color:var(--org);background:#fffdf8;
-            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">${esc(h.unwind)}</div>`:''}</td>
+            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">${esc(h.unwind)}</div>`:''}${
+          h.swing_alert?`<div style="margin-top:5px;font-size:11px;color:var(--org);background:#fffdf8;
+            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">⚠️ ${esc(h.swing_alert)}</div>`:''}</td>
       </tr>`).join('');
       hp.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
           <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>

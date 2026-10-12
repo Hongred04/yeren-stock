@@ -179,20 +179,31 @@ def main():
 
     sent = {"stage": "climax", "can_trade": True, "label": "高潮", "signals": []}
     vol = {"mode": "normal", "red_flag": False}
+    # ★ 节点门禁（v1.25.3）：波段买点(W1/W2/W3)只在「起步/扩散 + 非缩量」节点才发。
+    #   排序契约测试用「做长友好」节点，否则 W 会被门禁撤下、根本测不到排序。
+    sent_sw = {"stage": "follow", "can_trade": True, "label": "扩散", "signals": []}
+    vol_sw = {"mode": "peak_swing", "red_flag": False}
 
     # 同一只票同时有 B1（首板，短线）与 W1（回踩10日线，波段）→ 看排序
     sw_w1 = swing.evaluate(w1b, "sh600000", cfg_full)
-    swing_sig = trading.buy_signals(mk_stock("swing", sw_w1), w1b, sent, vol, cfg_full)
+    swing_sig = trading.buy_signals(mk_stock("swing", sw_w1), w1b, sent_sw, vol_sw, cfg_full)
     t_sw = [s["type"] for s in swing_sig]
     ok("W1" in t_sw and "B1" in t_sw, f"波段票同时拿到 B1 与 W1：{t_sw}")
     ok(t_sw[0] == "W1", f"波段票 → W 排前面（{t_sw}）")
     ok(t_sw[-1] == "HOLD", f"禁买提示永远排最后（{t_sw}）")
-    short_sig = trading.buy_signals(mk_stock("short", sw_w1), w1b, sent, vol, cfg_full)
+    short_sig = trading.buy_signals(mk_stock("short", sw_w1), w1b, sent_sw, vol_sw, cfg_full)
     t_sh = [s["type"] for s in short_sig]
     ok(t_sh[0] == "B1" and t_sh.index("W1") > 0,
        f"短线票 → B 排前面（{t_sh}）")
     ok(all(s.get("style") in (None, "swing", "short") for s in swing_sig),
        "买点带 style 标记（前端据此分组）")
+
+    # ★ 节点门禁：非做长节点（高潮/缩量）→ 撤下 W、改发「当前节点不做长」
+    gated = trading.buy_signals(mk_stock("swing", sw_w1), w1b, sent, vol, cfg_full)
+    t_g = [s["type"] for s in gated]
+    ok("W1" not in t_g, f"高潮节点 → 不发波段买点（{t_g}）")
+    ok(any(s.get("name") == "当前节点不做长" for s in gated),
+       f"高潮节点 → 改发「当前节点不做长」提示（{t_g}）")
 
     # 高位放量滞涨 → 波段离场点进卖点
     sw_ex = swing.evaluate(stall, "sh600000", cfg_full)

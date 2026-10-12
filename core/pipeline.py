@@ -18,6 +18,7 @@ from . import mainline
 from . import moneyflow as flow_mod
 from . import outlook
 from . import portfolio as portfolio_mod
+from . import regime
 from . import sentiment_meter
 from . import strategy_config as sc
 from . import swing as swing_mod
@@ -421,6 +422,19 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
 
         # ---- 业绩披露期 ----
         m7 = engine.evaluate_earnings(cfg)
+
+        # 题材证伪警示（题材/配置二分）：情绪题材碰上披露期或非做长节点，
+        # 按「披露期是照妖镜」的逻辑进 warnings —— 负向结论只进 warnings，
+        # 绝不进「为什么选它」的 reasons（项目规矩：详情页理由只放正向）。
+        _rg = regime.classify(sentiment, volume)
+        _in_disc = bool(m7.get("in_window"))
+        for p in picks:
+            _nat = ((p.get("style_fit") or {}).get("nature") or {})
+            if _nat.get("key") == "theme" and (_in_disc or not _rg["allow_swing"]):
+                p.setdefault("warnings", []).append(
+                    "题材证伪风险：情绪题材 + 披露期/退潮节点 —— 照妖镜下无业绩"
+                    "题材易被证伪（龙头可 -30%）；只按短线纪律做，别做长")
+
         m6 = engine.evaluate_message(cfg, zt)
 
         # ---- E1 情绪温度计（连板梯队/炸板率/晋级率/涨跌家数） ----
