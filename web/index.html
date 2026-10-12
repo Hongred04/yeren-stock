@@ -9,20 +9,32 @@
 <title>股票监控 · 今天该干什么</title>
 <style>
 :root{
-  --bg:#f4f6f9; --card:#fff; --line:#e4e8ee; --line2:#eef1f5;
-  --tx:#161a21; --tx2:#58616f; --tx3:#9aa3b2;
-  --red:#d92d3f; --red-bg:#fdeef0;
-  --grn:#0f9d58; --grn-bg:#e9f8f0;
-  --org:#e07c1a; --org-bg:#fdf3e5;
-  --blu:#2563d9; --blu-bg:#eaf1fd;
-  --pur:#7048c8; --pur-bg:#f1ebfd;
-  --sk:#f0f2f5;
-  --sh:0 1px 2px rgba(16,24,40,.05);
-  --sh2:0 4px 16px rgba(16,24,40,.08);
+  /* ── 设计令牌：工业实用方向（数据看板的天性）──
+     表面用暖纸感而非纯白，文字用暖近黑而非纯黑；
+     数字一律等宽（tabular-nums），让盘口读起来像仪表盘。 */
+  --bg:#f2efe8; --card:#fdfbf6; --line:#ddd6c8; --line2:#eae4d8;
+  --tx:#191713; --tx2:#5d574c; --tx3:#948c7d;
+  /* A股语义：红涨绿跌 */
+  --red:#c8242f; --red-bg:#fbeceb;
+  --grn:#1c7b52; --grn-bg:#e9f4ee;
+  --org:#b5791a; --org-bg:#faf1df;
+  --blu:#2b5b8c; --blu-bg:#eaf0f6;
+  --pur:#6a4bb0; --pur-bg:#f0ecf9;
+  --sk:#ece7db;
+  --sh:0 1px 2px rgba(40,32,18,.06);
+  --sh2:0 6px 20px rgba(40,32,18,.09);
+  --sh3:0 24px 60px rgba(40,32,18,.14);
+  --r-sm:6px; --r-md:10px; --r-lg:16px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --dur-fast:160ms; --dur-base:320ms; --dur-slow:640ms;
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,ui-monospace,monospace;
+  --sans:"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei","Source Han Sans SC",
+         system-ui,sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--tx);
-  font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  font:14px/1.7 var(--sans);
+  font-variant-numeric:tabular-nums;        /* 数字等宽，不跳动 */
   padding:0 0 60px;-webkit-font-smoothing:antialiased}
 button{font-family:inherit;cursor:pointer;border:none;border-radius:8px;
   padding:9px 16px;font-size:13px;font-weight:600;transition:.15s}
@@ -312,6 +324,73 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
 .foot{margin-top:26px;padding:15px;background:#fffcf0;border:1px solid #f0e4b8;
   border-radius:11px;font-size:12.5px;color:#7a6320;line-height:1.8}
 .foot b{color:#5c4a12}
+
+/* ════════════════════════════════════════════════════════════════════
+   设计层 v2 · 工业实用（Industrial）—— 只改外观，不动结构与脚本
+   记忆点：等宽数字 + 暖纸面 + 发丝边框，读起来像交易终端而不是网页
+   ════════════════════════════════════════════════════════════════════ */
+
+/* —— 氛围：暖色径向铺底 + 极轻颗粒，替掉纯色平铺（留在内容之下）—— */
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;
+  background:
+    radial-gradient(72rem 44rem at 6% -14%, rgba(200,36,47,.06), transparent 62%),
+    radial-gradient(58rem 40rem at 104% 2%, rgba(43,91,140,.06), transparent 58%);}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.05'/%3E%3C/svg%3E");}
+
+/* —— 排版：数字等宽，标题收紧字距 —— */
+.kv .v,.mc .v,.dh .sc,.stat .v,.sig .fl,.tbl td,.tag,.pill,.plan .v{
+  font-variant-numeric:tabular-nums}
+.kv .v,.mc .v,.dh .sc,.plan .v,.tag b{font-family:var(--mono)}
+.sh h2,.verdict .ti,.plan .pt{letter-spacing:-.02em}
+.sh h2{font-size:16.5px;font-weight:800}
+
+/* —— 表面：暖纸底 + 发丝边 + 三级阴影 —— */
+.card,.sig,.mc,.plan,.warnb,.panel,.toast{background:var(--card)}
+.card,.sig,.mc{border:1px solid var(--line);box-shadow:var(--sh)}
+.sig,.card{transition:box-shadow var(--dur-fast) ease-out,transform var(--dur-fast) ease-out}
+.sig:hover,.card:hover{box-shadow:var(--sh2)}
+.tag,.pill{border:1px solid var(--line2)}
+
+/* —— 结论卡：删掉糖果渐变，改成色条 + 纸面 —— */
+.verdict{border-radius:var(--r-lg);box-shadow:var(--sh2);border-left-width:5px!important}
+.verdict.go{background:linear-gradient(180deg,#f5fbf7,#eff8f2);border-color:#b6ddc7}
+.verdict.hold{background:linear-gradient(180deg,#fdfaf3,#faf4e6);border-color:#e2cb9a}
+.verdict.stop{background:linear-gradient(180deg,#fdf4f4,#fbeaeb);border-color:#e7b3b7}
+.verdict .ti{line-height:1.15}
+.verdict .sub{color:var(--tx2)}
+
+/* —— 标签页：底部指示条，不靠整块填色 —— */
+.tabrow{border-bottom:1px solid var(--line)}
+.tabs button{border-radius:var(--r-sm) var(--r-sm) 0 0}
+
+/* —— 表格：发丝分隔 + 表头小字距 —— */
+.tbl th{font-size:11.5px;letter-spacing:.04em;color:var(--tx3);font-weight:700;
+  border-bottom:1px solid var(--line)}
+.tbl td{border-bottom:1px solid var(--line2)}
+.tbl tbody tr{transition:background var(--dur-fast) ease-out}
+.tbl tbody tr:hover{background:rgba(90,70,30,.035)}
+
+/* —— 交互反馈：悬停微抬，聚焦可见 —— */
+.btn,.btn2{transition:background var(--dur-fast) ease-out,box-shadow var(--dur-fast) ease-out}
+.btn:hover,.btn2:hover{box-shadow:var(--sh)}
+:focus-visible{outline:2px solid var(--blu);outline-offset:2px;border-radius:var(--r-sm)}
+
+/* —— 滚动条 —— */
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#cfc7b6;border-radius:99px;border:3px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#bdb3a0}
+
+/* —— 一次编排的入场：只动 opacity/transform，且只在首屏（header/wrap 常驻）—— */
+@keyframes slidedown{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+@keyframes fadeup{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+header{animation:slidedown var(--dur-slow) var(--ease) both}
+.wrap{animation:fadeup var(--dur-slow) var(--ease) 120ms both}
+@media (prefers-reduced-motion:reduce){
+  header,.wrap{animation:none}
+  *{transition:none!important}
+}
 </style>
 </head>
 <body>

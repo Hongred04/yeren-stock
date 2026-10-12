@@ -37,6 +37,8 @@ android/_*.log
 
 # 打包产物（可再生成）
 dist/
+# PyInstaller 中间产物与生成的 spec
+build/
 
 # 可再生成的板块缓存（board_seed.py 已固化种子表）
 data/board_list.json

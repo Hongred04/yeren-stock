@@ -701,5 +701,20 @@
            要注意 / 涨停原因。
          · 文案瘦身：波段「心法」由全列 7 条改为前 3 条 + 总条数（原来一行糊成一片）。
          纯展示层改动，不动任何判定逻辑。
+  1.25.6 视觉重做（工业实用方向）+ 桌面版打成独立窗口 exe（用户 10-12 要求）
+         · 设计层重做（web/index.html 与 web/mobile.html 同一套令牌）：
+           暖纸面替纯白/纯灰，文字用暖近黑；数字全部等宽（tabular-nums）做出
+           仪表盘感；顶部加暖色径向铺底 + 极轻颗粒（替掉纯色平铺）；卡片改
+           发丝边框 + 三级阴影；结论卡去掉糖果渐变、改色条 + 纸面；表格改发丝
+           分隔；补齐 :focus-visible 焦点圈与 prefers-reduced-motion 降级；
+           首屏一次编排入场（header 下滑 + 主区上浮，只动 opacity/transform）。
+           只覆盖外观，结构与脚本一行未动。
+         · 桌面版独立窗口：新增 desktop_app.py —— 先起后端再开窗口，关窗即停服务。
+           窗口优先 pywebview（原生窗口，走系统 WebView2）；退到 Edge/Chrome 的
+           --app 模式（无地址栏/标签页，看着就是个 App）；再不行才交系统浏览器。
+           另加 --serve（无头跑后端）/ --no-window（起后端自检后退出，供打包验证）。
+         · 打包：PyInstaller 单文件 --windowed → dist/野人看板.exe。冻结时数据/缓存
+           自动落到 exe 同级的 data/ cache/（不再写进退出即删的解包目录），web/
+           随包分发；mootdx 一并打进去，通达信 K 线在 exe 里同样首选。
 """
-APP_VERSION = "1.25.5"
+APP_VERSION = "1.25.6"

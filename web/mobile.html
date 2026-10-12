@@ -7,34 +7,40 @@
 <title>野人体系</title>
 <style>
 :root{
-  --bg:#f4f6f9; --card:#fff; --line:#e4e8ee; --line2:#eef1f5;
-  --tx:#161a21; --tx2:#58616f; --tx3:#9aa3b2;
-  --red:#d92d3f; --red-bg:#fdeef0;
-  --grn:#0f9d58; --grn-bg:#e9f8f0;
-  --org:#e07c1a; --org-bg:#fdf3e5;
-  --blu:#2563d9; --blu-bg:#eaf1fd;
-  --sk:#f0f2f5;
-  --sh:0 1px 3px rgba(16,24,40,.06);
+  /* 设计令牌：工业实用 —— 暖纸底 + 等宽数字（与桌面端同一套） */
+  --bg:#f2efe8; --card:#fdfbf6; --line:#ddd6c8; --line2:#eae4d8;
+  --tx:#191713; --tx2:#5d574c; --tx3:#948c7d;
+  --red:#c8242f; --red-bg:#fbeceb;
+  --grn:#1c7b52; --grn-bg:#e9f4ee;
+  --org:#b5791a; --org-bg:#faf1df;
+  --blu:#2b5b8c; --blu-bg:#eaf0f6;
+  --sk:#ece7db;
+  --sh:0 1px 2px rgba(40,32,18,.06);
+  --sh2:0 6px 20px rgba(40,32,18,.09);
+  --r-sm:6px; --r-md:10px; --r-lg:16px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,ui-monospace,monospace;
   --tabh:56px;
 }
 @media (prefers-color-scheme: dark){
   :root{
-    --bg:#12151a; --card:#1b1f27; --line:#2a3039; --line2:#232830;
-    --tx:#e8ebf0; --tx2:#a3adbd; --tx3:#6b7484;
-    --red:#ff5c67; --red-bg:#3a1e23; --grn:#2fbf71; --grn-bg:#16301f;
-    --org:#f0932b; --org-bg:#3a2a14; --blu:#5b8def; --blu-bg:#182642;
-    --sk:#232830;
+    --bg:#141310; --card:#1e1c18; --line:#332f28; --line2:#282420;
+    --tx:#f0ece3; --tx2:#a8a196; --tx3:#726b60;
+    --red:#ff5f68; --red-bg:#3a1e20; --grn:#3bbf7f; --grn-bg:#15301f;
+    --org:#e0a23c; --org-bg:#33280f; --blu:#6f9dd0; --blu-bg:#182534;
+    --sk:#282420;
   }
-  .hero.go{background:#16301f!important}
-  .hero.hold{background:#3a2a14!important}
-  .hero.stop{background:#3a1e23!important}
+  .hero.go{background:#15301f!important}
+  .hero.hold{background:#33280f!important}
+  .hero.stop{background:#3a1e20!important}
   .mode{background:var(--org-bg)!important;border-color:transparent!important}
-  .tabbar{background:#171b22!important}
+  .tabbar{background:#1a1814!important}
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html{-webkit-text-size-adjust:100%}
 body{background:var(--bg);color:var(--tx);
-  font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  font:15px/1.7 "PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;
   padding-bottom:calc(var(--tabh) + env(safe-area-inset-bottom))}
 b,strong{font-weight:800}
 .fl{color:var(--tx3)}.up{color:var(--red)}.dn{color:var(--grn)}
@@ -221,6 +227,45 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:20px 0 6px;line-
   padding:10px 12px;font-size:12.5px;font-weight:800;font-family:inherit;min-height:40px}
 .sbtn:active{opacity:.85}
 .sbtn.ghost{background:transparent;color:var(--org);border:1px solid var(--org)}
+
+/* ════════════════════════════════════════════════════════════════════
+   设计层 v2 · 工业实用（与桌面端同一套）—— 只改外观，不动结构
+   记忆点：暖纸面 + 等宽数字 + 发丝边框
+   ════════════════════════════════════════════════════════════════════ */
+
+/* 氛围：一层暖色径向铺底（移动端不加颗粒，省电） */
+body{background-image:
+  radial-gradient(46rem 26rem at 4% -10%, rgba(200,36,47,.06), transparent 62%),
+  radial-gradient(40rem 24rem at 104% 0%, rgba(43,91,140,.05), transparent 58%);
+  background-attachment:fixed}
+
+/* 数字等宽：盘口数字不抖 */
+.stat .v,#sheet .kv .v2,.hmeta,.tag b{font-variant-numeric:tabular-nums}
+
+/* 表面：卡片暖纸底 + 发丝分隔 */
+.card,.pick{background:var(--card)}
+.tabbar{border-top:1px solid var(--line)}
+
+/* 结论卡：色条 + 纸面，替掉糖果渐变 */
+.hero{border-radius:var(--r-lg);box-shadow:var(--sh2)}
+.hero.go{background:linear-gradient(180deg,#f5fbf7,#eff8f2)}
+.hero.hold{background:linear-gradient(180deg,#fdfaf3,#faf4e6)}
+.hero.stop{background:linear-gradient(180deg,#fdf4f4,#fbeaeb)}
+.hero h1{letter-spacing:-.01em}
+
+/* 详情抽屉：小标题加字距、指标格改暖纸面 */
+#sheet .sect .k{letter-spacing:.03em}
+#sheet .kv>div{background:var(--card);border:1px solid var(--line2)}
+#sheet .sect .item{border-top:1px solid var(--line2);padding-top:6px}
+
+/* 触控目标 ≥44px（删除小按钮除外，它是行内紧凑控件） */
+.btnmain,.btnghost,.sbtn{min-height:44px}
+.btnmain,.btnghost{border-radius:var(--r-md)}
+
+/* 首屏一次上浮编排 + 降级动效 */
+@keyframes mrise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+main{animation:mrise 640ms var(--ease) .08s both}
+@media (prefers-reduced-motion:reduce){main{animation:none}*{transition:none!important}}
 </style>
 </head>
 <body>
