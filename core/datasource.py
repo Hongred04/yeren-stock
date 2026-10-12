@@ -355,6 +355,140 @@ def cached(key: str, ttl: int, producer):
     return val
 
 
+# ---------------------------------------------------------------- 数据健康 & 最后一份好数据
+# 为什么需要（2026-10-12 用户实测「实时盘中成交额偶尔丢失」，并要求自查其他数据）：
+# 关键抓取（涨停/跌停/炸板池、指数快照、涨跌家数）一次网络抖动就返回空，而**空值会被
+# 当成"今天真的没有"**：跌停池空 → 亏钱面积算成 0 → 系统在真退潮日得出"可以出手"，
+# 这是安全相关的静默失败。而 `cached()` 还会把这次失败的空值缓存住（池子 120 秒），
+# 让一次抖动影响两分钟。
+#
+# 三层做法：
+#   ① 区分「接口失败」与「接口正常回答、就是空」（合法空值）—— producer 返回 (ok, value)；
+#   ② 失败时回退到**当日最后一份好数据**（内存 + 落盘，跨扫描/跨重启可用），绝不用空值
+#      覆盖缓存；
+#   ③ 降级情况记进 `data_health()`，报告里如实标注，不假装一切正常。
+
+MEM_PATH = paths.data_path("fetch_memory.json")
+_mem: dict[str, dict] = {}          # key -> {date, ts, value}
+_mem_lock = threading.Lock()
+_health: dict[str, dict] = {}       # key -> {ok, ts, note, stale_seconds?}
+
+# 界面上给这些 key 一个中文名（数据源面板/健康提示要用）
+HEALTH_LABELS = {
+    "pool:ZT": "涨停池", "pool:DT": "跌停池", "pool:ZB": "炸板池",
+    "index": "指数行情", "breadth": "涨跌家数", "yzt": "昨日涨停池",
+    "klines": "个股K线", "cls_reason": "涨停原因", "hot_rank": "人气榜",
+    "lhb": "龙虎榜", "board_flow": "板块资金", "stock_flow": "个股资金",
+    "board_list": "板块清单",
+}
+
+
+def _mem_write(key: str, date: str, value) -> None:
+    """记一份"当日好数据"（内存 + 落盘）。落盘是为了跨进程/跨重启也能兜底。"""
+    ts = time.time()
+    with _mem_lock:
+        _mem[key] = {"date": date, "ts": ts, "value": value}
+    try:
+        os.makedirs(os.path.dirname(MEM_PATH), exist_ok=True)
+        try:
+            with open(MEM_PATH, encoding="utf-8") as f:
+                obj = json.load(f)
+        except (OSError, json.JSONDecodeError, ValueError):
+            obj = {}
+        # 只留当日及以后，防文件无限增长
+        obj = {d: v for d, v in obj.items() if isinstance(d, str) and d >= date}
+        obj.setdefault(date, {})[key] = {"ts": ts, "value": value}
+        tmp = MEM_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, MEM_PATH)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _mem_read(key: str, date: str):
+    """取当日最后一份好数据 → (value, ts)；没有则 (None, 0)。"""
+    with _mem_lock:
+        hit = _mem.get(key)
+    if hit and hit.get("date") == date:
+        return hit.get("value"), hit.get("ts", 0)
+    try:
+        with open(MEM_PATH, encoding="utf-8") as f:
+            obj = json.load(f)
+        day = ((obj.get(date) or {}).get(key)) or {}
+        if day and day.get("value") is not None:
+            ts = day.get("ts", 0)
+            with _mem_lock:
+                _mem[key] = {"date": date, "ts": ts, "value": day["value"]}
+            return day["value"], ts
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return None, 0
+
+
+def _health_set(key: str, ok: bool, note: str = "", stale_seconds: int = 0) -> None:
+    _health[key] = {"key": key, "label": HEALTH_LABELS.get(key, key), "ok": ok,
+                    "ts": time.time(), "note": note,
+                    "stale_seconds": int(stale_seconds) if not ok else 0}
+
+
+def data_health() -> dict:
+    """数据健康度自查：哪些关键数据这一轮没取到 / 用的是旧快照。
+
+    前端据此如实标注（而不是把降级当正常）。ok=False 的项按 label 列出。
+    """
+    items = sorted(_health.values(), key=lambda x: (x["ok"], -(x.get("stale_seconds") or 0)))
+    bad = [x for x in items if not x["ok"]]
+    return {
+        "ok": not bad,
+        "degraded": bad,
+        "checked": len(items),
+        "summary": ("关键数据全部正常" if not bad else
+                    "；".join(f"{x['label']}降级" for x in bad)),
+    }
+
+
+def reset_health() -> None:
+    """每轮扫描开始时清一次，避免上一轮的降级一直挂着。"""
+    _health.clear()
+
+
+def _fetch_memo(key: str, date: str, ttl: int, producer, empty, valid=None):
+    """带"最后一份好数据"记忆的抓取。
+
+    producer() → (ok, value)：
+      · ok=True  → 接口**正常回答**（value 可以是空列表/空 dict —— 那是合法空值，
+                   比如今天真没有跌停股）；
+      · ok=False → 传输/解析失败（value 忽略）。
+    valid(value)：额外的有效性判定（例如"解析出 0 条且接口没自报交易日"也算失败）。
+    empty：连当日历史快照都没有时返回什么（[] / {}）。
+    """
+    now = time.time()
+    if ttl > 0 and key in _cache and now - _cache_ts.get(key, 0) < ttl:
+        return _cache[key]
+    ok, val = False, None
+    try:
+        ok, val = producer()
+    except Exception:
+        ok, val = False, None
+    if ok and (valid is None or valid(val)):
+        _cache[key] = val
+        _cache_ts[key] = now
+        _mem_write(key, date, val)
+        _health_set(key, True)
+        return val
+    # 失败：回退当日最后一份好数据，**不用空值覆盖缓存**（否则抖动会被缓存住）
+    old, ots = _mem_read(key, date)
+    if old is not None:
+        age = int(now - ots) if ots else 0
+        _health_set(key, False, f"接口本次未取到，用的是 {age} 秒前的当日快照", age)
+        _cache[key] = old          # 缓存旧的好数据，而不是空值
+        _cache_ts[key] = now
+        return old
+    _health_set(key, False, "接口本次未取到，且当日还没有可用快照")
+    return empty
+
+
 # ---------------------------------------------------------------- 快照
 
 # 腾讯 v_ 字段索引（已实测校准）
@@ -488,24 +622,38 @@ def save_valid_codes(codes: list[str]) -> None:
 # 必须退回上一完整交易日的全天额 —— 这个数只能靠本地逐日积累。
 
 MARKET_AMOUNT_PATH = paths.data_path("market_amount.json")
+CURVE_PATH = paths.data_path("market_amount_curve.json")
 
 
-def save_market_amount(date: str, amount_yi: float) -> None:
-    """记录完整交易日两市成交额（亿）。同日多次扫描取最大值。"""
+def _amount_entries() -> list[dict]:
+    try:
+        with open(MARKET_AMOUNT_PATH, encoding="utf-8") as f:
+            js = json.load(f)
+        return js if isinstance(js, list) else []
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def save_market_amount(date: str, amount_yi: float, final: bool = False) -> None:
+    """记录两市成交额（亿）。
+
+    同日多次扫描取最大值（当日累计额只会增不会减）。
+    `final=True` 表示收盘后扫到的全天终值。**盘中也照样记**（记的是当日高水位）——
+    原实现只在收盘后扫到才存，用户若收盘后再没扫过，这一天就永远进不了档案，
+    次日盘前的"上一交易日全天额"只能退到更早的日期（基准越旧越不准）。
+    """
     if not date or amount_yi <= 0:
         return
-    try:
-        with open(MARKET_AMOUNT_PATH, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
-        entries = []
+    entries = _amount_entries()
     for e in entries:
         if e.get("date") == date:
             if amount_yi > e.get("amount", 0):
                 e["amount"] = round(amount_yi, 1)
+            if final:
+                e["final"] = True
             break
     else:
-        entries.append({"date": date, "amount": round(amount_yi, 1)})
+        entries.append({"date": date, "amount": round(amount_yi, 1), "final": bool(final)})
     entries.sort(key=lambda x: x["date"])
     entries = entries[-60:]
     try:
@@ -520,16 +668,96 @@ def save_market_amount(date: str, amount_yi: float) -> None:
 
 def load_last_complete_amount(date_limit: str) -> float:
     """<= date_limit 的最近一个完整交易日两市成交额（亿）。无记录返回 0。"""
-    try:
-        with open(MARKET_AMOUNT_PATH, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return 0.0
-    best = 0.0
-    for e in entries:
+    return load_last_amount_meta(date_limit)["amount"]
+
+
+def load_last_amount_meta(date_limit: str) -> dict:
+    """<= date_limit 的最近一条成交额记录 → {date, amount, final}。
+
+    final=False 说明那天只扫到盘中（值偏低），界面要如实说明 —— 不能当成
+    "上一完整交易日全天"。老档案没有 final 字段，按 True 处理（那时只有
+    收盘后才写，值本来就是全天终值）。
+    """
+    best = {"date": "", "amount": 0.0, "final": True}
+    for e in _amount_entries():
         if str(e.get("date", "")) <= (date_limit or "99999999"):
-            best = e.get("amount", 0.0)
+            best = {"date": e.get("date", ""),
+                    "amount": float(e.get("amount") or 0),
+                    "final": bool(e.get("final", True))}
     return best
+
+
+# ---------------------------------------------------------------- 日内量能曲线记忆
+# 盘中预估全天额原来靠一条**写死的经验曲线**（_DAY_PROFILE）折算，而不同交易日的
+# 量能形态差别很大（放量日开盘更集中、缩量日更平），固定曲线必然有系统偏差。
+# 这里逐日归档"已交易 tmin 分钟时的累计额"，用近 N 日**实测占比**去校准。
+
+def _curve_load() -> dict:
+    try:
+        with open(CURVE_PATH, encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _curve_save(obj: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(CURVE_PATH), exist_ok=True)
+        tmp = CURVE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        os.replace(tmp, CURVE_PATH)
+    except OSError:
+        pass
+
+
+def save_intraday_amount(date: str, tmin: int, cum_yi: float) -> None:
+    """归档"截至第 tmin 分钟的当日累计成交额"（5 分钟分桶取最大值）。"""
+    if not date or cum_yi <= 0:
+        return
+    tmin = max(0, min(240, int(tmin)))
+    bucket = str((tmin // 5) * 5)
+    obj = _curve_load()
+    day = obj.setdefault(date, {})
+    if cum_yi > float(day.get(bucket) or 0):
+        day[bucket] = round(cum_yi, 1)
+    for d in sorted(obj)[:-20]:          # 只留最近 20 个交易日
+        obj.pop(d, None)
+    _curve_save(obj)
+
+
+def intraday_fraction(tmin: int, days: int = 8, min_days: int = 3):
+    """近 N 日「截至 tmin 的累计额 ÷ 当日全天额」的中位数。
+
+    样本不足 min_days 天返回 None（调用方退回经验曲线）。
+    用中位数而不是均值：单日的极端形态不该把基准拽跑。
+    """
+    obj = _curve_load()
+    if not obj:
+        return None
+    totals = {e.get("date"): float(e.get("amount") or 0) for e in _amount_entries()}
+    tmin = max(0, min(240, int(tmin)))
+    fr = []
+    for date in sorted(obj)[-days:]:
+        day = obj.get(date) or {}
+        cum = 0.0
+        for k, v in day.items():
+            try:
+                kv = int(k)
+            except (TypeError, ValueError):
+                continue
+            if kv <= tmin:
+                cum = max(cum, float(v or 0))
+        total = totals.get(date) or 0.0
+        if total <= 0:                   # 全天额没归档 → 用该日记录到的最大值近似
+            total = max([float(v or 0) for v in day.values()] or [0.0])
+        if cum > 0 and total > 0 and cum <= total * 1.001:
+            fr.append(cum / total)
+    if len(fr) < min_days:
+        return None
+    fr.sort()
+    return round(fr[len(fr) // 2], 4)
 
 
 def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
@@ -598,8 +826,14 @@ def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
     return result
 
 
-def fetch_index_snapshots() -> dict:
-    """指数快照 —— 用于测算全市场量能。"""
+def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
+    """指数快照 —— 用于测算全市场量能。
+
+    这里必须带记忆（用户实测「实时盘中成交额偶尔丢失」）：腾讯一次抖动就返回 {}，
+    下游 sum(...) = 0 → 量能模式退化成 pending，界面上成交额直接空掉。
+    另外要求**至少两只**（上证+深证）都拿到：只回一只时 sum 会腰斩，
+    那比"没有数据"更危险（会得出"极度缩量"的假结论）。
+    """
     codes = {
         "sh000001": "上证指数",
         "sz399001": "深证成指",
@@ -611,23 +845,49 @@ def fetch_index_snapshots() -> dict:
         "sz399303": "国证2000",
     }
     url = "https://qt.gtimg.cn/q=" + ",".join(codes.keys())
-    try:
-        raw = _get(url, timeout=12).decode("gbk", errors="ignore")
-    except Exception:
-        return {}
-    out = {}
-    for line in raw.splitlines():
-        rec = _parse_tx_line(line)
-        if not rec:
-            continue
-        # 指数的「成交额」在腾讯口径下单位为万元
-        out[rec["code"]] = {
-            "name": codes.get(rec["code"], rec["name"]),
-            "price": rec["price"],
-            "pct": rec["pct"],
-            "amount": rec["amount"],
-        }
-    return out
+
+    def producer():
+        out = {}
+        for attempt in range(2):            # 一次兜底重试：只治"刚好抖一下"
+            try:
+                raw = _get(url, timeout=12).decode("gbk", errors="ignore")
+            except Exception:
+                raw = ""
+            out = {}
+            for line in raw.splitlines():
+                rec = _parse_tx_line(line)
+                if not rec:
+                    continue
+                # 指数的「成交额」在腾讯口径下单位为万元
+                out[rec["code"]] = {
+                    "name": codes.get(rec["code"], rec["name"]),
+                    "price": rec["price"],
+                    "pct": rec["pct"],
+                    "amount": rec["amount"],
+                }
+            if len(out) >= 2:
+                return True, out
+            if attempt == 0:
+                time.sleep(0.3)
+        return False, out
+
+    return _fetch_memo("index", date or last_trade_date(), ttl, producer,
+                       empty={}, valid=lambda v: len(v or {}) >= 2)
+
+
+def market_amount_hwm(date: str, current_yi: float) -> float:
+    """当日两市成交额的**高水位**（亿）。
+
+    盘中累计成交额只会增不会减，所以取 max 天然安全；而"部分响应"
+    （只回了上证没回深证）会让 sum 直接腰斩 —— 高水位正好挡住这种丢失。
+    落盘保存，跨扫描/跨重启都有效。
+    """
+    cur = float(current_yi or 0)
+    old, _ = _mem_read("mkt_amount", date)
+    best = max(cur, float(old or 0))
+    if best > 0 and best != float(old or 0):
+        _mem_write("mkt_amount", date, best)
+    return best
 
 
 # ---------------------------------------------------------------- K线
@@ -806,6 +1066,13 @@ def fetch_klines(codes: list[str], n: int = 70, workers: int = 12,
                 done += 1
                 if progress:
                     progress(done, total)
+    # K线静默丢失要能自查：缺 K线的票会被直接踢出候选，用户看不到"少了几只"。
+    # 只有真的去拉过（todo 非空）且缺口明显时才记降级，避免全是缓存命中时报假警。
+    if todo and len(result) < len(code_set):
+        miss = len(code_set) - len(result)
+        _health_set("klines", False, f"{miss} 只票的K线没取到（已被排除在候选外）")
+    else:
+        _health_set("klines", True)
     return result
 
 
@@ -828,13 +1095,17 @@ def _fetch_pool(kind: str, date: str, sort: str, ttl: int = 120) -> list[dict]:
             raw = _get(url, timeout=15).decode("utf-8", errors="ignore")
             js = json.loads(raw)
         except Exception:
-            return []
-        data = js.get("data") or {}
-        pool = data.get("pool") or []
+            return False, None          # 传输/解析失败 —— 不是"今天没有涨停"
+        data = js.get("data")
+        # data=null：接口没给数据（日期非法 / 被限速）。**不能当成合法空值** ——
+        # 以前这里直接 `data or {}` → 空池 → 亏钱面积算成 0 → 真退潮日判成"可以出手"。
+        if not isinstance(data, dict):
+            return False, None
         # 记录接口自报的真实交易日
         qd = data.get("qdate")
         if qd:
             _pool_qdate[kind] = str(qd)
+        pool = data.get("pool") or []
         out = []
         for it in pool:
             try:
@@ -857,8 +1128,9 @@ def _fetch_pool(kind: str, date: str, sort: str, ttl: int = 120) -> list[dict]:
                 })
             except (KeyError, TypeError, ValueError):
                 continue
-        return out
-    return cached(f"pool:{kind}:{date}", ttl, producer)
+        # 接口**正常回答**（out 可能为空 —— 比如今天真没有跌停股，那是合法空值）
+        return True, out
+    return _fetch_memo(f"pool:{kind}", date, ttl, producer, empty=[])
 
 
 def pool_qdate() -> str:
@@ -917,8 +1189,10 @@ def fetch_yesterday_zt_pool(ttl: int = 120) -> list[dict]:
             raw = _get(url, timeout=15).decode("utf-8", errors="ignore")
             js = json.loads(raw)
         except Exception:
-            return []
-        data = js.get("data") or {}
+            return False, None
+        data = js.get("data")
+        if not isinstance(data, dict):
+            return False, None          # 同 _fetch_pool：data=null 是失败，不是"昨天没有涨停"
         out = []
         for it in (data.get("pool") or []):
             try:
@@ -934,8 +1208,8 @@ def fetch_yesterday_zt_pool(ttl: int = 120) -> list[dict]:
                 })
             except (KeyError, TypeError, ValueError):
                 continue
-        return out
-    return cached("pool:YZT", ttl, producer)
+        return True, out
+    return _fetch_memo("yzt", last_trade_date(), ttl, producer, empty=[])
 
 
 # 盘口异动类型（东财 getAllStockChanges），只收录本系统用到的
@@ -1253,28 +1527,36 @@ def _breadth_fallback() -> dict:
             "source": "kph"}
 
 
-def fetch_breadth() -> dict:
+def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
     """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。
 
     push2 拿不到时（被限流 / 预算用尽）退**开盘红实时情绪**——它直接给
     涨跌家数，是独立于东财的一条路；结果带 source 字段供界面如实标注。
+    两条路都不通时，回退**当日最后一份好数据**（涨跌家数偶尔丢失会让
+    情绪温度的第 4 项退化，不该因此把整根温度计算歪）。
     """
-    js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
-                     "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
-    diff = (js.get("data") or {}).get("diff") or []
-    if not diff:
-        return _breadth_fallback()
-    up = down = flat = 0
-    for it in diff:
-        up += int(_num(it.get("f104")))
-        down += int(_num(it.get("f105")))
-        flat += int(_num(it.get("f106")))
-    total = up + down + flat
-    if total <= 0:
-        return {}
-    return {"up": up, "down": down, "flat": flat, "total": total,
-            "up_ratio": round(up / total, 3),
-            "up_down_ratio": round(up / down, 2) if down else 0.0}
+    def producer():
+        js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
+                         "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
+        diff = (js.get("data") or {}).get("diff") or []
+        if diff:
+            up = down = flat = 0
+            for it in diff:
+                up += int(_num(it.get("f104")))
+                down += int(_num(it.get("f105")))
+                flat += int(_num(it.get("f106")))
+            total = up + down + flat
+            if total > 0:
+                return True, {"up": up, "down": down, "flat": flat, "total": total,
+                              "up_ratio": round(up / total, 3),
+                              "up_down_ratio": round(up / down, 2) if down else 0.0,
+                              "source": "em"}
+        fb = _breadth_fallback()
+        if fb:
+            return True, fb
+        return False, None
+
+    return _fetch_memo("breadth", date or last_trade_date(), ttl, producer, empty={})
 
 
 # ---------------------------------------------------------------- 主力资金流

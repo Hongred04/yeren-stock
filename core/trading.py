@@ -44,6 +44,13 @@ from . import indicators as ind
 
 # 时段是买入建议的执行前提：B1/B2/B3 的进场都写"次日/回踩"，
 # 只有 B4 尾盘博弈是当日定时动作 —— 时段不对就不给。
+def _hhmm_to_min(hhmm: int) -> int:
+    """HHMM → 当日第几分钟。**不能用 hhmm 直接相减**：HHMM 不是线性刻度
+    （9:59=959 → 10:00=1000 只差 1 分钟却差 41），直接减每跨一小时就多算 40 分钟。
+    这个错会让盘中"已交易分钟数"虚高 → 日内占比虚高 → 全天额被低估 30%+。"""
+    return (hhmm // 100) * 60 + (hhmm % 100)
+
+
 def market_session(now: datetime | None = None) -> dict:
     """A股当日交易时段判定（按本机时间）。"""
     now = now or datetime.now()
@@ -66,15 +73,17 @@ def market_session(now: datetime | None = None) -> dict:
         phase, label = "just_closed", "刚收盘"
     else:
         phase, label = "after_close", "盘后"
-    # 当日已交易分钟数（9:30 起算、剔除午休，0..240）—— 量能日内折算用
+    # 当日已交易分钟数（9:30 起算、剔除午休，0..240）—— 量能日内折算用。
+    # 各段边界用"当日第几分钟"算，别再拿 HHMM 相减。
+    m = _hhmm_to_min(t)
     if phase == "morning":
-        tmin = t - 930
+        tmin = m - _hhmm_to_min(930)
     elif phase == "noon":
         tmin = 120
     elif phase == "afternoon":
-        tmin = 120 + (t - 1300)
+        tmin = 120 + (m - _hhmm_to_min(1300))
     elif phase == "tail":
-        tmin = min(240, 180 + (t - 1400))
+        tmin = min(240, 180 + (m - _hhmm_to_min(1400)))
     elif phase in ("just_closed", "after_close"):
         tmin = 240
     else:
@@ -82,7 +91,7 @@ def market_session(now: datetime | None = None) -> dict:
     return {
         "phase": phase,
         "label": label,
-        "tmin": tmin,
+        "tmin": max(0, tmin),
         "in_tail": phase == "tail",
         "after_hours": phase in ("rest", "just_closed", "after_close"),
         "is_trade_day": phase != "rest",

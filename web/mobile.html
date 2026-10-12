@@ -338,6 +338,7 @@ function srcState(){
   return {any: blocked.length>0 || cooling,
           em: emApis.length>0 || cooling,
           emApis, p2, vendors,
+          degraded: ((SRCINFO&&SRCINFO.health)||{}).degraded || [],
           who: emApis.length?'东财':(vendors.join('、')||'数据源')};
 }
 
@@ -360,18 +361,30 @@ async function retryAfterVerify(){
 function renderSrc(){
   const el=$('srcBar'); if(!el) return;
   const st=srcState();
-  if(!st.any){ el.innerHTML=''; return; }
-  // 东财受限才给"去验证"入口（别的源受限没有人工验证这回事）
-  el.innerHTML=`<div class="srcwarn">⚠️ <b>${esc(st.who)}接口暂时受限</b> —— 系统已自动切换备用源，结论不受影响
-    ${st.em?`<div class="srcwarnbtns">
-      <button class="sbtn" onclick="openEmPage()">打开东财网页（滑块验证）</button>
-      <button class="sbtn ghost" onclick="retryAfterVerify()">我已验证，重试</button>
-    </div>
-    <div class="n">被标记的 IP 会在东财网页上弹滑块，程序绕不过；验证后点「重试」立即恢复
-      · <span style="color:var(--blu);font-weight:800" onclick="openSrcSheet()">数据源详情</span></div>`
-    :`<div class="n">稍后会自动恢复，也可以点右上角刷新重试
-      · <span style="color:var(--blu);font-weight:800" onclick="openSrcSheet()">数据源详情</span></div>`}
-  </div>`;
+  const parts=[];
+  if(st.any){
+    // 东财受限才给"去验证"入口（别的源受限没有人工验证这回事）
+    parts.push(`<div class="srcwarn">⚠️ <b>${esc(st.who)}接口暂时受限</b> —— 系统已自动切换备用源，结论不受影响
+      ${st.em?`<div class="srcwarnbtns">
+        <button class="sbtn" onclick="openEmPage()">打开东财网页（滑块验证）</button>
+        <button class="sbtn ghost" onclick="retryAfterVerify()">我已验证，重试</button>
+      </div>
+      <div class="n">被标记的 IP 会在东财网页上弹滑块，程序绕不过；验证后点「重试」立即恢复
+        · <span style="color:var(--blu);font-weight:800" onclick="openSrcSheet()">数据源详情</span></div>`
+      :`<div class="n">稍后会自动恢复，也可以点右上角刷新重试
+        · <span style="color:var(--blu);font-weight:800" onclick="openSrcSheet()">数据源详情</span></div>`}
+    </div>`);
+  }
+  // 数据降级（抓取失败 → 回退到当日最后一份好数据）要如实说，别假装一切正常
+  if(st.degraded.length){
+    parts.push(`<div class="srcwarn" style="background:var(--blu-bg);color:var(--blu);border-left-color:var(--blu)">
+      ℹ️ <b>部分数据降级</b>：${st.degraded.map(d=>esc(d.label||d.key)
+        +(d.stale_seconds?`（${d.stale_seconds}秒前快照）`:'')).join('、')}
+      <div class="n">已回退到当日最后一份好数据，或用备用源 —— 降级不等于结论错，可信度略降
+        · <span style="font-weight:800" onclick="openSrcSheet()">详情</span></div>
+    </div>`);
+  }
+  el.innerHTML=parts.join('');
 }
 
 /* 自动申请打开东财网页。
@@ -410,6 +423,9 @@ async function openSrcSheet(){
         b.map(x=>esc(srcVendor(x.api))+' · 约 '+Math.max(1,Math.ceil(x.seconds_left/60))+' 分钟后自动恢复').join('<br>')}</div>`:''}
       ${p2.budget_max?`<div class="item fl" style="font-size:11.5px">东财本分钟额度 ${
         p2.budget_used||0}/${p2.budget_max}${Number(p2.cooling_seconds||0)>0?' · 冷却中':''}</div>`:''}
+      ${st.degraded.length?`<div class="item" style="font-size:11.5px">
+        <b>本轮降级：</b>${st.degraded.map(d=>esc(d.label||d.key)
+          +(d.stale_seconds?`（${d.stale_seconds}秒前）`:'')).join('、')}</div>`:''}
     </div>
     <div class="sect"><div class="k">东财被限速怎么办</div>
       <div class="item" style="font-size:12.5px">东财对被标记的 IP 会在网页上弹<b>滑块验证</b>，程序绕不过。
@@ -768,6 +784,107 @@ function render(fromCache,ts){
   try{ window.scrollTo(0,_y); }catch(e){}
 }
 
+/* ── 迷你K线：蜡烛 + MA5/10/20 + 成交量 + 点按读数 ──
+   手机详情以前完全没有图 —— 而买点/止损全是拿 5 日线、10 日线说事的。
+   触摸设备不套十字光标，改成"点一下，图上方的读数行跟着变"，更好按。 */
+function _maOf(closes,n){
+  const out=[];
+  for(let i=0;i<closes.length;i++){
+    if(i<n-1){ out.push(null); continue; }
+    let s=0; for(let j=i-n+1;j<=i;j++) s+=closes[j];
+    out.push(s/n);
+  }
+  return out;
+}
+function _limitThreshold(code){
+  const num=String(code||'').slice(2);
+  if(/^(300|301|688|689)/.test(num)) return 19.5;
+  if(/^(43|83|87|88|92)/.test(num)) return 29.0;
+  return 9.5;
+}
+function drawKmini(p){
+  const el=$('kmini'); if(!el) return;
+  const bars=(p.kline_tail||[]);
+  if(bars.length<2){ el.innerHTML='<div class="fl" style="font-size:12px">无K线数据</div>'; return; }
+  const n=bars.length, W=Math.max(el.clientWidth||340,260), H=168;
+  const padL=38,padR=10,padT=12,padB=16,gap=7;
+  const volH=34, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR, priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+  const closes=bars.map(b=>b.close), highs=bars.map(b=>b.high),
+        lows=bars.map(b=>b.low), vols=bars.map(b=>b.volume||0);
+  const ma5=_maOf(closes,5), ma10=_maOf(closes,10), ma20=_maOf(closes,20);
+  let mn=Math.min(...lows), mx=Math.max(...highs);
+  [ma5,ma10,ma20].forEach(a=>a.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; } }));
+  const pad=(mx-mn)*0.06||0.1; mn-=pad; mx+=pad;
+  const rg=(mx-mn)||1, maxVol=Math.max(...vols,1);
+  const X=i=>padL+i*iw/(n-1), Yp=v=>priceB-(v-mn)/rg*priceH, Yv=v=>volB-v/maxVol*volH;
+  const bw=Math.max(1.3,Math.min(5,iw/n*0.6));
+  const th=_limitThreshold(p.code);
+  const prevC=i=>i>0?closes[i-1]:bars[i].open;
+  const colOf=i=>bars[i].close>=prevC(i)?'#d92d3f':'#0f9d58';
+  let candle='',vb='',marks='';
+  bars.forEach((b,i)=>{
+    const x=X(i), c=colOf(i);
+    candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
+    const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    vb+=`<rect x="${(x-bw/2).toFixed(1)}" y="${Yv(vols[i]).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-Yv(vols[i])).toFixed(1)}" fill="${c}" opacity=".5"/>`;
+    const pc=prevC(i);
+    if(i>0 && pc>0 && (b.close-pc)/pc*100>=th)
+      marks+=`<circle cx="${x.toFixed(1)}" cy="${(Yp(b.high)-3.4).toFixed(1)}" r="1.7" fill="#d92d3f"/>`;
+  });
+  const maPath=arr=>{
+    let d='',st=false;
+    arr.forEach((v,i)=>{ if(v==null)return; d+=`${st?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; st=true; });
+    return d;
+  };
+  const last=bars[n-1], pc0=prevC(n-1);
+  const lastPct=pc0>0?(last.close-pc0)/pc0*100:0;
+  const lastCol=lastPct>=0?'#d92d3f':'#0f9d58';
+  const yl=Yp(last.close);
+  const xIdx=[0,Math.round((n-1)*.5),n-1].filter((v,i,a)=>a.indexOf(v)===i);
+  el.innerHTML=`<div id="kread" class="fl" style="font-size:11.5px;margin-bottom:2px;line-height:1.5"></div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    ${[0,.5,1].map(t=>`<line x1="${padL}" y1="${(padT+priceH*t).toFixed(1)}" x2="${W-padR}" y2="${(padT+priceH*t).toFixed(1)}" stroke="#eef1f5"/>
+      <text x="${padL-5}" y="${(padT+priceH*t+3.5).toFixed(1)}" font-size="8.5" fill="#9aa3b2" text-anchor="end">${(mx-rg*t).toFixed(2)}</text>`).join('')}
+    <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+    ${vb}${candle}
+    <path d="${maPath(ma5)}" fill="none" stroke="#e0a01a" stroke-width="1"/>
+    <path d="${maPath(ma10)}" fill="none" stroke="#2563d9" stroke-width="1"/>
+    <path d="${maPath(ma20)}" fill="none" stroke="#8b5cf6" stroke-width="1"/>
+    <line x1="${padL}" y1="${yl.toFixed(1)}" x2="${W-padR}" y2="${yl.toFixed(1)}" stroke="${lastCol}" stroke-width="1" stroke-dasharray="4 3" opacity=".8"/>
+    <text x="${W-padR}" y="${(yl-4).toFixed(1)}" font-size="9" fill="${lastCol}" text-anchor="end" font-weight="800">${last.close.toFixed(2)}</text>
+    ${marks}
+    ${xIdx.map(i=>`<text x="${X(i).toFixed(1)}" y="${H-4}" font-size="8.5" fill="#9aa3b2" text-anchor="middle">${esc(String(bars[i].date||'').slice(5))}</text>`).join('')}
+    <rect id="kminiHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+  </svg>
+  <div style="font-size:10.5px;display:flex;gap:8px;flex-wrap:wrap">
+    <span style="color:#e0a01a;font-weight:800">MA5 ${ma5[n-1]==null?'—':ma5[n-1].toFixed(2)}</span>
+    <span style="color:#2563d9;font-weight:800">MA10 ${ma10[n-1]==null?'—':ma10[n-1].toFixed(2)}</span>
+    <span style="color:#8b5cf6;font-weight:800">MA20 ${ma20[n-1]==null?'—':ma20[n-1].toFixed(2)}</span>
+    <span class="fl">红点=涨停日 · 点图看某天</span>
+  </div>`;
+  const read=$('kread'), svg=el.querySelector('svg'), hot=$('kminiHot');
+  const show=i=>{
+    i=Math.max(0,Math.min(n-1,i));
+    const b=bars[i], pc=prevC(i), pct=pc>0?(b.close-pc)/pc*100:0;
+    read.innerHTML=`<b>${esc(b.date)}</b> 开 ${num(b.open)} 高 ${num(b.high)} 低 ${num(b.low)}
+      <b>收 ${num(b.close)}</b> <span class="${pct>=0?'up':'dn'}">${pct>=0?'+':''}${pct.toFixed(2)}%</span>
+      量 ${num(b.volume/1e4,1)}万手`;
+  };
+  show(n-1);
+  if(svg && hot){
+    const pick=ev=>{
+      const r=svg.getBoundingClientRect(); if(!r.width) return;
+      const cx=(ev.touches?ev.touches[0].clientX:ev.clientX);
+      show(Math.round(((cx-r.left)/r.width*W-padL)/(iw/(n-1))));
+    };
+    hot.addEventListener('touchstart',pick,{passive:true});
+    hot.addEventListener('touchmove',pick,{passive:true});
+    hot.addEventListener('mousemove',pick);
+  }
+}
+
 /* ── 抽屉：候选详情 ── */
 function openSheet(i){
   const p=(window.__picks||[])[i]; if(!p) return;
@@ -784,6 +901,7 @@ function openSheet(i){
     <h3>${esc(p.name||'')} <span class="fl" style="font-size:12px;font-weight:600">${esc(p.code||'')}</span>
       <span class="${pctCls(p.pct)}" style="margin-left:auto;font-size:19px">${pctTxt(p.pct)}</span></h3>
     <div class="kv">${kv.map(([k,v])=>`<div><div class="k2">${k}</div><div class="v2">${v}</div></div>`).join('')}</div>
+    <div class="sect"><div class="k">近30日走势</div><div id="kmini"></div></div>
     ${p.hot_rank?`<div class="sect"><div class="k">市场人气</div>
       <div class="item">同花顺人气榜第 <b>${p.hot_rank}</b> 名${p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
     ${buys.length?`<div class="sect"><div class="k">买点</div>${buys.map(b=>`
@@ -800,6 +918,7 @@ function openSheet(i){
     ${p.zt_reason?`<div class="sect"><div class="k">涨停原因</div>
       <div class="item">${esc(p.zt_reason)}</div></div>`:''}
   `;
+  drawKmini(p);
   $('mask').classList.add('on'); $('sheet').classList.add('on');
 }
 function closeSheet(){ $('mask').classList.remove('on'); $('sheet').classList.remove('on'); }

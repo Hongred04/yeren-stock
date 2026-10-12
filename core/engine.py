@@ -111,14 +111,22 @@ def _traded_fraction(tmin: int) -> float:
 
 def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                     session: dict | None = None,
-                    fallback_amount: float = 0.0) -> dict:
+                    fallback_amount: float = 0.0,
+                    fallback_final: bool = True,
+                    frac_hint: float | None = None) -> dict:
     """M2 量能定模式 —— 整个体系的模式总开关。
 
     session/fallback_amount：量能阈值是「全天成交额」口径，而快照里的
-    成交额是当日累计值 —— 集合竞价时约等于 0，早盘也只有两三成。
-    盘前/非交易时段改用上一完整交易日的全天额（本地持久化），
+    成交额是当日累计值 —— 集合竞价时约等于零，早盘也只有两三成。
+    盘前/非交易时段改用上一交易日的全天额（本地持久化），
     盘中按日内占比折算成预估全天额，收盘后直读。口径写进 basis，
     界面上跟着显示，杜绝"没开盘就说极度缩量"这类假结论。
+
+    fallback_final：上一交易日那条记录是不是**收盘后**的全天终值。盘中只扫到
+    一半的值明显偏低，界面必须说明，不能冒充"全天"。
+
+    frac_hint：由调用方从历史实测曲线算出的「截至当前时刻的累计占比」。给了就用
+    它折算（比写死的经验曲线准得多）；不给则退回内置经验曲线。
     """
     v = cfg.get("M2_volume", {})
     if not v.get("enabled", True):
@@ -132,7 +140,8 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     if phase in ("pre_open", "auction", "rest"):
         if fallback_amount and fallback_amount > 0:
             amt = fallback_amount
-            basis = "上一完整交易日全天"
+            basis = ("上一完整交易日全天" if fallback_final
+                     else "上一交易日盘中快照（偏低，仅供参考）")
         else:
             return {
                 "mode": "pending", "label": VOLUME_MODES["pending"],
@@ -156,10 +165,19 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 "amount": 0, "raw_amount": 0,
                 "basis": "无（盘中数据未就绪）", "red_flag": "",
             }
-        frac = max(_traded_fraction(tmin), 0.02)
-        est = amt_raw / frac if amt_raw > 0 else 0.0
-        amt = min(max(est, amt_raw), amt_raw * 6) if amt_raw > 0 else 0.0
-        basis = f"盘中预估全天（已成交{amt_raw:.0f}亿）"
+        frac_static = max(_traded_fraction(tmin), 0.02)
+        frac, frac_src = frac_static, "经验曲线"
+        if frac_hint and 0.02 <= float(frac_hint) <= 1.0:
+            # 实测曲线优先：不同交易日的量能形态差别很大（放量日开盘更集中、
+            # 缩量日更平），写死的曲线必然有系统偏差
+            frac, frac_src = max(float(frac_hint), 0.02), "近N日实测"
+        est = amt_raw / frac
+        # 早盘外推倍数封顶：9:35 时"已成交额 ×6"已是乐观上限，再多就是拍脑袋
+        cap = amt_raw * 6
+        capped = est > cap
+        amt = min(max(est, amt_raw), cap)
+        basis = (f"盘中预估全天（已成交{amt_raw:.0f}亿 · {frac_src}折算"
+                 f"{'·已按上限收敛' if capped else ''}）")
     else:
         amt = amt_raw
         basis = "当日实时"

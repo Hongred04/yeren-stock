@@ -279,6 +279,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         date = date or ds.last_trade_date()
 
         # ---- 数据层 ----
+        ds.reset_health()            # 每轮自查清零（数据健康度随报告一起给前端）
         _prog("拉取情绪池数据…", 0, 100)
         zt = ds.fetch_limit_up_pool(date)
         dt = ds.fetch_limit_down_pool(date)
@@ -322,7 +323,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                         r["hot_tag"] = h["tag"]
 
         zth = ds.fetch_limit_up_history(10, real_date)
-        idx = ds.fetch_index_snapshots()
+        idx = ds.fetch_index_snapshots(real_date)
         amount = sum(v["amount"] for v in idx.values()
                      if v["name"] in ("上证指数", "深证成指"))
         hist = ds.market_amount_history(20)
@@ -333,10 +334,25 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         preopen = sess["phase"] in ("pre_open", "auction", "rest")
         macro = engine.evaluate_macro(cfg)
         amt_yi = amount / 1e8 if amount > 1e5 else amount
+        # 当日累计成交额只会增不会减 → 取高水位。挡两类丢失：
+        #   · 只回了上证、没回深证 → sum 直接腰斩（比"没数据"更危险，会判成极度缩量）
+        #   · 接口整次抖动 → 回退当日最后一份好数据（fetch_index_snapshots 已兜）
+        amt_yi = ds.market_amount_hwm(real_date, amt_yi)
+        amount = amt_yi * 1e8
+        fb = ds.load_last_amount_meta(real_date)
+        # 盘中折算用**近 N 日实测占比曲线**（写死的经验曲线在不同量能形态下偏差明显）
         volume = engine.evaluate_volume(cfg, amount, hist, session=sess,
-                                        fallback_amount=ds.load_last_complete_amount(real_date))
-        if sess["phase"] in ("just_closed", "after_close", "rest") and amt_yi > 0:
-            ds.save_market_amount(real_date, amt_yi)
+                                        fallback_amount=fb["amount"],
+                                        fallback_final=fb["final"],
+                                        frac_hint=ds.intraday_fraction(
+                                            sess.get("tmin", 240)))
+        # 归档当日高水位：既进长期档案（次日盘前的基准），也进日内曲线（供折算校准）
+        if amt_yi > 0:
+            ds.save_market_amount(
+                real_date, amt_yi,
+                final=sess["phase"] in ("just_closed", "after_close", "rest"))
+            if sess["phase"] in ("morning", "noon", "afternoon", "tail"):
+                ds.save_intraday_amount(real_date, sess.get("tmin", 0), amt_yi)
         sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth,
                                               real_date=real_date,
                                               tmin=sess.get("tmin"))
@@ -511,6 +527,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "message": m6,
             "discipline": m8,
             "limit_up_pool": sorted(zt, key=lambda x: -x.get("boards", 1))[:30],
+            # 数据健康度自查：哪些关键数据这轮降级/用的是旧快照（前端如实标注）
+            "data_health": ds.data_health(),
             "config": cfg,
         }
         # 写缓存（持锁，极短）；同时落盘 —— 过期/重启后还能先端出上次结果

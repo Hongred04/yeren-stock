@@ -568,6 +568,14 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
       <div id="srcPush2" style="margin-top:8px"></div>
       <button class="btn2" id="srcUnblock" style="margin-top:8px;width:100%">清除熔断记录（立即重试）</button>
     </div>
+    <div class="fld"><label>数据健康度（本轮扫描）</label>
+      <div id="srcHealth"></div>
+      <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
+        关键数据（涨停/跌停/炸板池、指数行情、涨跌家数、个股K线）抓取失败时会自动回退到
+        <b>当日最后一份好数据</b>，这里如实列出哪些降级了。降级不代表结论一定错，
+        但可信度会下降 —— 特别是跌停池/炸板池降级时，"亏钱面积"会偏低。
+      </div>
+    </div>
     <div class="fld"><label>连接池</label>
       <button class="btn2" id="srcReconnect" style="width:100%">重连（丢弃缓存连接）</button>
       <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
@@ -1498,39 +1506,144 @@ function syncDetailBtns(){
   bindDetailBtns(p);
 }
 
+// ── K线图：蜡烛 + MA5/10/20 + 成交量 + 十字光标 ──
+// 之前只有收盘线 + 蜡烛，看不出「5日线 / 10日线」在哪 —— 而策略里 B2 龙头回踩、
+// S3 破位止损全是拿均线说事的，图上必须能直接看到。量能同理（缩量/放量是本系统的
+// 核心口径）。再加涨停标记与十字光标，让「哪天涨停、那天多少量」一眼可查。
+function _maOf(closes, n){
+  const out=[];
+  for(let i=0;i<closes.length;i++){
+    if(i<n-1){ out.push(null); continue; }
+    let s=0; for(let j=i-n+1;j<=i;j++) s+=closes[j];
+    out.push(s/n);
+  }
+  return out;
+}
+function _limitThreshold(code){          // 与后端 indicators.limit_up_threshold 同口径
+  const num=String(code||'').slice(2);
+  if(/^(300|301|688|689)/.test(num)) return 19.5;
+  if(/^(43|83|87|88|92)/.test(num)) return 29.0;
+  return 9.5;
+}
 function drawK(p){
   const el=$('kchart'); if(!el) return;
   const bars=(p.kline_tail||[]);
   if(bars.length<2){el.innerHTML='<div class="fl" style="font-size:13px">无K线数据</div>';return;}
-  const W=Math.max(el.clientWidth||700,320), H=170, pl=46,pb=22,pt=10,pr=10;
-  const iw=W-pl-pr, ih=H-pt-pb;
-  const cs=bars.map(b=>b.close), hs=bars.map(b=>b.high), ls2=bars.map(b=>b.low);
-  const mn=Math.min(...ls2), mx=Math.max(...hs);
+  el.style.position='relative';
+  const n=bars.length;
+  const W=Math.max(el.clientWidth||720,320), H=224;
+  const padL=46,padR=13,padT=17,padB=18,gap=9;
+  const volH=44, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR;
+  const priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+
+  const closes=bars.map(b=>b.close), highs=bars.map(b=>b.high),
+        lows=bars.map(b=>b.low), vols=bars.map(b=>b.volume||0);
+  const ma5=_maOf(closes,5), ma10=_maOf(closes,10), ma20=_maOf(closes,20);
+  let mn=Math.min(...lows), mx=Math.max(...highs);
+  // 均线也要算进 Y 轴范围，否则线会跑出画面
+  [ma5,ma10,ma20].forEach(a=>a.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; } }));
+  const pad=(mx-mn)*0.06||0.1; mn-=pad; mx+=pad;
   const rg=(mx-mn)||1;
-  const X=i=>pl+i*iw/(bars.length-1);
-  const Y=v=>pt+ih-(v-mn)/rg*ih;
-  let path='',prevClose=null;
+  const maxVol=Math.max(...vols,1);
+  const X=i=>padL+i*iw/(n-1);
+  const Yp=v=>priceB-(v-mn)/rg*priceH;
+  const Yv=v=>volB-v/maxVol*volH;
+  const bw=Math.max(1.6,Math.min(7,iw/n*0.62));
+  const th=_limitThreshold(p.code);
+  const prevC=i=>i>0?closes[i-1]:bars[i].open;
+  const upOf=i=>bars[i].close>=prevC(i);
+  const colOf=i=>upOf(i)?'#d92d3f':'#0f9d58';
+
+  // ① 蜡烛 + 涨停标记
+  let candle='', marks='';
   bars.forEach((b,i)=>{
-    const col=b.close>=(prevClose??b.open)?'#d92d3f':'#0f9d58';
-    const x=X(i);
-    path+=`<line x1="${x.toFixed(1)}" y1="${Y(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(b.low).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
-    const y0=Y(Math.max(b.open,b.close)), y1=Y(Math.min(b.open,b.close));
-    path+=`<rect x="${(x-1.9).toFixed(1)}" y="${y0.toFixed(1)}" width="3.8" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${col}"/>`;
-    prevClose=b.close;
+    const x=X(i), c=colOf(i);
+    candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
+    const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    const pc=prevC(i);
+    if(i>0 && pc>0 && (b.close-pc)/pc*100>=th){
+      marks+=`<circle cx="${x.toFixed(1)}" cy="${(Yp(b.high)-4).toFixed(1)}" r="2.1" fill="#d92d3f"/>`;
+    }
   });
-  const line=bars.map((b,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(b.close).toFixed(1)}`).join('');
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
-    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#d92d3f" stop-opacity=".15"/>
-      <stop offset="100%" stop-color="#d92d3f" stop-opacity="0"/></linearGradient></defs>
-    ${[0,.25,.5,.75,1].map(t=>`<line x1="${pl}" y1="${(pt+ih*t).toFixed(1)}" x2="${W-pr}" y2="${(pt+ih*t).toFixed(1)}" stroke="#eef1f5"/>
-      <text x="${pl-6}" y="${(pt+ih*t+3.5).toFixed(1)}" font-size="9.5" fill="#9aa3b2" text-anchor="end">${(mx-rg*t).toFixed(2)}</text>`).join('')}
-    <path d="${line}L${X(bars.length-1)},${pt+ih}L${pl},${pt+ih}Z" fill="url(#ag)"/>
-    <path d="${line}" fill="none" stroke="#2563d9" stroke-width="1.6"/>
-    ${path}
-    <text x="${pl}" y="${H-7}" font-size="9.5" fill="#9aa3b2">${bars[0].date}</text>
-    <text x="${W-pr}" y="${H-7}" font-size="9.5" fill="#9aa3b2" text-anchor="end">${bars[bars.length-1].date}</text>
-  </svg>`;
+  // ② 成交量
+  let volBars='';
+  bars.forEach((b,i)=>{
+    const x=X(i), y=Yv(vols[i]);
+    volBars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${colOf(i)}" opacity=".55"/>`;
+  });
+  // ③ 均线
+  const maPath=arr=>{
+    let d='', started=false;
+    arr.forEach((v,i)=>{ if(v==null) return; d+=`${started?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; started=true; });
+    return d;
+  };
+  const last=bars[n-1], lastPct=prevC(n-1)>0?(last.close-prevC(n-1))/prevC(n-1)*100:0;
+  const lastCol=lastPct>=0?'#d92d3f':'#0f9d58';
+  const yl=Yp(last.close);
+  // ④ 坐标轴：4 条价格刻度 + 日期刻度
+  const yTicks=[0,.25,.5,.75,1].map(t=>({v:mx-rg*t,y:padT+priceH*t}));
+  const xIdx=[0,Math.round((n-1)*.25),Math.round((n-1)*.5),Math.round((n-1)*.75),n-1]
+    .filter((v,i,a)=>a.indexOf(v)===i);
+  const maLegend=[['MA5',ma5,'#e0a01a'],['MA10',ma10,'#2563d9'],['MA20',ma20,'#8b5cf6']]
+    .map(([nm,arr,col])=>{
+      const v=arr[n-1];
+      return `<span style="color:${col};font-weight:800">${nm} ${v==null?'—':v.toFixed(2)}</span>`;
+    }).join('<span class="fl" style="font-weight:400"> · </span>');
+
+  el.innerHTML=`<div style="font-size:11px;margin-bottom:3px;display:flex;gap:2px;flex-wrap:wrap">
+      ${maLegend}<span class="fl" style="font-weight:400"> · </span>
+      <span class="fl" style="font-weight:400">红点=涨停日</span></div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    ${yTicks.map(t=>`<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="#eef1f5"/>
+      <text x="${padL-6}" y="${(t.y+3.5).toFixed(1)}" font-size="9.5" fill="#9aa3b2" text-anchor="end">${t.v.toFixed(2)}</text>`).join('')}
+    <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+    <text x="${padL-6}" y="${(volT+9).toFixed(1)}" font-size="9" fill="#9aa3b2" text-anchor="end">量</text>
+    ${volBars}${candle}
+    <path d="${maPath(ma5)}" fill="none" stroke="#e0a01a" stroke-width="1.1"/>
+    <path d="${maPath(ma10)}" fill="none" stroke="#2563d9" stroke-width="1.1"/>
+    <path d="${maPath(ma20)}" fill="none" stroke="#8b5cf6" stroke-width="1.1"/>
+    <line x1="${padL}" y1="${yl.toFixed(1)}" x2="${W-padR}" y2="${yl.toFixed(1)}" stroke="${lastCol}" stroke-width="1" stroke-dasharray="4 3" opacity=".8"/>
+    <text x="${W-padR}" y="${(yl-4).toFixed(1)}" font-size="9.5" fill="${lastCol}" text-anchor="end" font-weight="800">${last.close.toFixed(2)} ${lastPct>=0?'+':''}${lastPct.toFixed(2)}%</text>
+    ${marks}
+    ${xIdx.map(i=>`<text x="${X(i).toFixed(1)}" y="${H-5}" font-size="9.5" fill="#9aa3b2" text-anchor="middle">${esc(String(bars[i].date||'').slice(5))}</text>`).join('')}
+    <line id="kxH" x1="${padL}" y1="0" x2="${W-padR}" y2="0" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+    <line id="kxV" x1="0" y1="${padT}" x2="0" y2="${volB}" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+    <rect id="kHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+  </svg>
+  <div id="ktip" style="position:absolute;display:none;pointer-events:none;z-index:5;
+    background:rgba(20,24,32,.92);color:#fff;border-radius:8px;padding:7px 10px;
+    font-size:11.5px;line-height:1.6;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.2)"></div>`;
+
+  // ⑤ 十字光标 + 悬浮数值（鼠标移出即隐藏）
+  const hot=el.querySelector('#kHot'), vL=el.querySelector('#kxV'),
+        hL=el.querySelector('#kxH'), tip=el.querySelector('#ktip');
+  if(!hot||!vL||!hL||!tip) return;
+  const svg=el.querySelector('svg');
+  const hide=()=>{ vL.setAttribute('opacity','0'); hL.setAttribute('opacity','0'); tip.style.display='none'; };
+  const move=(ev)=>{
+    const r=svg.getBoundingClientRect();
+    if(!r.width) return;                       // jsdom/未布局：别算出 NaN
+    const vx=(ev.clientX-r.left)/r.width*W;
+    let i=Math.round((vx-padL)/(iw/(n-1)));
+    i=Math.max(0,Math.min(n-1,i));
+    const b=bars[i], pc=prevC(i), pct=pc>0?(b.close-pc)/pc*100:0;
+    const x=X(i);
+    vL.setAttribute('x1',x.toFixed(1)); vL.setAttribute('x2',x.toFixed(1)); vL.setAttribute('opacity','.75');
+    hL.setAttribute('y1',Yp(b.close).toFixed(1)); hL.setAttribute('y2',Yp(b.close).toFixed(1)); hL.setAttribute('opacity','.75');
+    tip.innerHTML=`<b>${esc(b.date)}</b><br>开 ${f2(b.open)}　高 ${f2(b.high)}<br>低 ${f2(b.low)}　收 ${f2(b.close)}
+      <br><span style="color:${pct>=0?'#ff8a8a':'#7ee0a8'}">${pct>=0?'+':''}${pct.toFixed(2)}%</span>
+      　量 ${(b.volume/1e4).toFixed(1)}万手`;
+    tip.style.display='block';
+    // 贴边翻转，别被容器裁掉
+    const px=ev.clientX-el.getBoundingClientRect().left;
+    tip.style.left=Math.max(2,Math.min(px+12, (el.clientWidth||W)-tip.offsetWidth-4))+'px';
+    tip.style.top=(ev.clientY-el.getBoundingClientRect().top-6)+'px';
+  };
+  hot.addEventListener('mousemove',move);
+  hot.addEventListener('mouseleave',hide);
+  svg.addEventListener('mouseleave',hide);
 }
 
 // ── E1 情绪温度计 ──
@@ -1930,7 +2043,7 @@ let SRC=null;
 async function loadSrc(){
   try{
     const j=await (await fetch('/api/sources',{cache:'no-store'})).json();
-    SRC={cookie:j.cookie||{}, blocked:j.blocked||[], push2:j.push2||{}};
+    SRC={cookie:j.cookie||{}, blocked:j.blocked||[], push2:j.push2||{}, health:j.health||{}};
     renderSrc();
   }catch(e){}
 }
@@ -1943,13 +2056,17 @@ function srcVendor(api){
 }
 function renderSrc(){
   if(!SRC) return;
-  const c=SRC.cookie||{}, b=SRC.blocked||[];
+  const c=SRC.cookie||{}, b=SRC.blocked||[], bad=(SRC.health||{}).degraded||[];
   const vendors=[...new Set(b.map(x=>srcVendor(x.api)))];
   const tag=$('hdSrc');
   if(tag){
-    tag.innerHTML='数据源 <b>'+(b.length? vendors.join('/')+'受限':'正常')+'</b>';
-    tag.title = b.length ? '受限：'+b.map(x=>srcVendor(x.api)+' '+x.api).join('；') : '数据源状态正常';
-    tag.className='tag clk'+(b.length?' srcwarn':'');
+    tag.innerHTML='数据源 <b>'+(b.length? vendors.join('/')+'受限':'正常')
+      +(bad.length?` · ${bad.length}项降级`:'')+'</b>';
+    tag.title=[b.length ? '受限：'+b.map(x=>srcVendor(x.api)+' '+x.api).join('；')
+                        : '数据源状态正常',
+               bad.length ? '数据降级：'+bad.map(x=>x.label||x.key).join('、') : ''
+              ].filter(Boolean).join(' ｜ ');
+    tag.className='tag clk'+((b.length||bad.length)?' srcwarn':'');
   }
   const st=$('srcCookieState');
   if(st) st.innerHTML = c.configured
@@ -1987,14 +2104,22 @@ function renderSrc(){
           u.budget_skipped} 次请求 —— 超额时不硬撞风控，改走备用源</div>`:''}</div>`;
     } else p2.innerHTML='';
   }
+  // 数据健康度：哪些关键数据这轮降级了（回退到当日最后一份好数据 / 备用源）
+  const hd=$('srcHealth');
+  if(hd){
+    hd.innerHTML = bad.length
+      ? bad.map(x=>`<div class="r2" style="margin-bottom:6px;align-items:flex-start">
+          <span style="flex:1;font-size:12.5px"><span class="pill org">${esc(x.label||x.key)}</span>
+          <div class="fl" style="font-size:11.5px;margin-top:2px">${esc(x.note||'')}</div></span></div>`).join('')
+      : `<div class="fl" style="font-size:12.5px;line-height:1.7">本轮关键数据全部正常。</div>`;
+  }
 }
 async function srcCmd(payload){
   const j=await (await fetch('/api/sources',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
   if(j.error){ alert(j.error); return; }
-  SRC={cookie:j.cookie||{}, blocked:j.blocked||[]};
-  renderSrc();
   if(j.msg) toast(j.msg);
+  await loadSrc();          // 重新拉完整状态（含 push2 预算与数据健康度）
 }
 async function openSrc(){
   closeAllPanels();

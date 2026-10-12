@@ -269,7 +269,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/sources":
                 self._send_json({"ok": True, "cookie": ds.cookie_status(),
                                  "blocked": ds.em_blocked(),
-                                 "push2": ds.push2_status()})
+                                 "push2": ds.push2_status(),
+                                 # 数据健康度：哪些关键数据这轮降级/用的旧快照
+                                 "health": ds.data_health()})
             elif path == "/api/stock":
                 # 单只股票详情：自选/持仓里点开不在当日候选中的股票也看得到
                 code = (qs.get("code") or [""])[0]
