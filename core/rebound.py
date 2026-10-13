@@ -24,6 +24,11 @@
 
   · **价没动、钱在进**（核心）—— 主力净流入 > 0 且当日涨幅 ≤ 阈值。
     今天买、价格却没被买上去 = 吸筹；这是本模块最重要的一条。
+    口径分三档、且**必须与分数同口径**：线内前半段 = 「价没动·钱在进」，
+    线内后半段 = 「小涨·仍在吸筹区间」，超出线 = 「涨幅已大·不追」。
+    超线的不从列表里剔除（跟踪也有价值），但**降权、沉到列表末尾**，
+    且不进 summary 那句「本轮可看」—— 否则一只 +5.2% 的板块会靠体量分
+    挤到第一，让"最像吸筹的方向"变成"明确标着不追的方向"。
   · **首日净流入**（streak == 1）—— 对应体系里那条
     「低位 + 主力净流入刚转正 = 资金刚动，要信早信」。
   · **有催化** —— 财联社风口板块给了基本面理由（机构建仓需要理由）。
@@ -189,11 +194,24 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
         score += 22 * _rank(main, mains)
         # ② 资金强度分位：主力净额占成交额比（18 分）
         score += 18 * _rank(main_pct, mpcts)
-        # ③ 价格没抬起来的程度（20 分）—— 越没涨越像吸筹；跌着被买也拿满
-        rise = max(0.0, min(1.0, pct / max_pct)) if max_pct > 0 else 1.0
+        # ③ 价格没抬起来的程度（20 分）—— 越没涨越像吸筹；跌着被买也拿满。
+        #    ★ 上端**不再封顶**：原来 `min(1.0, …)` 让「刚好压线」与「超线 5 倍」
+        #    拿一模一样的分（都是 0 分），于是 +5.20% 的板块可以靠资金体量分/
+        #    催化分挤到榜首 —— 10-13 实测「元件 +5.20%」就这样排在了 E5 第一，
+        #    而它自己的标签写着「不追」。现在超线越多扣得越多。
+        if max_pct > 0:
+            rise = max(0.0, pct / max_pct)
+        else:                          # 阈值为 0：只有"没涨"才算没动
+            rise = 0.0 if pct <= 0 else 1.0
         score += 20 * (1 - rise)
-        if pct <= max_pct:
+        over = pct > max_pct
+        # ★ 标签必须与分数同口径：原来只要 pct ≤ 追涨线就一律叫「价没动」，
+        #   可同一张卡的 ③ 分项已经按 pct/max_pct 判它"抬起来 87% 了"。
+        #   现在分三档 —— 真没动（线内前半段）/ 小涨（线内后半段）/ 已过大（线外）。
+        if not over and rise <= 0.5:
             tags.append(f"价没动·钱在进（{pct:+.2f}%）")
+        elif not over:
+            tags.append(f"小涨·仍在吸筹区间（{pct:+.2f}%）")
         else:
             tags.append(f"涨幅已大（{pct:+.2f}%）·不追")
         # ④ 首日净流入 = 资金刚动（对应体系那条"要信早信"）
@@ -238,8 +256,16 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
             "cum": (round(cum, 2) if cum is not None else None),
             "lead": str(b.get("lead") or ""), "role": role, "level": level,
             "catalyst": catalyst, "score": round(score, 1), "tags": tags,
+            # ★ 口径文案必须按**这张卡自己的状态**生成：原来是无条件印
+            #   「涨幅一旦超过 1% 就不是吸筹是追涨了」，于是它出现在一张
+            #   +5.20% 的卡上（标签已写「涨幅已大·不追」）—— 同一张卡自相矛盾。
             "how": (f"不追高：等它回踩或横盘再看，先盯 {b.get('lead') or '板块龙头'} "
-                    f"能不能续强；涨幅一旦超过 {max_pct:.0f}% 就不是吸筹是追涨了"),
+                    f"能不能续强；"
+                    + (f"现 {pct:+.2f}%，距 {max_pct:g}% 追涨线还有 "
+                       f"{max_pct - pct:.2f}%"
+                       if not over else
+                       f"它已涨 {pct:+.2f}%，早过了 {max_pct:g}% 追涨线 —— "
+                       f"这条不算吸筹，只当「跌下来再看」的观察")),
             # ★ 仓位写法必须与 trading.pos_cn 一致（0.05 → "0.5 成 / 5%"）：
             #   原来写的是 `trial*100` 后面接"成"，把 5% 说成「5.0 成」（=50%），
             #   而且就写在"退潮期不做重仓"旁边 —— 10 倍于配置值的仓位提示，
@@ -248,8 +274,11 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
                      " —— 退潮期不做重仓"),
         })
 
-    # 同分时按主力净额兜底排序 —— 不能让"原顺序"决定谁上榜
-    out.sort(key=lambda x: (-x["score"], -x["main"]))
+    # ★ 排序：在追涨线内的（价没动/小涨）永远排在「涨幅已大·不追」前面 ——
+    #   否则一只 +5.20% 的板块会靠体量分挤到第一，把 summary 那句
+    #   "本轮可看：…" 变成"本轮可看：<一个明确标着不追的方向>"。
+    #   同分时再按主力净额兜底，不让"原顺序"决定谁上榜。
+    out.sort(key=lambda x: (1 if x["pct"] > max_pct else 0, -x["score"], -x["main"]))
     out = out[:top_n]
 
     if not out:
@@ -258,10 +287,18 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
                            f"但没有板块同时满足「资金在进 + 位置没抬起来 + 有理由」")
         return empty
 
-    names = "、".join(x["name"] for x in out)
+    # ★ summary 要区分「可看」与「只可跟踪」：原来把两类混成一句
+    #   "本轮可看：元件、…"，而元件正是那条标着「不追」的。
+    good = [x["name"] for x in out if x["pct"] <= max_pct]
+    hot = [x["name"] for x in out if x["pct"] > max_pct]
     summary = (f"机构在高位兑现 {inst_net:+.2f} 亿（游资净买 {hot_net:+.2f} 亿），"
                f"退潮期 + 存量博弈 —— 钱要找「容量够大、位置够低、有理由」的方向承接。"
-               f"本轮可看：{names}。注意这是**小波段**定位，用试错仓，不是主升。")
+               + (f"本轮可看：{'、'.join(good)}。"
+                  if good else "本轮没有落在追涨线内的方向。")
+               + (f"另有 {len(hot)} 个已涨过 {max_pct:g}% 追涨线"
+                  f"（{'、'.join(hot)}）—— 不算吸筹，列出仅供跟踪。"
+                  if hot else "")
+               + "注意这是**小波段**定位，用试错仓，不是主升。")
 
     return {
         "enabled": True, "active": True, "gate": gate, "reason": "",

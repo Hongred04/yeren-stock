@@ -10,6 +10,15 @@
 
 本测试钉住：闸门行为、评分区分度（不能一缩量日就全体同分）、
 「价没动·钱在进」这个核心信号、以及配套的结构化净额与跨命名体系匹配。
+
+另钉住「追涨线」（max_pct）的三条口径自洽（用户 10-13 质疑
+「你确定百分之 1 就行了」）：
+  · 标签分三档且与 ③ 分项同口径（线内前半段＝价没动 / 线内后半段＝小涨 / 线外＝不追）；
+  · 线外方向必须沉到列表末尾、且不进 summary 的「本轮可看」——
+    原来 +5.20% 的板块能靠资金体量分排到第一；
+  · ③ 分项上端不封顶（超线越多扣越多），原来「刚好压线」与「超 5 倍」同分；
+  · 口径文案按**这张卡自己的状态**生成 —— 原来无条件印
+    「涨幅一旦超过 1% 就不是吸筹是追涨了」，连一张 +5.2% 的卡也这么写。
 """
 from __future__ import annotations
 
@@ -133,12 +142,58 @@ def main():
     ok(by["抬升高"]["score"] < by["大体量"]["score"], "价格抬起来了要降分")
     ok(any("不追" in t for t in by["涨太多"]["tags"]), "涨幅过大标记「不追」")
     ok(any("连续" in t for t in by["连续两日"]["tags"]), "多日净流入标注天数")
+    # 标签口径必须与 ③ 分项同口径：线内分两档，线外一档，三档互斥且完备
     for c in r6["candidates"]:
-        if "价没动·钱在进" not in " ".join(c["tags"]) and "不追" not in " ".join(c["tags"]):
+        tg = " ".join(c["tags"])
+        if not any(k in tg for k in ("价没动·钱在进", "小涨·仍在吸筹区间", "不追")):
             ok(False, f"{c['name']} 既没标吸筹也没标不追")
             break
     else:
-        ok(True, "每个方向都明确标了「吸筹」或「不追高」")
+        ok(True, "每个方向都明确标了「价没动」/「小涨」/「不追高」三者之一")
+
+    print("\n[4b] 「追涨线」口径自洽（用户 10-13 质疑「你确定百分之 1 就行了」）")
+    # 直接用用户截图那一轮的真实候选回放
+    real = [board("元件", 5.20, 15.52, 1.72), board("交运设备", 0.67, 9.58, 4.06),
+            board("中字头", 0.50, 11.47, 2.27), board("稀缺资源", 0.47, 4.16, 0.96),
+            board("通用设备", 0.87, 5.80, 1.30)]
+    r11 = rebound.evaluate(cfg=dict(CFG, E5_rebound=dict(CFG["E5_rebound"], min_score=0)),
+                           flow={"capital": {"inst_net": -7.05}, "boards_all": real},
+                           sectors={"items": []}, sentiment=SEN_EBB, volume=VOL_STOCK,
+                           lhb=LHB_OUT, real_date="20261013")
+    got = r11["candidates"]
+    order = [c["name"] for c in got]
+    ok(order[-1] == "元件", f"+5.20% 的板块沉到末尾，不再占榜首（{order}）")
+    el = next(c for c in got if c["name"] == "元件")
+    ok("早过了 1% 追涨线" in el["how"] and "涨幅一旦超过" not in el["how"],
+       "超线卡的口径不再印「涨幅一旦超过 1% 就不是吸筹」（原来印在 +5.2% 的卡上）")
+    tl = next(c for c in got if c["name"] == "通用设备")
+    ok("距 1% 追涨线还有 0.13%" in tl["how"], "线内卡写明距追涨线还剩多少")
+    ok("小涨·仍在吸筹区间" in " ".join(tl["tags"]),
+       f"+0.87% 不再被叫作「价没动」（{tl['tags'][0]}）")
+    ok("本轮可看" in r11["summary"] and "元件" not in r11["summary"].split("本轮可看：")[1]
+       .split("。")[0], "summary 的「本轮可看」不点名超线方向")
+    ok("仅供跟踪" in r11["summary"], "summary 把超线的另列为「仅供跟踪」")
+
+    # ③ 分项不再上封顶：超线越多扣越多（原来「刚好压线」与「超 5 倍」同分）
+    rung = [board("压线", 1.0, 3.0, 5.0), board("超一点", 1.5, 3.0, 5.0),
+            board("超很多", 5.2, 3.0, 5.0)]
+    r12 = rebound.evaluate(cfg=dict(CFG, E5_rebound=dict(CFG["E5_rebound"], min_score=0)),
+                           flow={"capital": {"inst_net": -7.05}, "boards_all": rung},
+                           sectors={"items": []}, sentiment=SEN_EBB, volume=VOL_STOCK,
+                           lhb=LHB_OUT, real_date="20261013")
+    sm = {c["name"]: c["score"] for c in r12["candidates"]}
+    ok(sm["压线"] > sm["超一点"] > sm["超很多"],
+       f"超线越多扣越多，不再与压线同分（{sm}）")
+
+    # 边界：阈值为 0 时不除零、不崩
+    r13 = rebound.evaluate(cfg={"E5_rebound": dict(CFG["E5_rebound"], max_pct=0)},
+                           flow={"capital": {"inst_net": -7.05},
+                                 "boards_all": [board("涨0", 0.0, 3.0, 5.0),
+                                                board("涨01", 0.1, 3.0, 5.0)]},
+                           sectors={"items": []}, sentiment=SEN_EBB, volume=VOL_STOCK,
+                           lhb=LHB_OUT, real_date="20261013")
+    z = {c["name"]: " ".join(c["tags"]) for c in r13["candidates"]}
+    ok("价没动" in z["涨0"] and "不追" in z["涨01"], f"max_pct=0 边界不崩（{z}）")
 
     print("\n[5] min_main 过滤噪音")
     noise = [board("有量", -0.2, 1.5, 4.0, 1), board("噪音", -0.2, 0.05, 0.1, 1)]
