@@ -94,8 +94,10 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
         "stock_game": {"ok": g_stock, "txt": f"量能 {volume.get('label') or vmode or '未知'}"
                        + ("（存量博弈 → 只做小波段）" if g_stock else "（有增量 → 属主升场景，不在本模块射程）")},
         "inst_out": {"ok": g_inst_out,
+                     # 方向已经由"净卖/净买"表达了，金额前面再强制加号会自相矛盾
+                     # （原写法 `abs(inst_net):+.2f` 渲染出「净卖 +7.05 亿」）
                      "txt": f"机构专用席位净{'卖' if g_inst_out else '买'} "
-                            f"{abs(inst_net):+.2f} 亿"
+                            f"{abs(inst_net):.2f} 亿"
                             + ("（在高位兑现 → 钱要找地方去）" if g_inst_out else "")},
     }
     if not (g_ebb and g_stock and g_inst_out):
@@ -238,7 +240,12 @@ def evaluate(cfg: dict | None = None, sentiment: dict | None = None,
             "catalyst": catalyst, "score": round(score, 1), "tags": tags,
             "how": (f"不追高：等它回踩或横盘再看，先盯 {b.get('lead') or '板块龙头'} "
                     f"能不能续强；涨幅一旦超过 {max_pct:.0f}% 就不是吸筹是追涨了"),
-            "size": f"试错仓（不超过 {trial*100:.1f} 成）—— 退潮期不做重仓",
+            # ★ 仓位写法必须与 trading.pos_cn 一致（0.05 → "0.5 成 / 5%"）：
+            #   原来写的是 `trial*100` 后面接"成"，把 5% 说成「5.0 成」（=50%），
+            #   而且就写在"退潮期不做重仓"旁边 —— 10 倍于配置值的仓位提示，
+            #   对照着卡片下单的人是危险的误导。
+            "size": (f"试错仓（不超过 {trial * 10:g} 成 / {trial * 100:g}%）"
+                     " —— 退潮期不做重仓"),
         })
 
     # 同分时按主力净额兜底排序 —— 不能让"原顺序"决定谁上榜
