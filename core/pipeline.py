@@ -619,7 +619,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         _prog("推演明日判断…", 0, 100)
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
                                      meter=meter, ml=ml, flow=flow,
-                                     sectors=sectors, macro=macro, plan=plan)
+                                     sectors=sectors, macro=macro, plan=plan,
+                                     sowing=sowing)
 
         # ---- E4 信号复盘档案（胜率闭环；t+1/涨停不可买/停牌/成本约束） ----
         _prog("结算信号档案…", 0, 100)

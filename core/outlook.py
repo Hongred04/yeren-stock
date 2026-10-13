@@ -61,7 +61,8 @@ def _disclosure_note(real_date: str) -> str:
 def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
           meter: dict | None = None, ml: dict | None = None,
           flow: dict | None = None, sectors: dict | None = None,
-          macro: dict | None = None, plan: dict | None = None) -> dict:
+          macro: dict | None = None, plan: dict | None = None,
+          sowing: dict | None = None) -> dict:
     """构建明日判断。所有入参都是本轮分析已算出的结果，不再打接口。"""
     sentiment = sentiment or {}
     volume = volume or {}
@@ -70,6 +71,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     flow = flow or {}
     sectors = sectors or {}
     plan = plan or {}
+    sowing = sowing or {}
 
     stage = sentiment.get("stage", "unknown")
     mm = sentiment.get("metrics") or {}
@@ -169,6 +171,30 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         t_note = "题材状态待积累 —— 明日以涨停梯度和早封家数为准"
     points.append({"k": "题材", "v": theme or "未确认", "note": t_note})
 
+    # ---- E8 题材播种（事件→受益→标的）· 前瞻线 ----
+    # 用户 10-13：「打板要提前找题材」。E8 的三个信号是**前瞻**的：今天的新播种
+    # 题材、独苗首板、标签漂移的重复启动票 —— 它们不是"今天谁最强"（那是 mainline/
+    # sectors 的事），而是"明天该盯着谁有没有第二只跟上"。这里把它并进明日预案。
+    sow_themes = sowing.get("themes") or []
+    sow_lonely = sowing.get("lonely") or []
+    sow_restarts = sowing.get("restarts") or []
+    sow_new = [t.get("theme") for t in sow_themes if t.get("trend") == "new"]
+    sow_lonely_names = [x.get("name") for x in sow_lonely if x.get("name")]
+    sow_drift = [r.get("name") for r in sow_restarts if r.get("drifted")]
+
+    if sow_new or sow_lonely_names or sow_drift:
+        bits = []
+        if sow_new:
+            bits.append(f"新播种 {len(sow_new)} 个（{'、'.join(str(t) for t in sow_new[:3])}）")
+        if sow_lonely_names:
+            bits.append(f"独苗 {len(sow_lonely_names)} 个（{'、'.join(str(n) for n in sow_lonely_names[:3])}）")
+        if sow_drift:
+            bits.append(f"标签漂移 {len(sow_drift)} 只（{'、'.join(str(n) for n in sow_drift[:3])}）")
+        points.append({"k": "题材播种", "v": "；".join(bits),
+                       "note": ("明日看：新播种题材有没有第二只跟上（有第二只才谈主线）、"
+                                "独苗能否晋级二板、漂移票是否续强（续强=逻辑接力成立，"
+                                "断板=逻辑证伪）")})
+
     points.append({"k": "资金",
                    "v": capital.get("headline") or flow.get("summary") or "数据不足",
                    "note": flow.get("source_note") or ""})
@@ -196,6 +222,14 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     if strongest.get("name"):
         watch.append(f"最强板块「{strongest['name']}」的龙头 —— 续强则板块延续，断板则资金要转场")
 
+    # E8 前瞻线：新播种题材 / 漂移票，是"明天该盯哪几条线"里最前瞻的两条
+    if sow_new:
+        watch.append(f"新播种题材「{'、'.join(str(t) for t in sow_new[:3])}」—— "
+                     f"明天有没有第二只跟上，有第二只才谈主线")
+    if sow_drift:
+        watch.append(f"标签漂移的「{'、'.join(str(n) for n in sow_drift[:3])}」—— "
+                     f"明天续强 = 逻辑接力成立，断板 = 逻辑证伪")
+
     # ---- 情景预案 ----
     scenarios: list[dict] = []
     if stage == "ebb" or vol_mode == "dry":
@@ -212,6 +246,10 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     if ml_status == "day1_pending" and theme:
         scenarios.append({"cond": f"若「{theme}」首板批量晋级、空间龙高开",
                           "then": "主线确认，按主线节奏做龙头与中军"})
+    if sow_new and stage not in ("ebb",) and vol_mode != "dry":
+        scenarios.append({"cond": f"若新播种题材「{'、'.join(str(t) for t in sow_new[:2])}」"
+                                  f"出现第二只、独苗晋级二板",
+                          "then": "按新周期题材对待：优先进首板（试错仓），确认后再加仓"})
 
     tail = ("明日为工作日估算日期（节假日顺延以交易所公告为准）。"
             "以上是推演不是预测 —— 开盘后以量能和情绪的实际读数修正。")
