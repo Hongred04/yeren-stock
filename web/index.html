@@ -901,7 +901,11 @@ async function load(force){
 }
 
 function finish(j){
-  REPORT=j; CONFIG=j.config;
+  // ★ CONFIG 不能无条件覆盖（v1.32.3 修）：老缓存/降级响应里没有 config 字段时，
+  //   `CONFIG=j.config` 会把已加载好的配置清成 undefined，随后 render() 里
+  //   `CONFIG.name` 直接抛 TypeError —— 而 render 被 try 包着，错误被吞掉，
+  //   表现就是「页面停在旧数据上、怎么刷新都不动」（正是下面注释警告的那个症状）。
+  REPORT=j; CONFIG=j.config||CONFIG||{};
   $('loading').classList.add('hide'); $('main').classList.remove('hide');
   // ★ 渲染出错也不能拖垮自动刷新 —— startAuto 必须放 finally。
   //   否则 render()/buildNav() 一旦抛异常（数据里少个字段就会），
@@ -973,7 +977,7 @@ async function silentRefresh(){
         const j=await rr.json();
         if(j && j.picks && !j.error){
           const cur=CUR, sel=SEL;
-          REPORT=j; CONFIG=j.config;
+          REPORT=j; CONFIG=j.config||CONFIG||{};   // 同上：缺 config 不得清空已加载的配置
           render(); buildNav();
           if(cur) go(cur);
           if(sel){ const tr=document.querySelector(`#pickBody tr[data-c="${sel}"]`); showDetail(sel,tr); }
@@ -1058,9 +1062,17 @@ function applyLive(live){
 
 // ── 主渲染 ──
 function render(){
-  const m=REPORT.meta, mac=REPORT.macro, vol=REPORT.volume, sen=REPORT.sentiment;
-  const pos=REPORT.position, mt=REPORT.discipline;
-  const mm=sen.metrics;
+  // 防御性兜底：/api/report 走降级分支或字段缺失时，原来这里 `sen.metrics` 会直接
+  // 抛 TypeError 让整页空白（"只有拿到完整情绪对象才重画"那道闸只挡住了实时合并，
+  // 首屏加载这条路没有闸）。缺字段时宁可在卡片上显示「—」。
+  const m=REPORT.meta||{}, mac=REPORT.macro||{}, vol=REPORT.volume||{}, sen=REPORT.sentiment||{};
+  const pos=REPORT.position||{}, mt=REPORT.discipline||{};
+  const mm=sen.metrics||{};
+  const picks=REPORT.picks||[];   // 报告缺 picks 时也不能让 render 抛异常
+  // 统一的数值兜底：字段缺失时渲染「—」，绝不让 NaN / undefined 直接进页面
+  // （下面决策步骤里原来有的地方 `*100`、有的地方 `==null?'—'`，口径不一致）
+  const p0=v=>(v==null||!isFinite(Number(v)))?'—':(Number(v)*100).toFixed(0)+'%';
+  const n0=v=>(v==null||!isFinite(Number(v)))?'—':String(v);
   // 亏钱面积警戒线读配置（M3_sentiment.ebb_hurt_ratio，默认 0.30）——
   // 不写死：改了配置，界面文案要跟着变（硬编码阈值 = 文案与配置脱节）。
   const _msCfg=(CONFIG&&CONFIG.M3_sentiment)||(REPORT.config&&REPORT.config.M3_sentiment)||{};
@@ -1076,13 +1088,14 @@ function render(){
   if(ml.label) mlMeta[0]=ml.label;
   const ML_ST={confirmed:'成立',day1_pending:'待验证',watch:'观察',one_day:'一日游',disabled:'—'};
 
-  $('hdPreset').textContent=(CONFIG.name||m.preset_name||m.preset);
-  $('hdPreset').title=(CONFIG.desc||'');
+  $('hdPreset').textContent=((CONFIG&&CONFIG.name)||m.preset_name||m.preset||'—');
+  $('hdPreset').title=((CONFIG&&CONFIG.desc)||'');
   // 端的是上次结果就如实标出来（不是今天的数据要让人一眼看见，而不是当成今天的）
-  $('hdDate').textContent=m.date+(REPORT.stale?'（上次结果·正在后台刷新）':'');
+  $('hdDate').textContent=(m.date||'—')+(REPORT.stale?'（上次结果·正在后台刷新）':'');
   $('hdVer').textContent='v'+(m.version||'?');
   const ses=m.session;
-  $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')+'扫描'+m.scanned+'只 · 耗时'+m.elapsed+'秒';
+  $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')
+    +'扫描'+n0(m.scanned)+'只 · 耗时'+n0(m.elapsed)+'秒';
 
   /* ── ① 一句话结论 ── */
   const canTrade=sen.can_trade && vol.mode!=='dry';
@@ -1095,12 +1108,12 @@ function render(){
   const reason=!canTrade
     ?(sen.can_trade? vol.advice : (sen.note||'情绪已进入退潮期'))
     : `${STAGE_CN[sen.stage]||sen.label}，${VOL_CN[vol.mode]||vol.label}。${
-        mt.checks[0]?('纪律：'+mt.checks[0].action):''}`;
+        (mt.checks||[])[0]?('纪律：'+(mt.checks||[])[0].action):''}`;
   const acts=[
-    {k:'总仓位',v:(pos.target_total*100).toFixed(0)+'%'},
-    {k:'候选股票',v:REPORT.picks.length+' 只'},
-    {k:'最高连板',v:mm.max_boards+' 板'},
-    {k:'封板率',v:(mm.seal_rate*100).toFixed(0)+'%'},
+    {k:'总仓位',v:p0(pos.target_total)},
+    {k:'候选股票',v:picks.length+' 只'},
+    {k:'最高连板',v:n0(mm.max_boards)+' 板'},
+    {k:'封板率',v:p0(mm.seal_rate)},
   ];
   $('verdict').innerHTML=`<div class="verdict ${cls}">
     <div class="hd2"><div class="ic">${emoji}</div>
@@ -1118,29 +1131,40 @@ function render(){
   const volAmtTxt = vol.amount!=null
       ? Math.round(vol.amount).toLocaleString()+'亿'
       : (vol.cum_amount ? Math.round(vol.cum_amount).toLocaleString()+'亿' : '—');
+  // 注意这是**字符串拼接**：`VOL_CN[vol.mode]||vol.label` 两边都缺时会拼出字面量
+  // "undefined"（esc 救不了已经拼进字符串里的文本），所以必须显式兜底成「—」
   const volSub = (vol.amount!=null ? '' : '已成交（盘中累计）· ')
-      + (VOL_CN[vol.mode]||vol.label)
+      + (VOL_CN[vol.mode]||vol.label||'—')
       + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '')
       // 相对量能读数（分位 / 相对中位数倍数）—— 让"为什么这么判"可见
       + (vol.rel_txt ? ' · '+vol.rel_txt : '');
   const cards=[
-    {t:'今天能买吗',v:canTrade?'能':'不能',
-      s:!canTrade?'退潮期或极度缩量':(pos.chain_stage==='probe'?'可以试错':'按计划操作'),
-      c:canTrade?'g':'r'},
+    // sen.can_trade 缺失 → canTrade 会被算成 false 并**信心十足地**报「不能」，
+    // 那是拿缺数据当成"退潮期"。缺字段时明确说"数据不足"，别替市场下结论。
+    {t:'今天能买吗',
+      v:sen.can_trade==null?'数据不足':(canTrade?'能':'不能'),
+      s:sen.can_trade==null?'情绪数据未就绪':(!canTrade?'退潮期或极度缩量'
+          :(pos.chain_stage==='probe'?'可以试错':'按计划操作')),
+      c:sen.can_trade==null?'':(canTrade?'g':'r')},
     {t:vol.amount!=null?'两市成交额':'两市已成交',v:volAmtTxt,
       s:volSub,
       c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
-    {t:'涨停 / 跌停',v:mm.limit_up+' / '+mm.limit_down,
-      s:'炸板 '+mm.broken+' 只',c:''},
-    {t:'亏钱的股票占比',v:(mm.hurt_area*100).toFixed(0)+'%',
-      s:(mm.hurt_area>=hurtTh?'超过':'低于')+hurtTxt+'警戒线',c:mm.hurt_area>=hurtTh?'r':'g'},
-    {t:'纪律检查',v:{green:'正常',yellow:'有注意',red:'有冲突'}[mt.status],
-      s:mt.checks.length+' 项检查',c:mt.status==='green'?'g':(mt.status==='yellow'?'o':'r')},
+    // 这一组原来全是不设防的直接拼接：`mm.limit_up+' / '+mm.limit_down` 缺字段时
+    // 显示「undefined / undefined」，`mt.checks.length` 缺 checks 时**直接抛异常**
+    // 让整页渲染中断（try 里只有 finally，没有 catch，异常还会继续往外抛）。
+    {t:'涨停 / 跌停',v:n0(mm.limit_up)+' / '+n0(mm.limit_down),
+      s:'炸板 '+n0(mm.broken)+' 只',c:''},
+    {t:'亏钱的股票占比',v:p0(mm.hurt_area),
+      s:mm.hurt_area==null?'数据不足':((mm.hurt_area>=hurtTh?'超过':'低于')+hurtTxt+'警戒线'),
+      c:mm.hurt_area==null?'':(mm.hurt_area>=hurtTh?'r':'g')},
+    {t:'纪律检查',v:{green:'正常',yellow:'有注意',red:'有冲突'}[mt.status]||'—',
+      s:n0((mt.checks||[]).length)+' 项检查',
+      c:mt.status==='green'?'g':(mt.status==='yellow'?'o':(mt.status?'r':''))},
     {t:'题材主线',v:(ml.status==='one_day'&&ml.streak>=2)?'容量有限':(ML_ST[ml.status]||'—'),
       s:ml.theme?('最强题材：'+ml.theme+(ml.streak>=2?`（已连续${ml.streak}日活跃）`:'')):'五信号判定题材持续性',
       c:ml.status==='confirmed'?'g':(ml.status==='one_day'?'r':(ml.status==='disabled'?'':'o'))},
-    {t:'入选股票',v:REPORT.picks.length+' 只',
-      s:'从 '+m.scanned+' 只里筛出',c:REPORT.picks.length?'g':''},
+    {t:'入选股票',v:picks.length+' 只',
+      s:'从 '+n0(m.scanned)+' 只里筛出',c:picks.length?'g':''},
   ];
   $('metrics').innerHTML=cards.map(c=>
     `<div class="mc ${c.c}"><div class="t">${c.t}</div><div class="v">${c.v}</div>
@@ -1220,7 +1244,7 @@ function render(){
   } else { $('mlVerdict').innerHTML=''; $('mlSteps').innerHTML=''; $('mlExtra').innerHTML=''; }
 
   /* ── ③ 选股表 ── */
-  $('pickHint').textContent=`共 ${REPORT.picks.length} 只`;
+  $('pickHint').textContent=`共 ${picks.length} 只`;
   const wc=$('warnCard');
   if(!canTrade){
     wc.classList.remove('hide');
@@ -1230,7 +1254,7 @@ function render(){
       <b>无条件清仓、停止一切低吸和打板、管住手</b>。</div>`;
   } else wc.classList.add('hide');
 
-  $('pickBody').innerHTML=REPORT.picks.length?REPORT.picks.map((p,i)=>{
+  $('pickBody').innerHTML=picks.length?picks.map((p,i)=>{
     const s=p.scores;
     const fs=p.fund_style, fsShort={institutional:'机构',hotmoney:'游资',zhuang:'庄股'}[fs&&fs.type];
     return `<tr data-c="${p.code}">
@@ -1238,7 +1262,7 @@ function render(){
       <td><b style="font-size:14.5px">${esc(p.name)}</b>
         <span class="fl" style="font-size:11.5px">${p.code}</span>
         <div class="fl" style="font-size:11px">${p.board}${p.sector?' · '+esc(p.sector):''}</div></td>
-      <td class="num"><span class="sc" style="color:${p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score}</span></td>
+      <td class="num"><span class="sc" style="color:${!isFinite(Number(p.score))?'var(--tx3)':p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score==null||!isFinite(Number(p.score))?'—':p.score}</span></td>
       <td style="white-space:normal;max-width:290px;font-size:12.5px;color:var(--tx2)">
         ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}</td>
       <td class="num">${f2(p.price)}</td>
@@ -1258,9 +1282,13 @@ function render(){
   /* ── ④ 决策步骤（大白话 5 问） ── */
   const steps=[
     {q:'现在是大盘环境适合做股票吗？',
-      a:`<b>${esc(mac.label)}</b> —— ${esc(mac.note)}<br>重点方向：${esc(mac.focus.join('、')||'—')}`,
+      a:`<b>${esc(mac.label||'—')}</b> —— ${esc(mac.note||'')}<br>重点方向：${esc((mac.focus||[]).join('、')||'—')}`,
       c:mac.risk==='high'?'bd':(mac.risk==='low'?'ok':'wn'),
-      pctv:mac.risk==='low'?100:(mac.risk==='high'?15:55), pc:mac.risk==='low'?'var(--grn)':(mac.risk==='high'?'var(--red)':'var(--org)')},
+      // 只有 low/medium/high 是**真实水平**。neutral（宏观模块已关闭）与字段缺失
+      // 不能落进 else 拿 55% 冒充"中等风险" —— 那是拿默认值充当读数。
+      // 未知一律给 null，由渲染层画斜纹「无刻度」条。
+      pctv:mac.risk==='low'?100:(mac.risk==='high'?15:(mac.risk==='medium'?55:null)),
+      pc:mac.risk==='low'?'var(--grn)':(mac.risk==='high'?'var(--red)':'var(--org)')},
     {q:'市场的钱够不够多？',
       a:`两市成交 <b>${volAmtTxt}</b>${vol.amount!=null?'':'（盘中累计）'}，属于<b>${
           esc(VOL_CN[vol.mode]||vol.label)}</b>${vol.intraday?'（暂判）':''}。<br>${
@@ -1275,19 +1303,23 @@ function render(){
       pctv:vol.gauge,
       pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
     {q:'大家现在是抢着买还是在跑？',
-      a:`<b>${esc(STAGE_CN[sen.stage]||sen.label)}</b>，最高 ${sen.max_boards} 连板，封板率 ${(mm.seal_rate*100).toFixed(0)}%，`
-        +`亏钱股票占 ${(mm.hurt_area*100).toFixed(0)}%。<br>${sen.can_trade?'<b>可以按节奏操作</b>':'<b>禁止开仓</b>'}`,
+      a:`<b>${esc(STAGE_CN[sen.stage]||sen.label||'—')}</b>，最高 ${n0(sen.max_boards)} 连板，封板率 ${p0(mm.seal_rate)}，`
+        +`亏钱股票占 ${p0(mm.hurt_area)}。<br>${sen.can_trade?'<b>可以按节奏操作</b>':'<b>禁止开仓</b>'}`,
       c:sen.can_trade?(sen.stage==='climax'?'ok':'wn'):'bd',
-      pctv:mm.seal_rate*100, pc:sen.can_trade?(sen.stage==='climax'?'var(--grn)':'var(--org)'):'var(--red)'},
+      pctv:mm.seal_rate==null?null:Math.max(0,Math.min(100,mm.seal_rate*100)),
+      pc:sen.can_trade?(sen.stage==='climax'?'var(--grn)':'var(--org)'):'var(--red)'},
     {q:'那挑什么样的股票？',
       a:`按三条硬标准打分：<b>图形好看</b>（位置和形态）、<b>价格和市值小</b>（散户跟得起、庄家好控）、<b>有想象力</b>（题材空间）。<br>`
-        +`筛出 <b>${REPORT.picks.length}</b> 只${REPORT.picks[0]?`，最看好 <b>${esc(REPORT.picks[0].name)}</b>`:''}`,
-      c:REPORT.picks.length?'ok':'wn',
-      pctv:REPORT.picks.length?Math.min(100,REPORT.picks[0].score):0, pc:'var(--grn)'},
+        +`筛出 <b>${picks.length}</b> 只${picks[0]?`，最看好 <b>${esc(picks[0].name)}</b>`:''}`,
+      c:picks.length?'ok':'wn',
+      pctv:(picks.length&&isFinite(Number(picks[0].score)))
+            ?Math.min(100,picks[0].score):(picks.length?null:0),
+      pc:'var(--grn)'},
     {q:'那今天该拿多少钱？',
-      a:`目标总仓位 <b>${(pos.target_total*100).toFixed(0)}%</b>，当前阶段：<b>${esc(STAGE_CN[pos.chain_stage]||pos.chain_stage)}</b>。<br>${esc(pos.note||'')}`,
-      c:pos.target_total>0.5?'ok':(pos.target_total>0?'wn':'bd'),
-      pctv:pos.target_total*100, pc:pos.target_total>0.5?'var(--grn)':(pos.target_total>0?'var(--org)':'var(--red)')},
+      a:`目标总仓位 <b>${p0(pos.target_total)}</b>，当前阶段：<b>${esc(STAGE_CN[pos.chain_stage]||pos.chain_stage||'—')}</b>。<br>${esc(pos.note||'')}`,
+      c:pos.target_total==null?'':(pos.target_total>0.5?'ok':(pos.target_total>0?'wn':'bd')),
+      pctv:pos.target_total==null?null:Math.max(0,Math.min(100,pos.target_total*100)),
+      pc:pos.target_total>0.5?'var(--grn)':(pos.target_total>0?'var(--org)':'var(--red)')},
   ];
   $('steps').innerHTML=steps.map((s,i)=>
     `<div class="step ${s.c}"><div class="num2">${i+1}</div>
@@ -1332,11 +1364,15 @@ function render(){
 }
 
 function scoreLine(lb,v){
-  const c=v>=75?'var(--red)':v>=55?'var(--org)':'var(--tx3)';
+  // v 缺失/非数值时不能直接 toFixed —— NaN/undefined.toFixed 会抛异常，把整张
+  // 选股表连同这次 render() 一起打断（后端换了打分口径、某一路分项缺失就会触发）。
+  // null/''/NaN/非数字 一律视为"没有这个分项"，显示「—」而不是 0 分
+  const ok=v!=null&&v!==''&&isFinite(Number(v)), n=ok?Number(v):0;
+  const c=!ok?'var(--tx3)':(n>=75?'var(--red)':n>=55?'var(--org)':'var(--tx3)');
   return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0">
     <span class="fl" style="font-size:11.5px;min-width:46px">${lb}</span>
-    <div class="bar2" style="width:56px;flex-shrink:0"><i style="width:${Math.min(v,100)}%;background:${c}"></i></div>
-    <span style="font-size:12px;color:${c};font-weight:700">${v.toFixed(0)}</span></div>`;
+    <div class="bar2" style="width:56px;flex-shrink:0"><i style="width:${ok?Math.min(n,100):0}%;background:${c}"></i></div>
+    <span style="font-size:12px;color:${c};font-weight:700">${ok?n.toFixed(0):'—'}</span></div>`;
 }
 function fbt(v){
   if(!v||v<93000) return '—';
@@ -1411,7 +1447,13 @@ async function showDetail(code,tr){
 }
 
 function renderDetail(p){
-  const g=p.graph_detail, cfg=CONFIG.M4_aesthetic;
+  // 桌面版这里原来没有兜底（手机版有 `p.graph_detail||{}`）：K 线不足时后端
+  // 给的是 {}（engine._graph_score 的提前返回），于是详情页渲染出
+  // 「位置 NaN%」「洗盘程度 —」；而 CONFIG 缺 M4_aesthetic 时
+  // `cfg.recent_limitup_days` 会直接抛 TypeError，整个详情面板打不开。
+  const g=p.graph_detail||{}, cfg=(CONFIG&&CONFIG.M4_aesthetic)||{};
+  const gp=v=>(v==null||!isFinite(Number(v)))?'—':(Number(v)*100).toFixed(0)+'%';
+  const gn=v=>(v==null||!isFinite(Number(v)))?'—':String(v);
   const blocked=!p.tradable;
   // 买点列表里混着两类东西：可执行买点（kind=buy）和「当日别买」提示（kind=block）。
   // 必须先拆开 —— 主行动卡只认可执行买点；禁买提示单独摆，绝不能再混进
@@ -1569,7 +1611,7 @@ function renderDetail(p){
       ${p.zt_boards?`<span class="pill red">${p.zt_boards}连板</span>`:''}
       ${p.sector?`<span class="pill blu">${esc(p.sector)}</span>`:''}
       <span class="sp"></span>
-      <span class="sc" style="font-size:24px;color:${p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score}</span>
+      <span class="sc" style="font-size:24px;color:${!isFinite(Number(p.score))?'var(--tx3)':p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score==null||!isFinite(Number(p.score))?'—':p.score}</span>
       <span class="fl" style="font-size:12.5px">综合评分${
         p.in_pick===false?'<br><span style="font-size:11px">（非今日候选）</span>':''}</span>
       <span class="close" title="关闭">×</span></div>
@@ -1597,7 +1639,7 @@ function renderDetail(p){
         <div><div class="k">现价</div><div class="v">${f2(p.price)}</div></div>
         <div><div class="k">涨跌幅</div><div class="v ${pct(p.pct)}">${f2(p.pct)}%</div></div>
         <div><div class="k">换手率</div><div class="v">${f2(p.turnover,1)}%</div></div>
-        <div><div class="k">成交额</div><div class="v">${f2(p.amount/1e8,2)}亿</div></div>
+        <div><div class="k">成交额</div><div class="v">${p.amount==null?'—':f2(p.amount/1e8,2)+'亿'}</div></div>
         <div><div class="k">流通盘</div><div class="v">${f2(p.float_mv,1)}亿</div></div>
         ${p.volume_ratio!=null?`<div><div class="k">量比</div><div class="v" style="color:${
           p.volume_ratio>=2?'var(--red)':(p.volume_ratio<0.8?'var(--tx3)':'var(--tx)')}">${f2(p.volume_ratio)}</div></div>`:''}
@@ -1620,12 +1662,12 @@ function renderDetail(p){
       <div style="font-size:12.5px;font-weight:800;color:var(--tx2);margin:0 0 7px">
         位置与形态 <span style="font-weight:600;color:var(--tx3)">（位置越高越贵，量能压缩 + 洗盘充分才算好形态）</span></div>
       <div class="kv">
-        <div><div class="k">位置（越高越贵）</div><div class="v">${(g.base_pos*100).toFixed(0)}%</div></div>
-        <div><div class="k">量能压缩</div><div class="v">${(g.shrink*100).toFixed(0)}%</div></div>
+        <div><div class="k">位置（越高越贵）</div><div class="v">${gp(g.base_pos)}</div></div>
+        <div><div class="k">量能压缩</div><div class="v">${gp(g.shrink)}</div></div>
         <div><div class="k">洗盘程度</div><div class="v">${f2(g.washout,1)}</div></div>
-        <div><div class="k">近${cfg.recent_limitup_days}日涨停</div><div class="v">${g.recent_limitups}次</div></div>
-        <div><div class="k">历史最高</div><div class="v">${g.history_max_boards}板</div></div>
-        <div><div class="k">60日回撤</div><div class="v">${(g.drawdown60*100).toFixed(0)}%</div></div>
+        <div><div class="k">近${cfg.recent_limitup_days||20}日涨停</div><div class="v">${gn(g.recent_limitups)}次</div></div>
+        <div><div class="k">历史最高</div><div class="v">${gn(g.history_max_boards)}板</div></div>
+        <div><div class="k">60日回撤</div><div class="v">${gp(g.drawdown60)}</div></div>
         <div><div class="k">均线</div><div class="v" style="font-size:12.5px">${
           g.ma_aligned?'<span class="pill red">多头排列</span>':'<span class="pill gry">未多头</span>'}</div></div>
       </div>
@@ -1882,14 +1924,19 @@ function renderMeter(){
       <text x="${W-pr}" y="${H-2}" font-size="9.5" fill="#9aa3b2" text-anchor="end">温度曲线（近30个交易日）</text></svg>`;
   }
   const f=(v,d=1)=>(v==null?'—':Number(v).toFixed(d));
+  // 同一张卡片里原来的兜底并不一致：晋级率/赚钱效应用了 `==null?'—'`，
+  // 而成交额家数、炸板率、封板率直接 `*100`、直接拼字符串 —— 字段缺失时
+  // 会渲染出「NaN%」「undefined 只」。统一走 p0/n0 两个兜底函数。
+  const p0=v=>(v==null||!isFinite(Number(v)))?'—':(Number(v)*100).toFixed(0)+'%';
+  const n0=v=>(v==null||!isFinite(Number(v)))?'—':String(v);
   const cards=[
-    ['涨停 / 跌停',mt.limit_up+' / '+mt.limit_down,'炸板 '+mt.broken+' 只',''],
-    ['炸板率',(mt.broken_ratio*100).toFixed(0)+'%','炸板/(涨停+炸板)',mt.broken_ratio>=0.35?'r':(mt.broken_ratio<0.2?'g':'o')],
-    ['封板率',(mt.seal_rate*100).toFixed(0)+'%','封住/尝试封板',mt.seal_rate>=0.7?'g':'o'],
-    ['晋级率',(mt.promote_rate==null?'—':(mt.promote_rate*100).toFixed(0)+'%'),'昨日涨停今日再涨停',mt.promote_rate!=null&&mt.promote_rate>=0.2?'g':'o'],
+    ['涨停 / 跌停',n0(mt.limit_up)+' / '+n0(mt.limit_down),'炸板 '+n0(mt.broken)+' 只',''],
+    ['炸板率',p0(mt.broken_ratio),'炸板/(涨停+炸板)',mt.broken_ratio==null?'':(mt.broken_ratio>=0.35?'r':(mt.broken_ratio<0.2?'g':'o'))],
+    ['封板率',p0(mt.seal_rate),'封住/尝试封板',mt.seal_rate==null?'':(mt.seal_rate>=0.7?'g':'o')],
+    ['晋级率',p0(mt.promote_rate),'昨日涨停今日再涨停',mt.promote_rate==null?'':(mt.promote_rate>=0.2?'g':'o')],
     ['赚钱效应',(mt.money_effect==null?'—':(mt.money_effect>=0?'+':'')+f(mt.money_effect)+'%'),'昨日涨停今日平均涨幅',mt.money_effect!=null&&mt.money_effect>0?'g':'r'],
     ['高度溢价',(mt.height_premium==null?'—':(mt.height_premium>=0?'+':'')+f(mt.height_premium)+'%'),'昨日连板股今日表现',mt.height_premium!=null&&mt.height_premium>0?'g':'o'],
-    ['一字板',mt.one_word+' 只','竞价即封，抢不到',mt.one_word>=3?'o':''],
+    ['一字板',n0(mt.one_word)+' 只','竞价即封，抢不到',mt.one_word==null?'':(mt.one_word>=3?'o':'')],
     ['空间板',(m.space&&m.space.today!=null?m.space.today+' 板':'—'),
      (m.space&&m.space.prev20?((m.space.open?'突破':'未破')+'近20日前高 '+m.space.prev20+' 板'):'近20日前高数据不足'),
      (m.space&&m.space.open?'g':'o'),(m.space&&m.space.note)||''],
@@ -2234,7 +2281,7 @@ function renderPort(){
         <td><b>${esc(w.name||w.code)}</b> <span class="fl" style="font-size:11px">${w.code}</span></td>
         <td class="num">${f2(w.price)}</td>
         <td class="num ${pct(w.pct)}" style="font-weight:700">${f2(w.pct)}%</td>
-        <td>${REPORT.picks.some(x=>x.code===w.code)
+        <td>${(REPORT.picks||[]).some(x=>x.code===w.code)
               ?'<span class="pill red">今天入选候选</span>':'<span class="pill gry">仅观察</span>'}</td>
       </tr>`).join('');
       wp.innerHTML=`<div class="tbl"><table><thead><tr><th>自选股</th><th class="num">现价</th>

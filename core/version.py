@@ -1065,5 +1065,58 @@
          （`frac` 自动接管）后再回归 `_DAY_PROFILE`。
          tests/test_data_memory.py 42 → 59 项（钱对钱口径 / 三档样本边界 /
          阈值原始比值 / 当日自证样本 / 采样时刻 tol）。
+  1.32.3 全量审计：后端 7 处逻辑/边界错误 + 前端 6 类健壮性缺陷
+         （用户 10-13：「后端存在多处逻辑错误，请逐项排查……前端代码也请一并自查」）
+         ── 后端 ──
+         · **题材成分表整段丢掉深市**（最严重，直接影响选股结论）：
+           `_board_members_index()` 对 `load_valid_codes()` 的**已排序**名单直接
+           `[:1200]`，而排序是 bj<sh<sz —— 实测 6173 只取前 1200 = 沪 598 + 北 602 +
+           **深 0**。`data/board_members.json` 里 560 只成分股**全是北交所**，
+           深市题材（几乎是全部题材）拿不到任何成分股 → S3 中军定容量、S6 厚度
+           只能一路走"弱验证/数据不足"，表现为「查不到中军」「板块数据不足」。
+           修：新增 `_sample_codes_by_market()` 按市场占比**分层抽样**（实测抽样
+           分布 = 全市场分布：bj 9.8% / sh 40.0% / sz 50.2%），并作废已写坏的缓存。
+         · **中军判定用的是三天前的涨幅**：`_signal_midarmy` 拿成分表缓存里的 `pct`
+           比 `pct_min`，而成员表 TTL 是 3 天 —— 三天前涨过的票被算成"今天在动"，
+           今天刚拉的票反而查不到。修：把 `snaps` 传进去，涨幅**一律取今日快照**，
+           快照查不到的才退回缓存值并在 detail 里如实标注。
+         · **`count_limit_ups` 取的是「最后 N 个涨停日」而不是「近 N 日」**：
+           实测造 70 根 K 线、涨停全在最久远的第 1~5 根，`lookback=20` 仍返回 4 ——
+           详情页照着显示「近20日涨停 4 次」，选股理由写"前20日有4次涨停，活性仍在"
+           并**加 0.15 分**，`style_fit` 还会因 `lus20 >= 2` 把票误判成"短线题材"。
+           修：改为按窗口取（`bars[-(lookback+1):]`），并补前收 ≤0 的守卫。
+         · **`recent_amount_median` 把「最近 N 天」取成了「最大的 N 天」**：
+           `sorted(amts)[-days:]` 与时间无关 —— 量能中枢下台阶后（前期 25000 亿、
+           近期 12000 亿）它仍返回 25000 亿，基准被系统性抬高 → 正常量能判成缩量。
+         · **`_relative_volume` 先过滤再取末根 → 拿昨天冒充今天**：`bars[-1]` 一旦
+           是量为 0 的占位/半根 K 线（盘前或 K 线源只回未走完的当日 bar），过滤后
+           `bars[-1]` 会变成昨天的收线，等于拿昨天全天量 ÷ 当日占比当"今天" ——
+           相对分位顶到 100%、环比翻倍，峰值档永远降不下来。修：当日无量直接不判。
+         · `max_boards` / `consecutive_boards` 除零守卫（收盘价为 0 → ZeroDivisionError）；
+           `washout_signal` 删掉从未使用的 `lookback` 形参（传 10 会以为它限制窗口）。
+         · 数据源注释纠错：指数「成交额」单位是**元**不是"万元"（照原注释 ×1e4 会放大一万倍）。
+         ── 前端 ──
+         · **响应缺 `config` 会把已加载的配置清空**：`finish()`/静默换上都是
+           `CONFIG=j.config` 无条件覆盖 → CONFIG 变 undefined → render() 里
+           `CONFIG.name` 抛 TypeError，而 render 只包了 try/finally（没有 catch），
+           异常继续外抛。修：`j.config||CONFIG||{}` + render 内 `CONFIG&&CONFIG.name`。
+         · **字段缺失直接把整页渲染打断**：`mt.checks.length`（缺 discipline 必崩）、
+           `REPORT.picks.length`（缺 picks 必崩）、`scoreLine(v)` 里的 `v.toFixed`
+           （某一维分数缺失必崩）。修：统一 `picks/n0/p0` 兜底 + scoreLine 守卫。
+         · **进度条拿默认值冒充读数**：步骤② `gauge` 为 null 时兜底成写死的 50%，
+           步骤① 宏观 risk 未知时落进"中等 55%" —— 都是凭空的条。修：一律 `null`
+           → 渲染层画斜纹「无刻度」条；宏观只有 low/medium/high 才给条长。
+         · **降级数据渲染出 NaN / undefined**：`(mm.hurt_area*100).toFixed(0)`、
+           `mt.limit_up+' / '+mt.limit_down`、`mm.max_boards+' 板'`、
+           `${p.score}`、顶栏 `m.date`/`m.scanned`、`volSub` 里的标签拼接等。
+         · **`sen.can_trade` 缺失被当成"不能买"**：会信心十足地报「不能 / 退潮期或
+           极度缩量」，其实是没数据。修：缺字段时显示「数据不足」。
+         · 桌面详情页补上手机版早就有的兜底（`p.graph_detail||{}` +
+           `CONFIG.M4_aesthetic||{}`），K 线不足时不再渲染「位置 NaN%」、
+           也不再因 `cfg.recent_limitup_days` 抛异常而打不开面板。
+         测试：新增 tests/test_frontend_robustness.js（13 项：正常报告不回归 /
+         降级报告不出 NaN、不抛异常 / 斜纹条 / scoreLine 兜底 / 空报告不白屏）；
+         tests/test_known_defects.py 49 → 59 项（窗口语义 / 除零 / 分层抽样）。
+         本机补装 jsdom 后，8 个前端套件首次可运行（223 项全绿）。
 """
-APP_VERSION = "1.32.2"
+APP_VERSION = "1.32.3"

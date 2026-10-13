@@ -605,6 +605,11 @@ def recent_amount_median(days: int = 8, exclude_date: str = "") -> float:
 
     用途：给盘中的"节奏对比"当基准 —— 比"拿平均曲线外推全天额"稳得多。
     排除 exclude_date（今天，还是半天的数）以及 final=False 的盘中记录。
+
+    ★ 「近 N 日」取的是**最近** N 个交易日（v1.32.3 修）：原实现
+      `sorted(amts)[-days:]` 取的是**最大的 N 天**，与时间无关 —— 量能中枢
+      下台阶后（前期 25000 亿、近期 12000 亿），它仍返回 25000 亿，
+      基准被系统性抬高 → 节奏倍数偏低 → 明明正常放量的盘面被判成缩量。
     """
     amts = []
     for e in _amount_entries():
@@ -618,9 +623,12 @@ def recent_amount_median(days: int = 8, exclude_date: str = "") -> float:
             amts.append(v)
     if len(amts) < 3:
         return 0.0
-    amts = sorted(amts)[-days:]
-    n = len(amts)
-    return round(amts[n // 2] if n % 2 else (amts[n // 2 - 1] + amts[n // 2]) / 2, 1)
+    # 先按"最近 days 天"截取（amts 已按日期升序），再排序求中位数 ——
+    # 顺序反了就变成"最大的 days 天"，那是另一回事（见 docstring）。
+    recent = amts[-max(1, int(days or 1)):]
+    s = sorted(recent)
+    n = len(s)
+    return round(s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2, 1)
 
 
 def load_last_complete_amount(date_limit: str) -> float:
@@ -898,7 +906,10 @@ def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
                 rec = _parse_tx_line(line)
                 if not rec:
                     continue
-                # 指数的「成交额」在腾讯口径下单位为万元
+                # 指数的「成交额」单位是**元**（v1.32.3 更正注释）：
+                # 实测 上证指数 4.65e11 = 4649.6 亿，且下游一律按 `>1e5 ? /1e8 : 原值`
+                # 处理（见 pipeline）。原注释写的是"万元"，照着它做 ×1e4 会凭空放大一万倍。
+                # 解析层统一走 _parse_tx_line 的成交额字段（第 37 位）。
                 out[rec["code"]] = {
                     "name": codes.get(rec["code"], rec["name"]),
                     "price": rec["price"],
@@ -2302,6 +2313,34 @@ def _board_flow_sina(limit: int) -> list[dict]:
     return out[:limit]
 
 
+def _sample_codes_by_market(codes: list[str], limit: int) -> list[str]:
+    """从全市场代码里抽 limit 只，**按市场占比分层**，并保留原始顺序。
+
+    ★ 不能直接 `codes[:limit]`（v1.32.3 修）：`load_valid_codes()` 返回的是**排序后**
+      的名单，按 `bj < sh < sz` 排；实测 6173 只取前 1200 = 沪 598 + 北 602 +
+      **深 0** —— 深市一只都进不了板块成分表。后果是 `board_members` 里
+      深市板块（几乎是全部题材）拿不到任何成分股，S3 中军定容量、S6 厚度
+      只能一路走"弱验证/数据不足"，用户看到的是「查不到中军」「板块数据不足」。
+
+    抽样而不是取头部：成分表的用途是判断"板块内有没有百亿大票在动"，
+    均匀覆盖每个市场的头尾比只取排序靠前的代码更有代表性。
+    市场占比取整后至少留 1 只，避免小众市场（北交所）被完全抹掉。
+    """
+    if limit <= 0 or len(codes) <= limit:
+        return list(codes)
+    buckets: dict[str, list[str]] = {}
+    for c in codes:
+        buckets.setdefault((c or "")[:2], []).append(c)
+    picked: set[str] = set()
+    for mk in sorted(buckets):
+        arr = buckets[mk]
+        k = max(1, int(round(limit * len(arr) / len(codes))))
+        step = max(1, len(arr) // k)
+        picked.update(arr[::step][:k])
+    # 按原始顺序返回，保证抽样结果稳定可复现
+    return [c for c in codes if c in picked][:limit]
+
+
 def _board_members_index() -> dict[str, list[dict]]:
     """{板块名: [成员...]}，由全市场个股的 f100/f103 自建。
 
@@ -2317,7 +2356,8 @@ def _board_members_index() -> dict[str, list[dict]]:
     if disk.get("members") and now - _num(disk.get("_ts", 0)) < _BOARD_MEMBERS_TTL:
         return disk["members"]
 
-    codes = (load_valid_codes() or [])[:_BOARD_MEMBERS_MAX_CODES]
+    codes = _sample_codes_by_market(load_valid_codes() or [],
+                                    _BOARD_MEMBERS_MAX_CODES)
     if not codes:
         return disk.get("members") or {}
 

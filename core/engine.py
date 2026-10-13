@@ -137,14 +137,21 @@ def _relative_volume(hist: list[dict], frac: float = 1.0,
           折算同一个道理）。
     样本不足（< 6 根）返回 (None, None, 原因)，调用方退回纯绝对阈值判定。
     """
-    bars = [b for b in (hist or []) if b.get("volume")]
+    bars = list(hist or [])
     if len(bars) < 6:
         return None, None, "样本不足"
+    # ★ 当日那根**不能**因为"量为 0"被过滤掉（v1.32.3 修）：原实现先 filter 再取
+    #   `bars[-1]`，一旦今天这根是占位/半根（volume 为 0 —— 盘前、或 K 线源只回了
+    #   未走完的当日 bar），`bars[-1]` 会悄悄变成**昨天**的收线，等于拿昨天的全天量
+    #   ÷ 当日占比 当"今天"：相对分位顶到 100%、环比翻倍，峰值档永远降不下来。
+    #   今天没有量 → 干脆不判（返回 None，退回纯绝对阈值），而不是拿昨天顶替。
+    if not bars[-1].get("volume"):
+        return None, None, "当日量能未形成"
     lb = max(2, min(int(lookback or 20), len(bars) - 1))
-    prev = [float(b["volume"]) for b in bars[-lb - 1:-1]]
+    prev = [float(b["volume"]) for b in bars[-lb - 1:-1] if b.get("volume")]
     f = max(min(float(frac or 1.0), 1.0), 0.02)
     cur = float(bars[-1]["volume"]) / f
-    if not prev or cur <= 0:
+    if len(prev) < 3 or cur <= 0:
         return None, None, "样本不足"
     rel = sum(1 for x in prev if x <= cur) / len(prev)
     s = sorted(prev)
@@ -607,7 +614,7 @@ def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict,
         return 0.0, {}, ["无K线数据"], []
 
     base = ind.base_pattern(bars, 20)
-    wash = ind.washout_signal(bars, 10)
+    wash = ind.washout_signal(bars)
     maa = ind.ma_bull_alignment(bars)
     lus = ind.count_limit_ups(bars, code, lookback=cfg_a.get("recent_limitup_days", 20))
     his_max = ind.max_boards(bars, code)

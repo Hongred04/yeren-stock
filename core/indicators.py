@@ -131,13 +131,39 @@ def limit_up_threshold(code: str) -> float:
 
 
 def count_limit_ups(bars: list[dict], code: str, lookback: int = 20) -> list[dict]:
-    """近 lookback 日内的涨停日列表。"""
+    """**最近 lookback 根 K 线里**的涨停日列表。
+
+    ★ 是"窗口内"而不是"最后 N 个涨停日"（v1.32.3 修）：原实现 `out[-lookback:]`
+      取的是**最后 lookback 个涨停日**，与日期窗口完全无关 —— 实测造 70 根 K 线、
+      涨停全部发生在第 1~5 根（最近 20 根一次都没有），`lookback=20` 仍返回 4 次。
+      后果是用户可见的错误：详情页照着这个数显示「近20日涨停 4 次」，
+      选股理由写"前20日有4次涨停，活性仍在"并**加 0.15 分**，
+      `style_fit` 还会因 `lus20 >= 2` 把票误判成"短线题材"。
+      多取一根是为了算首根的涨幅（需要前一日收盘价）。
+    """
+    if len(bars) < 2:
+        return []
+    lookback = max(1, int(lookback or 1))
+    seg = bars[-(lookback + 1):]
     th = limit_up_threshold(code)
     out = []
-    for i in range(1, len(bars)):
-        if (bars[i]["close"] - bars[i - 1]["close"]) / bars[i - 1]["close"] * 100 >= th:
-            out.append(bars[i])
-    return out[-lookback:]
+    for i in range(1, len(seg)):
+        pc = seg[i - 1].get("close") or 0
+        if pc > 0 and (seg[i]["close"] - pc) / pc * 100 >= th:
+            out.append(seg[i])
+    return out
+
+
+def _pct_change(cur_bar: dict, prev_bar: dict) -> float | None:
+    """相邻两根的涨幅（%）。前收 <= 0 或缺失时返回 None（不参与判定）。
+
+    除零守卫：数据源给到 0/缺字段（次新股、停牌、接口部分响应）时，
+    原来会直接 ZeroDivisionError 把整个选股流程打断。
+    """
+    pc = prev_bar.get("close") or 0
+    if pc <= 0:
+        return None
+    return (cur_bar["close"] - pc) / pc * 100
 
 
 def consecutive_boards(bars: list[dict], code: str) -> int:
@@ -145,12 +171,11 @@ def consecutive_boards(bars: list[dict], code: str) -> int:
     th = limit_up_threshold(code)
     cnt = 0
     for i in range(len(bars) - 1, 0, -1):
-        pct = (bars[i]["close"] - bars[i - 1]["close"]) / bars[i - 1]["close"] * 100
-        if pct >= th:
+        pct = _pct_change(bars[i], bars[i - 1])
+        if pct is not None and pct >= th:
             cnt += 1
-        elif pct > 0:
-            break
         else:
+            # 非涨停（含数据缺失）都算中断：连板必须连续
             break
     return cnt
 
@@ -160,8 +185,8 @@ def max_boards(bars: list[dict], code: str) -> int:
     th = limit_up_threshold(code)
     best = cur = 0
     for i in range(1, len(bars)):
-        pct = (bars[i]["close"] - bars[i - 1]["close"]) / bars[i - 1]["close"] * 100
-        if pct >= th:
+        pct = _pct_change(bars[i], bars[i - 1])
+        if pct is not None and pct >= th:
             cur += 1
             best = max(best, cur)
         else:
@@ -209,8 +234,13 @@ def base_pattern(bars: list[dict], lookback: int = 20) -> dict:
     }
 
 
-def washout_signal(bars: list[dict], lookback: int = 10) -> dict:
-    """洗盘信号：长下影线（撬板）+ 缩量。"""
+def washout_signal(bars: list[dict]) -> dict:
+    """洗盘信号：长下影线（撬板）+ 缩量。
+
+    v1.32.3：删掉原来那个**从未被使用**的 `lookback` 形参 —— 调用方传 10 会以为
+    它把窗口限制在近 10 根，实际影线只看 `bars[-1]`、缩量看 `shrink_ratio(bars, 5)`
+    （自身要求 ≥10 根）。留着这个参数只会误导下一个改代码的人。
+    """
     if not bars:
         return {"long_lower": False, "score": 0.0}
     last = bars[-1]

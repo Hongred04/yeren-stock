@@ -317,8 +317,16 @@ def _signal_consensus(a: dict, top: dict | None) -> dict:
             "detail": detail, "consensus_ok": consensus_ok, "index_state": idx_state}
 
 
-def _signal_midarmy(a: dict, top: dict | None, zt: list[dict]) -> dict:
-    """S3 中军定容量：题材内百亿市值大票是否参与。"""
+def _signal_midarmy(a: dict, top: dict | None, zt: list[dict],
+                    snaps: dict[str, dict] | None = None) -> dict:
+    """S3 中军定容量：题材内百亿市值大票是否参与。
+
+    ★ 涨幅一律取**今日快照**（v1.32.3 修）：`fetch_board_constituents` 的成员表是
+      三天一建的缓存（`_BOARD_MEMBERS_TTL`），里面的 `pct` 是**建表那一刻**的涨幅。
+      原来直接拿它比 `pct_min`，等于用三天前的异动判断"今天中军有没有在动" ——
+      三天前涨过的票被算成今天在动（假 pass），而今天刚拉起来的票反而查不到。
+      快照里拿不到的（停牌/退市/非当日有效名单）才退回缓存值，并如实标注。
+    """
     mv_min = _float(a.get("midarmy_mv_min"), 100.0)
     pct_min = _float(a.get("midarmy_pct_min"), 3.0)
     min_cnt = _int(a.get("midarmy_min_count"), 1)
@@ -328,11 +336,23 @@ def _signal_midarmy(a: dict, top: dict | None, zt: list[dict]) -> dict:
 
     army: list[dict] = []
     src = "板块成分股"
+    stale = 0
     try:
         bk = _resolve_bk(top["sector"])
         if bk:
             cons = ds.fetch_board_constituents(bk)
-            army = [c for c in cons if c["float_mv"] >= mv_min and c["pct"] >= pct_min]
+            cands = []
+            for c in cons:
+                snap = (snaps or {}).get(c.get("code"))
+                sp = _float(snap.get("pct")) if (snap and snap.get("pct") is not None) else None
+                pct = sp if sp is not None else _float(c.get("pct"))
+                if sp is None:
+                    stale += 1
+                cands.append({"code": c.get("code", ""), "name": c.get("name", ""),
+                              "float_mv": _float(c.get("float_mv")), "pct": pct,
+                              "today": sp is not None})
+            army = [c for c in cands
+                    if c["float_mv"] >= mv_min and c["pct"] >= pct_min]
             army.sort(key=lambda c: -c["float_mv"])
     except Exception:
         pass
@@ -353,6 +373,10 @@ def _signal_midarmy(a: dict, top: dict | None, zt: list[dict]) -> dict:
         state = "pass" if src == "板块成分股" else "weak"
         ev = f"{src}：{len(army)} 家百亿以上大票在动 —— {names}"
         detail = [f"大资金进场，行情才有容量和持续性（门槛：流通≥{mv_min:.0f}亿且涨幅≥{pct_min:.0f}%）"]
+        if stale:
+            # 快照里查不到的那部分用的是成分表缓存里的旧涨幅，如实说明
+            detail.append(f"其中 {stale} 只在当日快照里查不到（停牌/非有效名单），"
+                          "涨幅回退用板块缓存值，仅供参考")
     else:
         state = "fail"
         ev = f"题材内未见流通 {mv_min:.0f} 亿以上大票异动 —— 没有中军，大概率是游资脉冲"
@@ -836,7 +860,7 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
         pass
     s1 = _signal_message(a, theme_name, suggestion)
     s2 = _signal_consensus(a, top)
-    s3 = _signal_midarmy(a, top, zt)
+    s3 = _signal_midarmy(a, top, zt, snaps)
     s4 = _signal_old_dragon(a, real_date, snaps, zt, theme_name)
     s5, day2 = _signal_next_day(a, real_date, snaps, zt, theme_name, themes)
     signals = [s1, s2, s3, s4, s5]

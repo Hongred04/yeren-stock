@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""7 处已知缺陷的回归护栏（用户 10-13：逐一分析并修复）。
+"""已知缺陷的回归护栏（用户 10-13：逐一分析并修复）。
+
+  ⑧ 全量审计新增（2026-10-13）：三处「命名说 A、实现做 B」的窗口/取样错误 ——
+     `indicators.count_limit_ups` 取成「最后 N 个涨停日」（界面显示「近20日涨停 4 次」）、
+     `datasource.recent_amount_median` 取成「最大的 N 天」（基准被抬高）、
+     `datasource._board_members_index` 对**已排序**名单直接 `[:1200]`
+     （实测只剩沪+北、**深市为 0**，题材成分表整个失效）；另加连板计算的除零守卫。
 
 逐条对应：
 
@@ -250,6 +256,72 @@ def test_rotation():
         ok(False, f"抛异常：{type(e).__name__}: {e}")
 
 
+# ---------------------------------------------------------------- ⑧ 窗口/取样语义
+
+def test_window_semantics():
+    """⑧ 三处「窗口/取样」语义错误（2026-10-13 全量审计）。
+
+    共同特征：**命名说 A、实现做 B**，而且都直接反映到界面数字上。
+    """
+    import collections
+
+    from core import datasource as ds
+    from core import indicators as ind
+
+    print("\n[8a] count_limit_ups：「近 N 日」不是「最后 N 个涨停日」")
+    bars, px = [], 10.0
+    for i in range(70):
+        px *= 1.10 if i < 5 else 1.0          # 涨停只发生在最久远的第 1~5 根
+        bars.append({"open": px * 0.99, "close": px, "high": px * 1.01,
+                     "low": px * 0.98, "volume": 1000.0})
+    ok(len(ind.count_limit_ups(bars, "sh600000", lookback=20)) == 0,
+       "近 20 日无涨停 → 0（原来返回 4，界面跟着写「近20日涨停 4 次」并加分）")
+    ok(len(ind.count_limit_ups(bars, "sh600000", lookback=4)) == 0,
+       "窗口 4 日同样为 0")
+    ok(len(ind.count_limit_ups(bars, "sh600000", lookback=69)) == 4,
+       "窗口放大到 69 日才该看到那 4 次涨停")
+
+    print("\n[8b] 连板/最大连板：收盘价为 0 时不得除零崩掉")
+    zeros = [{"open": 1.0, "close": 0.0, "high": 1.0, "low": 0.0, "volume": 1.0}] * 5
+    try:
+        mb = ind.max_boards(zeros, "sh600000")
+        cb = ind.consecutive_boards(zeros, "sh600000")
+        ok(mb == 0 and cb == 0, f"返回 0 而不是抛异常（{mb}/{cb}）")
+    except ZeroDivisionError:
+        ok(False, "仍抛 ZeroDivisionError")
+
+    print("\n[8c] recent_amount_median：「近 N 日」不是「最大的 N 天」")
+    from core import paths
+    amt_path = paths.data_path("market_amount.json")
+    try:
+        os.remove(amt_path)
+    except OSError:
+        pass
+    for i in range(6):
+        ds.save_market_amount(f"202609{i + 1:02d}", 25000.0, final=True)
+    for i in range(6):
+        ds.save_market_amount(f"202610{i + 1:02d}", 12000.0, final=True)
+    got = ds.recent_amount_median(8)
+    ok(abs(got - 12000.0) < 0.1,
+       f"量能下台阶后取最近 8 天 → 12000（原实现取最大的 8 天 → 25000，"
+       f"基准被抬高会把正常量能判成缩量；得到 {got}）")
+
+    print("\n[8d] 板块成分抽样：排序名单直接切片会整段切掉一个市场")
+    codes = (["bj" + f"{i:06d}" for i in range(600)]
+             + ["sh" + f"{600000 + i}" for i in range(2400)]
+             + ["sz" + f"{i:06d}" for i in range(3000)])
+    picked = ds._sample_codes_by_market(codes, 1200)
+    dist = collections.Counter(c[:2] for c in picked)
+    old = collections.Counter(c[:2] for c in codes[:1200])
+    ok(set(dist) == {"bj", "sh", "sz"},
+       f"三个市场都有（旧切片 [:1200] 只有 {dict(old)}，深市恒为 0；"
+       f"现在 {dict(dist)}）")
+    ok(dist["sz"] > 500, f"深市占比接近全市场（深 {dist['sz']}/1200）")
+    ok(len(picked) == 1200 and len(set(picked)) == 1200, "条数正确且无重复")
+    ok(ds._sample_codes_by_market(codes, 99999) == codes, "limit ≥ 总数 → 原样返回")
+    ok(ds._sample_codes_by_market([], 1200) == [], "空名单 → 空")
+
+
 def main():
     test_moneyflow_reason()
     test_traps()
@@ -258,6 +330,7 @@ def main():
     test_b3_amount_none()
     test_position_disabled()
     test_rotation()
+    test_window_semantics()
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
 
