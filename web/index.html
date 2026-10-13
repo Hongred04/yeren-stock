@@ -2616,6 +2616,8 @@ function renderModules(){
       chk(k,'exclude_st','排除ST/退市')+chk(k,'need_bull_ma','必须均线多头排列')+
       chk(k,'history_two_board','要求历史两板基因')+
       num(k,'recent_limitup_days','近期涨停回看(天)','',a.recent_limitup_days)+
+      num(k,'max_candidate_boards','候选最多连板数','超过的不进候选（连板一律不接力）',a.max_candidate_boards)+
+      num(k,'first_board_bonus','首板可打加权(分)','只给今日首板，按早封/未炸/封单厚给分；0=关闭',a.first_board_bonus)+
       wgt(k,a);}
     if(k==='M5_position') body=sw(k,'enabled','启用')+
       num(k,'pick_count','选股数量','题材内平铺只数',m.pick_count)+

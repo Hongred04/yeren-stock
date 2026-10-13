@@ -202,6 +202,41 @@ def test_candidate_state_consistency():
     sel2 = engine.screen(cfg2, snaps, kl, zt, mkt, VOL, sent("probe"), top_n=10)
     ok(len(sel2) == 4, f"把上限调到 3 → 连板票可入选（可配置，得到 {len(sel2)} 只）")
 
+    print("\n[5c] 可打的首板加权：同审美下首板排前，质量差的首板不占便宜")
+    a["max_candidate_boards"] = 1
+    a["first_board_bonus"] = 10
+    snaps3, kl3 = {}, {}
+    for i in range(4):                      # 4 只票的 K 线完全一样 → 审美分相同
+        code = f"sh60010{i}"
+        snaps3[code] = {"code": code, "name": f"票{i}", "price": 8.0,
+                        "pct": 10.0 if i < 3 else 1.0,
+                        "turnover": 5.0, "amount": 1e8, "float_mv": 3e9}
+        kl3[code] = BARS
+    zt3 = [
+        # 0 号：完美首板（早封/未炸/封单厚）
+        {"code": "sh600100", "boards": 1, "sector": "电池",
+         "first_time": 92500, "break_count": 0, "fund": 3e7},
+        # 1 号：质量差的首板（晚封 + 炸过板 + 无封单）
+        {"code": "sh600101", "boards": 1, "sector": "电池",
+         "first_time": 143000, "break_count": 3, "fund": 0},
+    ]
+    sel3 = engine.screen(cfg2, snaps3, kl3, zt3, mkt, VOL, sent("probe"), top_n=10)
+    by = {p["code"]: p for p in sel3}
+    ok(sel3[0]["code"] == "sh600100",
+       f"完美首板排第一（实际第一是 {sel3[0].get('name')}）")
+    ok(by["sh600100"]["score"] > by["sh600103"]["score"],
+       f"首板加权高于同审美的普通票：{by['sh600100']['score']} vs {by['sh600103']['score']}")
+    ok(abs(by["sh600100"].get("first_board_bonus", 0) - 10.0) < 0.01,
+       f"加分如实暴露 first_board_bonus={by['sh600100'].get('first_board_bonus')}")
+    ok(any("首板可打加权" in r for r in (by["sh600100"].get("reasons") or [])),
+       "理由里写明为什么加分")
+    ok(abs(by["sh600101"].get("first_board_bonus", 0)) < 0.01,
+       "质量差的首板不加分（加的是量价配合，不是「只要是首板」）")
+    a["first_board_bonus"] = 0
+    sel4 = engine.screen(cfg2, snaps3, kl3, zt3, mkt, VOL, sent("probe"), top_n=10)
+    ok(all(abs(p.get("first_board_bonus", 0)) < 0.01 for p in sel4),
+       "加权设为 0 → 完全关闭（可配置）")
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -169,6 +169,12 @@ PRESETS: dict[str, dict] = {
             # 连板 ≥2 的票体系一律"不接力/不追"，放进候选列表会被读成"推荐打 2 板"，
             # 与"买首板"的口径自相矛盾（用户 10-13 反馈）。
             "max_candidate_boards": 1,
+            # 「可打的首板」加权（分，0 = 关闭）：审美三要素只回答"这票好不好"，
+            # 还要回答"今天能不能打"。只给**今日首板**、且按封板质量给（早封/未炸/封单厚），
+            # 让真能打的首板优先进入候选（用户 10-13 选定方案 A）。
+            "first_board_bonus": 10,
+            "first_board_early": 100000,      # 早封判定：首封时间 ≤ 10:00:00
+            "first_board_fund_ratio": 0.005,  # 封单额 / 流通市值 ≥ 0.5% 算封得厚
             "weight_graph": 35, "weight_price_mv": 30, "weight_imagination": 35,
         },
         "M5_position": {

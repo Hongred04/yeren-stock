@@ -925,6 +925,53 @@ def score_one(cfg: dict, code: str, snap: dict, bars: list[dict],
     return result
 
 
+def _first_board_bonus(snap: dict, zt_row: dict | None,
+                       a: dict) -> tuple[float, list[str]]:
+    """「可打的首板」加权 —— 让今天**真能打**的首板优先进入候选（用户选定方案 A）。
+
+    背景（用户 10-13）：候选原来只按审美三要素打分排序，完全不看"今天能不能动手"
+    —— 实测 3 只已 3 连板（体系定性"不接力"）占了前三位，而当天涨停池里
+    22 只真首板（含价格/市值/换手全合格的两只）一只都没上榜。
+
+    只对**今日首板**（在涨停池里且 boards == 1）生效，并按野人体系里首板质量的
+    三个硬指标给分（上限 first_board_bonus）：
+      · 早封（首封时间 ≤ first_board_early，默认 10:00 前）   → 占 40%
+      · 封成（break_count == 0，没炸过板）                    → 占 30%
+      · 封单厚度（封单额 / 流通市值 ≥ first_board_fund_ratio） → 占 30%
+    质量不够的首板拿不到加权 —— 加的是"量价配合"，不是"只要是首板就加分"。
+    返回 (加分, 理由)。
+    """
+    if not zt_row or int(zt_row.get("boards") or 0) != 1:
+        return 0.0, []
+    try:
+        max_b = float(a.get("first_board_bonus", 10) or 0) / 100.0
+    except (TypeError, ValueError):
+        max_b = 0.10
+    if max_b <= 0:
+        return 0.0, []
+    try:
+        early = int(a.get("first_board_early", 100000) or 100000)
+        ratio_min = float(a.get("first_board_fund_ratio", 0.005) or 0)
+    except (TypeError, ValueError):
+        early, ratio_min = 100000, 0.005
+
+    got: float = 0.0
+    why: list[str] = []
+    ft = int(zt_row.get("first_time") or 0)
+    if ft and ft <= early:
+        got += max_b * 0.4
+        why.append(f"早封 {ft // 10000:02d}:{ft // 100 % 100:02d}")
+    if not int(zt_row.get("break_count") or 0):
+        got += max_b * 0.3
+        why.append("封板未炸")
+    mv = float(snap.get("float_mv") or 0)
+    fund = float(zt_row.get("fund") or 0)
+    if mv > 0 and ratio_min > 0 and fund / mv >= ratio_min:
+        got += max_b * 0.3
+        why.append(f"封单 {fund / mv * 100:.1f}% 流通")
+    return got, why
+
+
 def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
            zt: list[dict], macro: dict, volume: dict, sentiment: dict,
            top_n: int = 20, progress=None, preopen: bool = False) -> list[dict]:
@@ -1008,7 +1055,15 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
             continue
 
         total = (g * wg + p * wp + i * wi) / wsum
+        # ★ 可打性加权（方案 A，v1.32.5）：审美分只回答"这票好不好"，候选排序还要
+        #   回答"今天能不能打"。只给今日首板、且按封板质量给（见 _first_board_bonus）。
+        fb_bonus, fb_why = _first_board_bonus(snap, zt_map.get(code), a)
+        if fb_bonus:
+            total = min(1.0, total + fb_bonus)   # 封顶 100 分，不给溢出分数
         reasons = greasons + preasons + ireasons
+        if fb_why:
+            reasons = [f"首板可打加权 +{fb_bonus * 100:.0f}"
+                       f"（{'、'.join(fb_why)}）"] + reasons
         warns = list(gwarns) + list(pwarns)
 
         # 量比：当日放量程度 —— 短线最直接的确认信号。不参与打分（避免动选股口径），
@@ -1039,6 +1094,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
             "warnings": warns,
             "in_zt": code in zt_map,
             "zt_boards": zt_map.get(code, {}).get("boards", 0),
+            "first_board_bonus": round(fb_bonus * 100, 1),   # 可打性加权（0=没加）
             "sector": zt_map.get(code, {}).get("sector", ""),
             # 交易许可：退潮/极度缩量时，只有首板在试错仓范围内算"可做"，
             # 其余仅作观察名单，不构成开仓建议
