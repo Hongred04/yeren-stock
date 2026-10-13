@@ -485,6 +485,7 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
           <span class="hint" id="olHint">明天开盘先看什么 · 什么情况能动手</span></div>
         <div id="outlook"></div>
         <div id="rebound" style="margin-top:12px"></div>
+        <div id="substitute" style="margin-top:12px"></div>
       </div>
     </div>
 
@@ -1347,6 +1348,7 @@ function render(){
   renderSectors();
   renderOutlook();
   renderRebound();
+  renderSubstitute();
   renderJournal();
   renderPort();
 
@@ -2119,6 +2121,56 @@ function renderRebound(){
   </div>`;
 }
 
+function renderSubstitute(){
+  const el=$('substitute'); if(!el) return;
+  const sb=REPORT.substitute;
+  if(!sb||!sb.enabled){ el.innerHTML=''; return; }
+  if(!sb.active){
+    el.innerHTML=`<div class="card" style="border-left:4px solid var(--tx3)">
+      <div class="hd2"><div class="ic">🚦</div>
+        <div><div class="ti" style="font-size:15px">停牌补位推演 · 本轮无</div></div></div>
+      <div class="fl" style="font-size:12.5px;line-height:1.7;margin-top:6px">${esc(sb.reason||'')}</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML=`<div class="verdict hold" style="border-left-color:var(--org)">
+    <div class="hd2"><div class="ic">🚦</div>
+      <div><div class="ti" style="font-size:16px">停牌补位推演 —— 龙头停了，同题材谁在接棒</div>
+        <div class="sub" style="font-size:11.5px;margin-top:3px">
+          判据：${esc(sb.src||'')} · 零成交=停牌，题材与高度取本地涨停池归档</div></div></div>
+    <div class="fl" style="font-size:13px;line-height:1.75;margin-top:8px">${esc(sb.summary||'')}</div>
+    <div style="margin-top:12px">
+      ${(sb.halts||[]).map(h=>`<div class="act" style="display:block;margin-bottom:10px">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <b style="font-size:14.5px">${esc(h.name)}</b>
+          <span class="pill gry">${esc(h.code||'')}</span>
+          <span class="num" style="color:var(--org)">停牌前 ${h.hist_boards==null?'—':h.hist_boards} 连板</span>
+          ${h.theme?`<span class="pill blu">${esc(h.theme)}</span>`:''}
+        </div>
+        <div style="font-size:12.5px;margin-top:4px;line-height:1.7">
+          同题材今日涨停 <b>${h.theme_zt_today==null?'—':h.theme_zt_today}</b> 家${h.theme_zt_prev?`（上一交易日 ${h.theme_zt_prev} 家）`:''}
+        </div>
+        ${h.news_text?`<div class="fl" style="font-size:11.5px;margin-top:4px">公告：${esc(h.news_text)}</div>`:''}
+        ${(h.peers||[]).length?`<div style="margin-top:6px">
+          ${(h.peers||[]).map(p=>`<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px;padding:3px 0">
+            <b>${esc(p.name)}</b>
+            <span class="pill ${p.boards<=1?'blu':'gry'}">${p.boards}板</span>
+            <span class="${pct(p.pct)}">${p.pct>=0?'+':''}${f2(p.pct)}%</span>
+            <span class="num" style="color:var(--tx2)">接棒分 ${p.score}</span>
+            ${p.note?`<span class="pill ${p.rel==='same'?'gry':'blu'}" style="font-size:10.5px">${esc(p.note)}</span>`:''}
+            <span style="color:var(--tx3);font-size:11.5px">${esc((p.why||[]).join('、'))}</span>
+          </div>`).join('')}
+        </div>`:`<div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:4px">
+          同题材今天还没有涨停票 —— 补位尚未发生</div>`}
+        <div style="font-size:11.5px;margin-top:5px;color:var(--org);line-height:1.7">
+          <b>口径：</b>${esc(h.how||'')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="sub" style="margin-top:6px;font-size:11.5px;color:var(--tx3);line-height:1.7">
+      ${esc(sb.note||'')}</div>
+  </div>`;
+}
+
 function renderOutlook(){
   const el=$('outlook'); if(!el) return;
   const o=REPORT.outlook;
@@ -2582,6 +2634,7 @@ function renderModules(){
     ['E3_flow','E3 主力资金流','涨停股题材聚合 + 板块主力净流入 + 资金结论'],
     ['E4_journal','E4 信号复盘档案','每次扫描记录可执行的买入信号；T+1 开盘进场回验 1/3/5 日胜率（涨停不可买 / 停牌过滤 / 含成本）'],
     ['E5_rebound','E5 低位承接方向','退潮期 + 存量博弈 + 机构净卖出 同时成立 → 推演「机构兑现的钱去哪」：主力净流入为正、价格没抬起来、有催化、非主线的板块'],
+    ['E6_substitute','E6 停牌·补位推演','龙头停牌核查/重组 → 同题材里谁在补位：零成交=停牌，题材与连板高度取本地涨停池归档，同题材今日涨停票按「接棒概率」排序'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -2687,6 +2740,13 @@ function renderModules(){
       num(k,'top_n','输出方向数','做成"方向清单"，不是 3 个硬推荐',m.top_n)+
       num(k,'min_score','入选最低分','宁缺毋滥',m.min_score)+
       pctf(k,'trial_weight','试错仓(%)','退潮期只用试错仓，不做重仓',(m.trial_weight||0.05)*100);
+    if(k==='E6_substitute') body=sw(k,'enabled','启用')+
+      num(k,'min_boards','停牌股至少几连板才算"龙头"','低于此高度只当噪声（实测 10-13 零成交的两只：新华传媒 10 板 / 新亚制程 1 板，后者要挡掉）',m.min_boards)+
+      num(k,'lookback_days','翻几天涨停池归档','用来找"谁是龙头"与它属于哪个题材',m.lookback_days)+
+      num(k,'max_halts','最多推演几只停牌股','',m.max_halts)+
+      num(k,'top_peers','每只最多列几个补位候选','',m.top_peers)+
+      `<div class="fld"><label>「早封」的分界线（HH:MM，补位打分里占 40 分）</label>
+        <input type="text" data-key="early_deadline" value="${esc(m.early_deadline||'10:30')}"></div>`;
     return `<div class="mb" data-m="${k}">
       <div class="mh"><b>${t}</b>
         <div class="sw ${on?'on':''}" data-sw="${k}"></div>

@@ -731,6 +731,35 @@ function render(fromCache,ts){
       </div>`;
     }
   }
+  /* E6 停牌·补位推演：龙头停牌（零成交）→ 同题材谁在接棒。
+     用户 10-13：新华传媒 10 板停牌，次日「出版」6 家涨停，系统当时没接住。 */
+  const sb=d.substitute||{};
+  if(sb.enabled){
+    if(!sb.active){
+      t1+=`<h2>停牌补位推演 · 本轮无</h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(sb.reason||'')}</div></div>`;
+    }else{
+      t1+=`<h2>停牌补位推演 <span class="cnt">龙头停了，谁在接棒</span></h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(sb.summary||'')}</div>
+        ${(sb.halts||[]).map(h=>`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line2)">
+          <div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap">
+            <b style="font-size:14.5px">${esc(h.name)}</b>
+            <span class="cnt">停牌前 ${h.hist_boards==null?'—':h.hist_boards} 连板</span>
+            ${h.theme?`<span class="cnt">${esc(h.theme)}</span>`:''}</div>
+          <div class="fl" style="font-size:12.5px;margin-top:3px">
+            同题材今日涨停 <b>${h.theme_zt_today==null?'—':h.theme_zt_today}</b> 家${h.theme_zt_prev?`（上一交易日 ${h.theme_zt_prev} 家）`:''}</div>
+          ${h.news_text?`<div class="dt" style="margin-top:3px">公告：${esc(h.news_text)}</div>`:''}
+          ${(h.peers||[]).map(p=>`<div class="fl" style="font-size:12.5px;margin-top:4px">
+            <b>${esc(p.name)}</b> · ${p.boards}板 ·
+            <span class="${p.pct>=0?'up':'dn'}">${p.pct>=0?'+':''}${p.pct}%</span> ·
+            接棒分 ${p.score}${p.note?` · <span class="cnt">${esc(p.note)}</span>`:''}
+            <div class="dt">${esc((p.why||[]).join('、'))}</div></div>`).join('')}
+          <div class="dt" style="margin-top:4px;color:var(--org)">${esc(h.how||'')}</div>
+        </div>`).join('')}
+        <div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:8px">${esc(sb.note||'')}</div>
+      </div>`;
+    }
+  }
   t1+=`<footer>扫描 ${m.scanned||'—'} 只 · ${m.elapsed||'—'} 秒 · 归档 ${hist.days||'—'} 天<br>
     数据源：东财/腾讯/财联社/开盘红 ·
     <span style="color:var(--blu);font-weight:700" onclick="openSrcSheet()">数据源设置</span><br>

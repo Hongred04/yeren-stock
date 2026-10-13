@@ -20,6 +20,7 @@ from . import outlook
 from . import portfolio as portfolio_mod
 from . import regime
 from . import rebound as rebound_mod
+from . import substitute as substitute_mod
 from . import sentiment_meter
 from . import strategy_config as sc
 from . import swing as swing_mod
@@ -571,6 +572,17 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         rebound = rebound_mod.evaluate(cfg, sentiment, volume, flow, sectors,
                                        lhb=lhb_data, ml=ml, real_date=real_date)
 
+        # ---- E6 停牌·补位推演（龙头停牌了，同题材里谁在接棒） ----
+        # 用户 10-13：新华传媒（出版·10 连板）昨晚公告停牌核查，今天
+        # 「出版」6 家涨停（新经典/龙版传媒/新华文轩…），系统当时完全没接住。
+        # 数据全部来自**已经拉到的东西**：全市场快照（有报价 + 成交额 0 +
+        # 换手 0 = 全天无撮合 = 停牌）与本地涨停池归档（谁有连板基因、
+        # 属于哪个题材），不新增接口。盘前/集合竞价那段快照区分不出停牌
+        # （全市场都是 0），改走停牌公告 —— news 自带 5 分钟缓存，与
+        # mainline 共用，不额外增加源站压力。
+        substitute = substitute_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
+                                             real_date=real_date)
+
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
@@ -640,6 +652,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "mainline": ml,
             "sectors": sectors,
             "rebound": rebound,
+            "substitute": substitute,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,
