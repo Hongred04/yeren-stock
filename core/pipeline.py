@@ -20,6 +20,7 @@ from . import outlook
 from . import portfolio as portfolio_mod
 from . import regime
 from . import rebound as rebound_mod
+from . import industry as industry_mod
 from . import substitute as substitute_mod
 from . import sentiment_meter
 from . import strategy_config as sc
@@ -345,6 +346,14 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             hist_info = {"days": len(ds.pool_history_dates()),
                          "rest": int(bf.get("rest") or 0),
                          "filled": len(bf.get("filled") or [])}
+            # 对账修复：backfill 只补缺，写坏的归档它修不回来（实测 20261012
+            # 只存了 16 只而真实 46 只）。这里用收盘复盘接口强制校正最近几天。
+            # 每天只跑一次（kph 内部去重），失败不影响主流程。
+            rp = kph_mod.repair_pool_history(real_date, days=3)
+            if rp.get("repaired") or rp.get("moved"):
+                print(f"[pipeline] 归档对账: 修正 {rp.get('repaired')} / "
+                      f"移出错日期 {rp.get('moved')}", file=sys.stderr)
+            hist_info["days"] = len(ds.pool_history_dates())
         except Exception as e:
             print(f"[pipeline] 归档回补失败: {e}", file=sys.stderr)
             hist_info["days"] = len(ds.pool_history_dates())
@@ -371,7 +380,6 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                     if h.get("tag"):
                         r["hot_tag"] = h["tag"]
 
-        zth = ds.fetch_limit_up_history(10, real_date)
         idx = ds.fetch_index_snapshots(real_date)
         amount = sum(v["amount"] for v in idx.values()
                      if v["name"] in ("上证指数", "深证成指"))
@@ -381,6 +389,12 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         _prog("评估宏观/量能/情绪…", 0, 100)
         sess = trading.market_session()
         preopen = sess["phase"] in ("pre_open", "auction", "rest")
+        # 涨停家数历史：★ 只有收盘后才是终值。原实现是"某日只要已存在就永不更新"，
+        # 于是当天**首扫看板上几个就定稿** —— 实测 20261012 被钉死在 16 家，
+        # 而当天真实涨停 46 家，整条"涨停家数曲线"与"昨日涨停"类比基准都被带偏。
+        zth = ds.fetch_limit_up_history(
+            10, real_date,
+            final=sess["phase"] in ("just_closed", "after_close", "rest"))
         macro = engine.evaluate_macro(cfg)
         amt_yi = amount / 1e8 if amount > 1e5 else amount
         # 当日累计成交额只会增不会减 → 取高水位。挡两类丢失：
@@ -583,6 +597,15 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         substitute = substitute_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
                                              real_date=real_date)
 
+        # ---- E7 逆势连板票（产业逻辑候选）· 独立通道 ----
+        # 用户 10-13 的九阳股份案例：它在 10-08 / 10-12 两个退潮日照常连板
+        # 走到 6 板（+61%），而系统因「退潮 can_trade=False + 候选不超过 1 板」
+        # 完全看不见它。缺口不是数据是尺子 —— 情绪周期量的是"接力资金"，
+        # 它靠的是独立于情绪的产业逻辑。这个模块只回答"谁的连板不是情绪撑的"。
+        # 放在 substitute 之后：两者都依赖已归档的涨停池，且都不需要额外数据源。
+        industry = industry_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
+                                         real_date=real_date)
+
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
@@ -653,6 +676,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "sectors": sectors,
             "rebound": rebound,
             "substitute": substitute,
+            "industry": industry,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,

@@ -783,8 +783,13 @@ def evaluate(cfg: dict, zt: list[dict], snaps: dict[str, dict],
     a = cfg.get("M9_mainline", {})
     real_date = real_date or ds.last_trade_date()
 
-    # 无论开关与否都归档当日涨停池 —— 次日验证/老龙档案的数据底座
-    ds.save_pool_history(real_date, zt)
+    # 无论开关与否都归档当日涨停池 —— 次日验证/老龙档案的数据底座。
+    # ★ 必须带上接口自报的 qdate：池接口**忽略 date 入参**、始终返回"最近一个
+    #   有数据的交易日"，盘前扫描拿到的其实是上一交易日的池；不带 qdate 校验
+    #   就会把昨天记成今天（实测 2026-10-13：本地 [20261013] 与复盘接口的
+    #   20261012 是同一批，且含当天已停牌的新华传媒）。日期不符即拒写，
+    #   缺口由 kph.repair_pool_history 在收盘复盘生成后补上。
+    ds.save_pool_history(real_date, zt, qdate=ds.pool_qdate())
 
     if not a.get("enabled", True):
         return {"enabled": False, "status": "disabled", "label": STATUS_CN["disabled"],

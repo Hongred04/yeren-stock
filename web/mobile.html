@@ -760,6 +760,32 @@ function render(fromCache,ts){
       </div>`;
     }
   }
+  /* E7 逆势连板（产业逻辑候选）：退潮日照样连板 = 驱动不在情绪周期里。
+     用户 10-13 的九阳股份案例：系统当时因「退潮不买 + 候选≤1板」完全看不见它。 */
+  const ind=d.industry||{};
+  if(ind.enabled){
+    if(!ind.active){
+      t1+=`<h2>逆势连板 · 本轮无</h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(ind.reason||'')}</div></div>`;
+    }else{
+      t1+=`<h2>逆势连板 <span class="cnt">谁的连板不是情绪撑的</span></h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(ind.summary||'')}</div>
+        ${(ind.picks||[]).map(p=>`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line2)">
+          <div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap">
+            <b style="font-size:14.5px">${esc(p.name)}</b>
+            <span class="cnt">最高 ${p.max_boards==null?'—':p.max_boards} 板</span>
+            ${p.sector?`<span class="cnt">${esc(p.sector)}</span>`:''}
+            <span class="cnt">${p.still?'今天仍在涨停池':'今天已断板/停牌'}</span></div>
+          <div class="fl" style="font-size:12.5px;margin-top:3px">
+            跨过逆势日 ${(p.ebb_days||[]).length} 个（${esc((p.ebb_days||[]).join('、'))}）
+            · ${p.mv_first==null?'首板市值未取得':'首板市值约 '+p.mv_first+' 亿'}</div>
+          ${(p.flags||[]).map(f=>`<div class="dt" style="margin-top:3px">${esc(f)}</div>`).join('')}
+          <div class="dt" style="margin-top:4px;color:var(--org)">${esc(p.how||'')}</div>
+        </div>`).join('')}
+        <div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:8px">${esc(ind.note||'')}</div>
+      </div>`;
+    }
+  }
   t1+=`<footer>扫描 ${m.scanned||'—'} 只 · ${m.elapsed||'—'} 秒 · 归档 ${hist.days||'—'} 天<br>
     数据源：东财/腾讯/财联社/开盘红 ·
     <span style="color:var(--blu);font-weight:700" onclick="openSrcSheet()">数据源设置</span><br>

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import date as _date
@@ -245,3 +246,80 @@ def autobackfill(real_date: str, lookback: int = 20, max_try: int = 30,
             _failed.add(d)
     rest = len([d for d in cands[tried:] if d not in _failed])
     return {"checked": tried, "filled": filled, "rest": rest}
+
+
+# 每天只对账一次（进程内）。对账要发 3 个请求，不能每轮扫描都发。
+_repaired: set[str] = set()
+
+
+def _move_aside(d: str) -> bool:
+    """把某日存档挪到 pool_history/_suspect/（不删除，可回溯）。
+
+    子目录名长度不是 13，不会被 pool_history_dates() 当成交易日读进来。
+    """
+    src = os.path.join(ds.POOL_HIST_DIR, f"{d}.json")
+    if not os.path.exists(src):
+        return False
+    try:
+        dst_dir = os.path.join(ds.POOL_HIST_DIR, "_suspect")
+        os.makedirs(dst_dir, exist_ok=True)
+        os.replace(src, os.path.join(dst_dir, f"{d}.json"))
+        return True
+    except OSError:
+        return False
+
+
+def repair_pool_history(real_date: str, days: int = 3) -> dict:
+    """用「涨停复盘」接口**强制重写**最近 N 个工作日的归档（修已经写坏的数据）。
+
+    与 `autobackfill` 的分工：backfill 只补缺（已有就不动），因此
+    **一旦写坏就永远修不回来** —— 实测 20261012 只存了 16 只（当日早扫的
+    部分池），而那天真实涨停 46 只；`autobackfill` 因为"这日期已有"直接跳过，
+    错值就一直留在档案里，并污染 M9 的"昨日涨停池/老龙档案"与 E6 的题材取值。
+
+    三件事：
+      ① 接口有数据 → **强制覆盖**本地（force=True 绕过"更完整才覆盖"的门槛，
+         因为接口的收盘复盘才是权威口径）；
+      ② 接口没数据、但本地有存档，且不是今天 → 该存档属于"错日期"
+         （今天还没生成复盘是正常的，别的日子没有就是脏数据）→ 挪到 _suspect/；
+      ③ 今天的存档若与上一交易日**完全同批** → 同样是错日期 → 挪走。
+
+    每天最多跑一次（进程内去重），返回 {repaired, moved, missing}。
+    """
+    if not real_date or real_date in _repaired:
+        return {"repaired": [], "moved": [], "missing": []}
+    _repaired.add(real_date)
+    repaired: list[str] = []
+    moved: list[str] = []
+    missing: list[str] = []
+    counts: dict[str, int] = {}
+    targets = [real_date] + _workdays_before(real_date, max(0, int(days) - 1))
+    for d in targets:
+        try:
+            pool = history_pool(d)
+        except Exception:                                    # noqa: BLE001
+            continue
+        if pool:
+            before = len(ds.load_pool_history(d))
+            if ds.save_pool_history(d, pool, force=True) and before != len(pool):
+                repaired.append(d)
+            counts[d] = len(pool)
+        else:
+            missing.append(d)
+            if d != real_date and ds.load_pool_history(d) and _move_aside(d):
+                moved.append(d)
+    # 涨停家数曲线同步校正：归档条数就是那天的收盘涨停家数（复盘口径）。
+    # 10-12 被首扫写成了 16 家，而它不会再作为 end 传进来 —— 只能在这里修。
+    for d, n in counts.items():
+        try:
+            ds.fix_limit_up_count(d, n)
+        except (OSError, ValueError):
+            pass
+    # 今天：本地存档若与上一交易日完全同批 → 错日期，挪走
+    try:
+        if ds.pool_history_duplicates(real_date,
+                                      ds.load_pool_history(real_date)) and _move_aside(real_date):
+            moved.append(real_date)
+    except OSError:
+        pass
+    return {"repaired": repaired, "moved": moved, "missing": missing}

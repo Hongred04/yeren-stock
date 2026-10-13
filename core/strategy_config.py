@@ -125,6 +125,25 @@ _E6_DEFAULTS = {
     "near_penalty": 8.0,
 }
 
+# E7 逆势连板票·独立通道（用户 10-13 的九阳股份案例）
+_E7_DEFAULTS = {
+    "enabled": True,
+    # 连板高度门槛：低于此高度撑不出"产业逻辑"的结论（实测九阳 6 板、
+    # 新华传媒 10 板；3 板是能看出"跨过退潮还在延续"的最低限度）
+    "min_boards": 3,
+    "lookback_days": 10,              # 翻几个归档交易日找连板链
+    "top_n": 5,
+    # 首板日流通市值上限（亿）：首板时小市值才谈得上弹性。实测九阳首板约 79 亿。
+    # 注意是**首板那天**的市值（用日K首板价反推），不是今天的 —— 涨了 60% 之后
+    # 它已经 134 亿，但买点那一刻它合格。
+    "mv_max": 100.0,
+    # 「缩量一字」的判定：该板换手 ≤ 前一板换手 × 此值
+    "shrink_ratio": 0.7,
+    # 「炸板回封」的判定：炸板次数 ≥ 此值、且当日仍收在涨停
+    "reseal_breaks": 3,
+    "mv_check": True,                 # 是否取日K算首板市值（关掉可省一次请求）
+}
+
 
 PRESETS: dict[str, dict] = {
     # ===== 单一融合体系：四套预设已合并，个股打法写在详情页 =====
@@ -246,6 +265,7 @@ PRESETS: dict[str, dict] = {
         "E4_journal": dict(_E4_DEFAULTS),
         "E5_rebound": dict(_E5_DEFAULTS),
         "E6_substitute": dict(_E6_DEFAULTS),
+        "E7_industry": dict(_E7_DEFAULTS),
     },
 }
 

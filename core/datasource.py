@@ -1704,13 +1704,22 @@ def fetch_stock_changes(change_type: str = "8208", ttl: int = 60) -> list[dict]:
 
 # ---------------------------------------------------------------- 历史情绪
 
-def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:
+def fetch_limit_up_history(days: int = 30, end_date: str = "",
+                           final: bool = False) -> list[dict]:
     """近 N 个交易日的涨停家数（用于情绪周期趋势判断）。
 
     注意：池接口忽略 date 入参，始终返回最新交易日数据，因此历史序列
     通过「直接读取接口 + 记录 qdate」的方式无法回溯。这里退化为
     「最新交易日单点 + 本地累积缓存」——每次运行把当日涨停数追加到
     本地历史文件，形成可持续积累的涨停家数曲线。
+
+    ★ final：这次读数是不是**收盘后的终值**（由调用方按交易时段传入）。
+    原实现是"某日期只要已存在就永不更新"，于是**当天首扫看板上写了几个
+    就定稿**：实测 20261012 记的是 16 家（那次扫描在盘中早段），而当天
+    真实涨停 46 家 —— 涨停家数曲线与"昨日涨停"类比基准全都被这条错值污染。
+    现在改成：未定稿（final=False）的记录**允许被后续读数更新**，
+    收盘终值（final=True）一旦写入就不再被盘中读数覆盖。
+    老档案没有 final 字段 → 视为未定稿（可被修正），这样历史错值也能自愈。
     """
     end = end_date or last_trade_date()
     n = len(_fetch_pool("ZT", end, "fbt%3Aasc", ttl=300))
@@ -1724,17 +1733,61 @@ def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:
                 hist = json.load(f)
     except (json.JSONDecodeError, OSError):
         hist = []
-    if not any(h["date"] == end for h in hist):
-        hist.append({"date": end, "limit_up": n})
+    cur = next((h for h in hist if h.get("date") == end), None)
+    if cur is None:
+        hist.append({"date": end, "limit_up": n, "final": bool(final)})
+        changed = True
+    elif not cur.get("final"):
+        changed = (int(cur.get("limit_up") or 0) != n) or (bool(final) and not cur.get("final"))
+        cur["limit_up"] = n
+        cur["final"] = bool(final)
+    else:
+        changed = False                       # 已是收盘终值 → 不再被盘中读数改写
+    if changed:
         hist.sort(key=lambda x: x["date"])
         hist = hist[-250:]
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(hist, f)
+                json.dump(hist, f, ensure_ascii=False)
         except OSError:
             pass
     return hist[-days:]
+
+
+def fix_limit_up_count(date: str, n: int) -> bool:
+    """对账修复：把 zt_history 里某日的涨停家数改成 n（收盘复盘口径）。
+
+    为什么需要单独一个函数：`fetch_limit_up_history` 只在 `end == 传入日期`
+    时才会去更新那一行，而**过去的日子不会再被当成 end 传进来** ——
+    一旦当日首扫写错（实测 20261012 写成 16、收盘其实 46），
+    靠正常路径永远修不回来。
+    """
+    if not date or n <= 0:
+        return False
+    path = paths.data_path("zt_history.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            hist = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    cur = next((h for h in hist if isinstance(h, dict) and h.get("date") == date), None)
+    if cur is None:
+        hist.append({"date": date, "limit_up": int(n), "final": True})
+    elif int(cur.get("limit_up") or 0) == int(n) and cur.get("final"):
+        return False
+    else:
+        cur["limit_up"] = int(n)
+        cur["final"] = True
+    hist.sort(key=lambda x: x.get("date", ""))
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hist[-250:], f, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
 
 
 def market_amount_history(days: int = 40) -> list[dict]:
@@ -1760,25 +1813,109 @@ def market_amount_history(days: int = 40) -> list[dict]:
 
 POOL_HIST_DIR = paths.data_path("pool_history")
 
+# 允许覆盖的"更完整"倍数：新池条数 ≥ 旧池 × 此值才覆盖。
+# 1.15 的由来：盘中抖动（排除了 ST / 异常行）通常只差几只；而"盘中早扫的
+# 部分池"与"当日全部涨停"差的是数量级（实测 16 → 46，2.9 倍）。
+_POOL_HIST_GROW = 1.15
 
-def save_pool_history(date: str, pool: list[dict]) -> None:
-    """把当日涨停池快照归档到本地（M9 次日验证 / 老龙档案的数据底座）。
 
-    已有同日存档不覆盖，避免盘中多次扫描产生不同快照互相打架。
+# 覆盖归档时要**保留老行字段值**的键（新行只借"成员集合"）。
+# 为什么：两个源的字段口径不同，实测（九阳股份 20261009）——
+#   · 开盘红复盘：break_count **恒为 0**（真实炸 6 次）、换手 56.29%、
+#     流通市值 41.2 亿
+#   · 东财涨停池：break_count 6、换手 18.28%、流通市值 126.8 亿
+# 用 K 线独立核对：10-09 成交 139.2 万手 ÷ 流通股本 7.62 亿股 = 18.3%
+# → **东财是对的，复盘的换手与市值大 ~3.08 倍**（股本基数不同）。
+# 复盘的价值在**覆盖完整**（10-12 它给 46 只、东财当时只存了 16 只），
+# 所以：成员取复盘、字段值取东财 —— 否则会"补全了票数、修坏了换手与炸板次数"，
+# 而 E7 的形态判定（缩量一字 / 炸板回封）正靠这两个字段。
+_POOL_FIELD_KEEP = ("name", "sector", "reason", "turnover", "float_mv",
+                    "break_count", "fund", "first_time", "last_time",
+                    "price", "pct")
+
+
+def _merge_pool_rows(old: list[dict], new: list[dict]) -> list[dict]:
+    """以 new 的成员为准，同代码行优先保留 old 里**有值**的字段。"""
+    old_by = {r.get("code"): r for r in (old or []) if r.get("code")}
+    out: list[dict] = []
+    for row in new:
+        m = dict(row)
+        o = old_by.get(row.get("code"))
+        if o:
+            for k in _POOL_FIELD_KEEP:
+                v = o.get(k)
+                if v not in (None, "", 0, 0.0):
+                    m[k] = v
+        out.append(m)
+    return out
+
+
+def pool_history_prev_date(date: str) -> str:
+    """比 date 更早的、最近一个有归档的交易日（无则空串）。"""
+    ds_ = [d for d in pool_history_dates() if d < date]
+    return ds_[-1] if ds_ else ""
+
+
+def pool_history_duplicates(date: str, pool: list[dict]) -> bool:
+    """新池是否与**上一个已归档交易日**完全同批（代码集合相同）。
+
+    连续两天涨停池完全相同在真实市场里几乎不可能出现；出现即说明拿到的是
+    **上一交易日的池**。实测（2026-10-13）：本地 `[20261013]` 的 46 只代码
+    集合与「复盘接口查 20261012」**完全相同**，而且里面还含
+    **当天已停牌的新华传媒** —— 它不可能出现在今天的涨停池里，是硬证据。
+    """
+    prev = pool_history_prev_date(date)
+    if not prev or not pool:
+        return False
+    old = {r.get("code") for r in load_pool_history(prev) if r.get("code")}
+    new = {r.get("code") for r in pool if r.get("code")}
+    return bool(old) and old == new
+
+
+def save_pool_history(date: str, pool: list[dict], qdate: str = "",
+                      force: bool = False) -> bool:
+    """把某交易日的涨停池归档到本地（M9 次日验证 / 老龙档案的数据底座）。
+
+    返回 True 表示确实写了盘。★ 两道门禁（2026-10-13 实测教训，
+    与「盘前指数快照污染今日高水位」是同一类错误：拿错时点的数据当某一天用）：
+
+    ① **日期归属**（qdate）：池接口会**忽略 date 入参**、始终返回"最近一个
+       有数据的交易日"（见 _fetch_pool 说明）。所以盘前扫描拿到的其实是
+       **上一交易日**的池 —— 直接按 real_date 落盘就把昨天记成了今天。
+       实测：本地 pool_history/20261013.json 与「接口查 20261012」的复盘
+       **是同一批 46 只**（代码集合完全相同），而 10-13 的池当时还没生成
+       （接口查 10-13 返回 0 只）。传入接口自报的 qdate 后，日期不一致即拒写。
+
+    ② **覆盖率**：原实现是"已有同日存档就不覆盖"，本意防盘中多次扫描互相
+       打架，但它把**盘中早期的残缺快照永久钉死**了 —— 实测 20261012 只存了
+       16 只（当日早扫时的部分池），当天真实涨停 46 只，却因为"不覆盖"，
+       后来那次完整的扫描白跑，残缺再也修不回来（并直接污染了 M9 的
+       "昨日涨停池/老龙档案"与 E6 的题材取值）。
+       现在改为：**新池明显更完整（≥_POOL_HIST_GROW 倍）才允许覆盖**，
+       否则保持原样 —— 既挡住抖动，又能自愈残缺。
     """
     if not date or not pool:
-        return
+        return False
+    if qdate and str(qdate) != str(date):
+        return False                    # 拿到的是别的交易日的池，不写
+    if not force and pool_history_duplicates(date, pool):
+        return False                    # 与上一交易日完全同批 = 错日期的池，不写
     try:
         os.makedirs(POOL_HIST_DIR, exist_ok=True)
         path = os.path.join(POOL_HIST_DIR, f"{date}.json")
-        if os.path.exists(path):
-            return
+        old = load_pool_history(date)
+        if old and not force and len(pool) < len(old) * _POOL_HIST_GROW:
+            return False                # 没更完整 → 保持原样（防盘中抖动打架）
+        if old:
+            pool = _merge_pool_rows(old, pool)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"date": date, "count": len(pool), "pool": pool}, f, ensure_ascii=False)
+            json.dump({"date": date, "count": len(pool), "pool": pool},
+                      f, ensure_ascii=False)
         os.replace(tmp, path)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def load_pool_history(date: str) -> list[dict]:

@@ -486,6 +486,7 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
         <div id="outlook"></div>
         <div id="rebound" style="margin-top:12px"></div>
         <div id="substitute" style="margin-top:12px"></div>
+        <div id="industry" style="margin-top:12px"></div>
       </div>
     </div>
 
@@ -1349,6 +1350,7 @@ function render(){
   renderOutlook();
   renderRebound();
   renderSubstitute();
+  renderIndustry();
   renderJournal();
   renderPort();
 
@@ -2171,6 +2173,48 @@ function renderSubstitute(){
   </div>`;
 }
 
+function renderIndustry(){
+  const el=$('industry'); if(!el) return;
+  const ind=REPORT.industry;
+  if(!ind||!ind.enabled){ el.innerHTML=''; return; }
+  if(!ind.active){
+    el.innerHTML=`<div class="card" style="border-left:4px solid var(--tx3)">
+      <div class="hd2"><div class="ic">🔗</div>
+        <div><div class="ti" style="font-size:15px">逆势连板 · 本轮无</div></div></div>
+      <div class="fl" style="font-size:12.5px;line-height:1.7;margin-top:6px">${esc(ind.reason||'')}</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML=`<div class="verdict hold" style="border-left-color:var(--blu)">
+    <div class="hd2"><div class="ic">🔗</div>
+      <div><div class="ti" style="font-size:16px">逆势连板 —— 谁的连板不是情绪撑的</div>
+        <div class="sub" style="font-size:11.5px;margin-top:3px">
+          退潮日照样连板 = 驱动大概率不在情绪周期里；这张卡**不是买点**，是提醒别把它一刀切掉</div></div></div>
+    <div class="fl" style="font-size:13px;line-height:1.75;margin-top:8px">${esc(ind.summary||'')}</div>
+    <div style="margin-top:12px">
+      ${(ind.picks||[]).map(p=>`<div class="act" style="display:block;margin-bottom:10px">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <b style="font-size:14.5px">${esc(p.name)}</b>
+          <span class="pill gry">${esc(p.code||'')}</span>
+          <span class="num" style="color:var(--red)">最高 ${p.max_boards==null?'—':p.max_boards} 板</span>
+          ${p.sector?`<span class="pill blu">${esc(p.sector)}</span>`:''}
+          <span class="pill ${p.still?'gry':'gry'}">${p.still?'今天仍在涨停池':'今天已断板/停牌'}</span>
+        </div>
+        <div style="font-size:12.5px;margin-top:4px;line-height:1.7">
+          跨过逆势日 ${(p.ebb_days||[]).length} 个（${esc((p.ebb_days||[]).join('、'))}）
+          · ${p.mv_first==null?'首板市值未取得':'首板日流通市值约 '+p.mv_first+' 亿'}
+        </div>
+        ${(p.flags||[]).length?`<div style="font-size:11.5px;color:var(--tx2);margin-top:4px;line-height:1.65">
+          ${(p.flags||[]).map(f=>esc(f)).join('<br>')}</div>`:''}
+        <div style="font-size:11.5px;margin-top:5px;color:var(--org);line-height:1.7">
+          <b>口径：</b>${esc(p.how||'')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="sub" style="margin-top:6px;font-size:11.5px;color:var(--tx3);line-height:1.7">
+      ${esc(ind.note||'')}</div>
+  </div>`;
+}
+
 function renderOutlook(){
   const el=$('outlook'); if(!el) return;
   const o=REPORT.outlook;
@@ -2635,6 +2679,7 @@ function renderModules(){
     ['E4_journal','E4 信号复盘档案','每次扫描记录可执行的买入信号；T+1 开盘进场回验 1/3/5 日胜率（涨停不可买 / 停牌过滤 / 含成本）'],
     ['E5_rebound','E5 低位承接方向','退潮期 + 存量博弈 + 机构净卖出 同时成立 → 推演「机构兑现的钱去哪」：主力净流入为正、价格没抬起来、有催化、非主线的板块'],
     ['E6_substitute','E6 停牌·补位推演','龙头停牌核查/重组 → 同题材里谁在补位：零成交=停牌，题材与连板高度取本地涨停池归档，同题材今日涨停票按「接棒概率」排序'],
+    ['E7_industry','E7 逆势连板·独立通道','退潮日照样连板的票（驱动大概率不在情绪周期里）—— 情绪闸门量的是"接力资金"，这类票靠的是独立产业逻辑，不该被一刀切掉。只回答"谁的连板不是情绪撑的"，不是买点'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -2747,6 +2792,14 @@ function renderModules(){
       num(k,'top_peers','每只最多列几个补位候选','',m.top_peers)+
       `<div class="fld"><label>「早封」的分界线（HH:MM，补位打分里占 40 分）</label>
         <input type="text" data-key="early_deadline" value="${esc(m.early_deadline||'10:30')}"></div>`;
+    if(k==='E7_industry') body=sw(k,'enabled','启用')+
+      num(k,'min_boards','连板高度门槛(板)','低于此高度撑不出"产业逻辑"的结论',m.min_boards)+
+      num(k,'lookback_days','翻几天归档找连板链','',m.lookback_days)+
+      num(k,'top_n','最多列几只','',m.top_n)+
+      num(k,'mv_max','首板日流通市值上限(亿)','首板时小市值才谈得上弹性（用日K首板价反推，不是今天的市值）',m.mv_max)+
+      num(k,'shrink_ratio','「缩量一字」判定：本板换手 ÷ 前板换手 ≤','≤此值算缩量；一字=集合竞价即封且未炸',m.shrink_ratio)+
+      num(k,'reseal_breaks','「炸板回封」判定：炸板次数 ≥','炸这么多次仍收在涨停 = 承接强',m.reseal_breaks)+
+      sw(k,'mv_check','取日K算首板市值（关掉可省一次请求，但市值分就不参与）');
     return `<div class="mb" data-m="${k}">
       <div class="mh"><b>${t}</b>
         <div class="sw ${on?'on':''}" data-sw="${k}"></div>
