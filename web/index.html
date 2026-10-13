@@ -1244,7 +1244,10 @@ function render(){
   } else { $('mlVerdict').innerHTML=''; $('mlSteps').innerHTML=''; $('mlExtra').innerHTML=''; }
 
   /* ── ③ 选股表 ── */
-  $('pickHint').textContent=`共 ${picks.length} 只`;
+  // 候选口径：只放"今天有可执行买点"的票；被剔除的（连板不接力 / 无买点）如实说明，
+  // 否则用户会以为"系统看不见那些票"（用户 10-13：候选里混着已涨停的票像在推荐打板）
+  $('pickHint').textContent=`共 ${picks.length} 只`
+    + (REPORT.picks_note?'　·　'+REPORT.picks_note:'');
   const wc=$('warnCard');
   if(!canTrade){
     wc.classList.remove('hide');
@@ -1460,8 +1463,10 @@ function renderDetail(p){
   // 「其他买入时机」（以前"涨停不追"被当成一个买入时机列出来，自相矛盾）。
   // 兼容旧缓存报告：老数据没有 kind，用 blocked 兜底。
   const buys=p.buy_signals||[];
-  const actionable=buys.filter(s=>s.kind!=='block'&&!s.blocked);
-  const blockers=buys.filter(s=>s.kind==='block'||s.blocked);
+  // kind=watch 是"只观察、今天不可买"（如退潮期的"等首板"），必须与
+  // kind=block 一起从「可执行买点」里剔除 —— 否则它会顶替真正的买点变成主行动卡。
+  const actionable=buys.filter(s=>s.kind!=='block'&&s.kind!=='watch'&&!s.blocked);
+  const blockers=buys.filter(s=>s.kind==='block'||s.kind==='watch'||s.blocked);
   const buy=actionable[0];
   const buyBlocked=blocked||!buy;
   const blk=blockers[0];

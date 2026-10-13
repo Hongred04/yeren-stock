@@ -451,12 +451,14 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                              progress=lambda d, t: _prog(
                                  f"拉取K线 {d}/{t}…", d, t))
         _prog("打分选股…", 0, 100)
-        picks = engine.screen(cfg, {c: snaps[c] for c in kl if c in snaps}, kl,
-                              zt, macro, volume, sentiment, top_n=top_n,
-                              preopen=preopen)
+        # 多取一截备筛：下面还要按"有没有可执行买点"过一遍，才能取满 top_n 只
+        _want = max(int(top_n or 0), 1)
+        scored = engine.screen(cfg, {c: snaps[c] for c in kl if c in snaps}, kl,
+                               zt, macro, volume, sentiment, top_n=_want * 2,
+                               preopen=preopen)
 
         # ---- 买卖点 ----
-        for p in picks:
+        for p in scored:
             bars = kl.get(p["code"], [])
             # 波段体系先算（买卖点要按打法排序，得先有 swing / style_fit）
             p["swing"] = swing_mod.evaluate(bars, p["code"], cfg)
@@ -472,6 +474,28 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 p["hot_rank"] = h["rank"]
                 if h.get("tag"):
                     p["hot_tag"] = h["tag"]
+
+        # ★ 候选股 = 「今天有可执行买点」的票（用户 10-13 反馈）：
+        #   原来榜单只按分数排前 N，导致两类票白占候选位、被读成推荐 ——
+        #     · 已涨停的连板股（体系对它们一律"不接力/不追"）
+        #     · 尚未涨停、买点写着"不是首板就别碰"的票
+        #   现在只保留 buy_signals 里真的存在 kind=buy 的票；只有观察/禁买提示的
+        #   不进候选（它们在"涨停池"表与详情页里仍然可见，信息没丢）。
+        picks = [p for p in scored
+                 if any((b or {}).get("kind") == "buy"
+                        for b in (p.get("buy_signals") or []))][:_want]
+        excluded_n = len(scored) - len(picks)
+        pool_b2 = sum(1 for z in zt if int(z.get("boards") or 0) >= 2)
+        picks_note = ""
+        if excluded_n or pool_b2:
+            bits = []
+            if pool_b2:
+                bits.append(f"涨停名单里有 {pool_b2} 只 2 板以上的票 —— "
+                            "体系一律不接力，未列入候选")
+            if excluded_n:
+                bits.append(f"另有 {excluded_n} 只打分靠前但今日没有可执行买点，"
+                            "也未列入")
+            picks_note = "；".join(bits) + "。"
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
 
@@ -621,6 +645,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "journal": journal_data,
             "portfolio": port,
             "picks": picks,
+            # 候选口径说明：哪些票因为"今日无买点/连板不接力"没进候选，如实告知
+            "picks_note": picks_note,
             "position": plan,
             "earnings": m7,
             "message": m6,

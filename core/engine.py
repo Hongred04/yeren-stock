@@ -943,6 +943,17 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
     max_to = a.get("max_turnover", 25.0)
     exclude_st = a.get("exclude_st", True)
     need_bull = a.get("need_bull_ma", False)
+    # ★ 候选股 = 「今天还能出手的票」（用户 10-13 反馈）：
+    #   已涨停且连板 ≥2 的票，体系对它们的定性一律是"不接力/不追"（退潮期直接给
+    #   block，其余节点给「涨停不追」）—— 放在候选列表里只会被读成"推荐打 2 板/多板"，
+    #   与"买首板"的口径自相矛盾。实测 10-13：3 只 3 连板（均不可接力）占了前三个
+    #   候选位，而当天涨停池里 22 只首板（含价/市值/换手全合格的新力金融、亚邦股份）
+    #   一只都没上榜 —— 排序只看分数，不看"能不能动手"。
+    #   首板（boards == 1）不在此列：那是体系的核心打法（首板次日竞价）。
+    try:
+        max_boards = int(a.get("max_candidate_boards", 1))
+    except (TypeError, ValueError):
+        max_boards = 1
 
     wg = a.get("weight_graph", 35)
     wp = a.get("weight_price_mv", 30)
@@ -975,6 +986,8 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
             continue
         if universe.board_of(code) in ex_boards:
             continue
+        if int(zt_map.get(code, {}).get("boards", 0) or 0) > max_boards:
+            continue                      # 连板股不进候选（见上方 max_candidate_boards）
         to = snap.get("turnover", 0)
         if not preopen:
             if to < min_to or to > max_to:

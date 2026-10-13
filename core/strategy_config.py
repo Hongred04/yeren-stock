@@ -165,6 +165,10 @@ PRESETS: dict[str, dict] = {
             "min_turnover": 1.0,              # 最低换手%
             "max_turnover": 25.0,
             "exclude_st": True,
+            # 候选股最多允许的**当日连板数**（默认 1 = 只放首板及尚未涨停的票）。
+            # 连板 ≥2 的票体系一律"不接力/不追"，放进候选列表会被读成"推荐打 2 板"，
+            # 与"买首板"的口径自相矛盾（用户 10-13 反馈）。
+            "max_candidate_boards": 1,
             "weight_graph": 35, "weight_price_mv": 30, "weight_imagination": 35,
         },
         "M5_position": {

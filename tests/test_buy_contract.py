@@ -13,6 +13,12 @@
      "补另一半"（原文的逻辑错误）。
   4. 当日涨停时首板仍给 B1（次日口径），同时给一条 block 提示，
      两者并存且互不矛盾。
+
+  5. 【10-13 补】候选/买点的**状态自洽**：退潮期只给**真首板**可买（kind=buy
+     且写明"不追当日价、按次日口径"）；尚未涨停的票只能给 kind=watch 的
+     "等首板"观察提示，**不得冒充可买**；连板 ≥2 一律 block。
+     （原实现 `boards <= 1` 把未涨停的票也标成 kind=buy 的「退潮试错仓」，
+     而它的文案却写着"不是首板就别碰" —— 候选列表因此整屏是马后炮。）
 """
 from __future__ import annotations
 
@@ -139,8 +145,62 @@ def main():
     ok(not any(s.get("type") == "B2" for s in sig),
        f"现价在 10 日线下方 → 不出 B2（实际 {[s.get('type') for s in sig]}）")
 
+    test_candidate_state_consistency()
+
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
+
+
+def test_candidate_state_consistency():
+    """[5] 买点与票的**当前状态**必须自洽（退潮期只认首板）。"""
+    print("\n[5] 退潮期：可买只给真首板，未涨停只能「等首板」观察")
+    ebb = sent("ebb", can_trade=False, trial_only=True)
+
+    s0 = trading.buy_signals(stock(0, pct=1.2), BARS, ebb, VOL, CFG)
+    ks0 = kinds(s0)
+    ok(not any(k[1] == "buy" for k in ks0),
+       f"未涨停(0板) → 不给 kind=buy（原来会给 B0 可买）：{ks0}")
+    ok(any(k[1] == "watch" for k in ks0),
+       f"未涨停(0板) → 给 kind=watch 的观察提示：{ks0}")
+
+    s1 = trading.buy_signals(stock(1, pct=10.0), BARS, ebb, VOL, CFG)
+    ks1 = kinds(s1)
+    ok(any(k[1] == "buy" for k in ks1), f"首板(1板) → 给可执行买点：{ks1}")
+    ok("不追当日价" in s1[0]["entry"],
+       "首板已封板 → 必须写明「不追当日价」（否则等于让用户追明牌）")
+    ok("次日" in s1[0]["entry"], "首板已封板 → 明确是次日竞价口径")
+
+    s3 = trading.buy_signals(stock(3, pct=10.0), BARS, ebb, VOL, CFG)
+    ks3 = kinds(s3)
+    ok(all(k[1] == "block" for k in ks3), f"3 连板 → 只有 block：{ks3}")
+
+    print("\n[5b] screen：候选股不得含连板 ≥2（体系一律不接力）")
+    from core import engine
+    cfg2 = dict(CFG)
+    a = dict((cfg2.get("M4_aesthetic") or {}))
+    a.update({"enabled": True, "price_min": 1, "price_max": 100, "mv_max": 100000,
+              "min_turnover": 0.1, "max_turnover": 100, "exclude_st": False,
+              "weight_graph": 35, "weight_price_mv": 30, "weight_imagination": 35})
+    cfg2["M4_aesthetic"] = a
+    snaps, kl = {}, {}
+    for i, bd in enumerate((0, 1, 2, 3)):
+        code = f"sh60000{i}"
+        snaps[code] = {"code": code, "name": f"票{i}", "price": 8.0,
+                       "pct": 10.0 if bd else 1.0,
+                       "turnover": 5.0, "amount": 1e8, "float_mv": 3e9}
+        kl[code] = BARS
+    zt = [{"code": "sh600001", "boards": 1, "sector": "电池"},
+          {"code": "sh600002", "boards": 2, "sector": "电池"},
+          {"code": "sh600003", "boards": 3, "sector": "电池"}]
+    mkt = {"stage": "probe", "label": "d", "risk": "low", "focus": []}
+    sel = engine.screen(cfg2, snaps, kl, zt, mkt, VOL, sent("probe"), top_n=10)
+    got = {p["code"]: int(p.get("zt_boards") or 0) for p in sel}
+    ok(all(v <= 1 for v in got.values()),
+       f"候选里最大连板数 ≤ 1：{got}")
+    ok("sh600002" not in got and "sh600003" not in got, "2/3 连板被排除在候选外")
+    a["max_candidate_boards"] = 3
+    sel2 = engine.screen(cfg2, snaps, kl, zt, mkt, VOL, sent("probe"), top_n=10)
+    ok(len(sel2) == 4, f"把上限调到 3 → 连板票可入选（可配置，得到 {len(sel2)} 只）")
 
 
 if __name__ == "__main__":

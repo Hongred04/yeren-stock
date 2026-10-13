@@ -178,18 +178,40 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
         if sentiment.get("trial_only") and not dry:
             tw = float(sentiment.get("ebb_trial_weight") or 0.05)
             boards = int(stock.get("zt_boards") or 0)
-            if boards <= 1:
+            # ★ 退潮期的"可买"只给**真首板**（boards == 1，即今天已封板的第一个板）。
+            #   原来写的是 `boards <= 1` —— 把**尚未涨停**的票也标成 kind=buy 的
+            #   「退潮试错仓」，而这条买点自己的文案却写着"只做首板……不是首板就别碰"：
+            #   候选列表于是一整屏都是"不是首板就别碰"的票，用户读到的就是
+            #   "推荐了一堆马后炮"（10-13 反馈）。
+            if boards == 1:
                 return [{
-                    "type": "B0", "name": "退潮试错仓", "priority": "B",
+                    "type": "B0", "name": "退潮试错仓 · 首板", "priority": "B",
                     "kind": "buy", "style": "short",
-                    "trigger": f"退潮期试错：{sentiment.get('note') or ''}",
-                    "entry": (f"只做首板，单笔不超过 {pos_cn(tw)}；"
-                              f"不是首板就别碰"),
+                    "trigger": f"退潮期只做首板（{sentiment.get('note') or ''}）",
+                    "entry": (f"只做首板：今日已封板 → **不追当日价**，"
+                              f"按次日竞价口径执行（高开 0~3% 是预期内、"
+                              f"＞5% 属抢筹过头）；单笔不超过 {pos_cn(tw)}"),
                     "stop": "跌破买入价无条件走 —— 退潮期不留恋、不等反包",
                     "target": "小赚即走，不奢望连板",
                     "position": f"{pos_cn(tw)}（试错）",
                     "note": ("退潮期的试错仓是保持盘感用的，不是抄底；"
                              "宁可错过不可做错"),
+                    "trial": True,
+                }]
+            if boards == 0:
+                # 尚未涨停 → **今天没有可执行的买点**。给"等首板"的观察提示，
+                # 而不是把它标成买入。这类票不进候选（候选 = 有可执行买点的票）。
+                return [{
+                    "type": "W0", "name": "等首板（退潮期只打首板）",
+                    "priority": "C", "kind": "watch", "style": "short",
+                    "trigger": "退潮期只做首板试错 —— 该股当前尚未涨停",
+                    "entry": (f"留在观察里等它自己走出首板；不是首板就别碰。"
+                              f"首板当日封板后按次日竞价口径，单笔 ≤{pos_cn(tw)}"),
+                    "stop": "—",
+                    "target": "—",
+                    "position": "0%（当前不可买）",
+                    "note": ("退潮期用一个极小仓位保持盘感，宁可错过不可做错；"
+                             "先等首板，别提前埋伏"),
                     "trial": True,
                 }]
             return [{
