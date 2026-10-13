@@ -114,6 +114,45 @@ def _traded_fraction(tmin: int) -> float:
     return 1.0
 
 
+# ★ 相对量能（分位 + 环比）—— 修「只看绝对阈值」的根子问题（v1.26.0）
+#   绝对阈值（15000/12000/8000 亿）只能回答「钱够不够撬动大票」，
+#   回答不了「这点钱相对最近是多是少」。只比绝对值会把**放量后的回落**
+#   判成"峰值量能"：2026-10-12 两市 15378 亿（近 3 日最低、较 10-09 的
+#   19006 亿回落 19%）被判峰值 —— 而同一天沪指量能处于近 29 日的 **27.6%
+#   分位**（底部三分之一），标签与自己的数据直接打架（用户实测）。
+#   「峰值」是相对概念：必须同时满足「绝对值够」+「相对位置高」+「不缩量」。
+def _relative_volume(hist: list[dict], frac: float = 1.0,
+                     lookback: int = 20) -> tuple[float | None, float | None, str]:
+    """用沪指日K量能序列算当前量能的**相对位置**与**相对近期中位数的倍数**。
+
+    为什么用沪指日K而不是本地成交额档案：本地档案才积累 3 天（样本太薄），
+    而日K接口一次就能拿到 20+ 根；且这里只做**纯相对**比较（分位/比值），
+    沪市量能与两市成交额同向，不需要"手 → 亿元"的换算，天然规避量纲问题。
+
+      rel   = 当前（折算到全天口径）量能在近 lookback 日中的分位 0~1
+      trend = 当前（折算到全天口径）量能 ÷ 近 lookback 日中位数
+
+    frac：盘中已交易占比。盘中最后一根日K是**半天**的量，必须先折算到全天
+          口径才能和历史整根日K比 —— 否则早盘必然被判成"缩量"（与成交额
+          折算同一个道理）。
+    样本不足（< 6 根）返回 (None, None, 原因)，调用方退回纯绝对阈值判定。
+    """
+    bars = [b for b in (hist or []) if b.get("volume")]
+    if len(bars) < 6:
+        return None, None, "样本不足"
+    lb = max(2, min(int(lookback or 20), len(bars) - 1))
+    prev = [float(b["volume"]) for b in bars[-lb - 1:-1]]
+    f = max(min(float(frac or 1.0), 1.0), 0.02)
+    cur = float(bars[-1]["volume"]) / f
+    if not prev or cur <= 0:
+        return None, None, "样本不足"
+    rel = sum(1 for x in prev if x <= cur) / len(prev)
+    s = sorted(prev)
+    n = len(s)
+    med = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+    return rel, (cur / med if med > 0 else None), f"近{lb}日"
+
+
 def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                     session: dict | None = None,
                     fallback_amount: float = 0.0,
@@ -138,12 +177,15 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     返回 None，界面只报"已成交"（事实）+ "与近期同期的节奏对比"（也是事实）；
     模式判定仍按折算走，但明确标成"暂判"。收盘后 `amount` 才是全天终值。
     ref_amount：近 N 个已收盘交易日全天额中位数，用于算节奏倍数。
+
+    hist：沪指日K（近 N 日）—— 供相对量能层算分位与环比，见 _relative_volume。
     """
     v = cfg.get("M2_volume", {})
     if not v.get("enabled", True):
         return {"mode": "disabled", "label": "量能模块已关闭", "advice": "自行判断",
                 "short_only": False, "amount": None, "cum_amount": 0.0,
-                "intraday": False, "pace": None, "pace_txt": "", "basis": ""}
+                "intraday": False, "pace": None, "pace_txt": "", "basis": "",
+                "rel": None, "trend": None, "rel_txt": "", "gauge": None}
 
     amt_raw = market_amount / 1e8 if market_amount > 1e5 else market_amount
     phase = (session or {}).get("phase", "")
@@ -164,6 +206,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 "amount": None, "cum_amount": 0.0, "intraday": False,
                 "pace": None, "pace_txt": "", "raw_amount": round(amt_raw, 0),
                 "basis": "无（当日数据未形成）", "red_flag": "",
+                "rel": None, "trend": None, "rel_txt": "", "gauge": None,
             }
     elif phase in ("just_closed", "after_close"):
         amt = amt_raw
@@ -179,6 +222,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 "amount": None, "cum_amount": 0.0, "intraday": True,
                 "pace": None, "pace_txt": "", "raw_amount": 0,
                 "basis": "无（盘中数据未就绪）", "red_flag": "",
+                "rel": None, "trend": None, "rel_txt": "", "gauge": None,
             }
         frac_static = max(_traded_fraction(tmin), 0.02)
         frac, frac_src = frac_static, "经验曲线"
@@ -214,19 +258,76 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         else:
             pace_txt = "同期基准积累中（需 3 个以上交易日）"
 
-    peak = v.get("peak_threshold", 15000)
-    comfort = v.get("comfort_threshold", 5000)
-    shrink = v.get("shrink_threshold", 12000)
+    try:
+        peak = float(v.get("peak_threshold", 15000) or 15000)
+        comfort = float(v.get("comfort_threshold", 12000) or 12000)
+        shrink = float(v.get("shrink_threshold", 8000) or 8000)
+    except (TypeError, ValueError):
+        peak, comfort, shrink = 15000.0, 12000.0, 8000.0
+    # 阶梯必须单调（peak ≥ comfort ≥ shrink）。历史存档里 comfort=5000 反而
+    # 低于 shrink=12000，而分支按 comfort→shrink 顺序判断，结果整个
+    # [comfort, peak) 区间被 comfort 吃掉、`shrink_short` 成了**永不触发的
+    # 死分支**（实测 8000 亿被报"量能舒适·游资具备轮动能力"）。就地纠正，
+    # 并让配置加载层同步迁移存档（见 strategy_config.load_config）。
+    _ladder_fixed = not (peak >= comfort >= shrink)
+    if _ladder_fixed:
+        peak, comfort, shrink = sorted((peak, comfort, shrink), reverse=True)
 
+    # ---- ① 绝对档位：钱够不够撬动大票（物理约束，决定上限）----
     if amt >= peak:
+        tier = 3
+    elif amt >= comfort:
+        tier = 2
+    elif amt >= shrink:
+        tier = 1
+    else:
+        tier = 0
+
+    # ---- ② 相对修正：只在"相对明显偏低"时**降档**（绝不升档）----
+    # 绝对阈值回答"够不够撬动大票"，相对位置回答"这点钱相对最近是多是少"。
+    # 只降不升：8000 亿即便分位再高也不该被叫"峰值量能"（那是更荒谬的错）。
+    lb = int(v.get("lookback", 20) or 20)
+    rel, trend, rel_src = _relative_volume(
+        hist, frac if intraday else 1.0, lookback=lb)
+    try:
+        peak_pct = float(v.get("peak_pct", 0.80))
+        peak_trend_min = float(v.get("peak_trend_min", 1.00))
+        shrink_pct = float(v.get("shrink_pct", 0.45))
+    except (TypeError, ValueError):
+        peak_pct, peak_trend_min, shrink_pct = 0.80, 1.00, 0.45
+
+    _TIER_CN = {3: "峰值量能", 2: "量能舒适", 1: "缩量存量", 0: "极度缩量"}
+    rel_adj = ""
+    if rel is not None:
+        _pos = f"{rel_src}的{rel*100:.0f}%分位"
+        _tr = f"、为中位数的{trend*100:.0f}%" if trend is not None else ""
+        _orig = tier
+        # 两条降档判据各自独立判断（不是 if/elif）—— 峰值档既可能只降到
+        # "舒适"（放量后回落），也可能一步降到"缩量存量"（已缩到低位），
+        # 用 elif 会把后一步吃掉（实测 15378 亿应落到"缩量存量"却停在"舒适"）。
+        if tier == 3 and (rel < peak_pct
+                          or (trend is not None and trend < peak_trend_min)):
+            tier = 2
+        if tier == 2 and rel <= shrink_pct:
+            tier = 1
+        if tier != _orig:
+            rel_adj = (f"成交额绝对值{'达标' if _orig == 3 else '够'}"
+                       f"（{amt:.0f}亿"
+                       + (f" ≥ {int(peak)}亿" if _orig == 3 else "")
+                       + f"），但仅处{_pos}{_tr} —— 相对近期明显偏低，"
+                       + ("不构成峰值量能，" if _orig == 3 else "")
+                       + f"由{_TIER_CN[_orig]}降为{_TIER_CN[tier]}")
+
+    if tier == 3:
         mode = "peak_swing"
         advice = "资金进得去大市值，做中长线波段/趋势票"
         short_only = False
-    elif amt >= comfort:
+    elif tier == 2:
         mode = "comfort_short"
-        advice = f"量能回到舒适区（{int(comfort)}亿以上），游资具备轮动能力，题材可做"
+        advice = (f"量能处于舒适区（{int(comfort)}亿以上），"
+                  f"游资具备轮动能力，题材可做")
         short_only = False
-    elif amt >= shrink:
+    elif tier == 1:
         mode = "shrink_short"
         advice = ("缩量存量，资金撬不动大票 —— 这时才切短线中小题材的应对打法"
                   "（平常中长线波段，不打板不做短线），并降低单票仓位")
@@ -235,6 +336,9 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         mode = "dry"
         advice = "极度缩量，量能不够说破大天都没用 —— 建议空仓等待量能恢复"
         short_only = True
+
+    if rel_adj:
+        advice = f"{rel_adj}；{advice}"
 
     # 极致缩量还红盘
     red_flag = ""
@@ -246,6 +350,12 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 advice = ("极致缩量还红盘 = 控盘好、散户90%套牢躺平 → "
                           "筹码结构好，可低吸；但这是缩量期的权宜打法，不是常态策略")
                 red_flag = "缩量红盘"
+
+    # 进度条标尺：交给后端算，前端不再写死"多少亿算满格"（原为 amount/180）。
+    if intraday:
+        gauge = min(100, round(pace * 55)) if pace is not None else None
+    else:
+        gauge = min(100, round(amt / max(peak * 1.2, 1.0) * 100))
 
     return {
         "mode": mode,
@@ -261,6 +371,14 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         "raw_amount": round(amt_raw, 0),
         "basis": basis,
         "red_flag": red_flag,
+        # 相对量能层：分位 / 相对中位数倍数 / 说明，供界面解释"为什么这么判"
+        "rel": None if rel is None else round(rel, 3),
+        "trend": None if trend is None else round(trend, 3),
+        "rel_txt": ("" if rel is None else
+                    f"{rel_src}分位 {rel*100:.0f}%"
+                    + (f"、为中位数 {trend*100:.0f}%" if trend is not None else "")),
+        "gauge": gauge,
+        "ladder_fixed": _ladder_fixed,        # 阈值曾倒挂并被就地纠正（存档待迁移）
     }
 
 
@@ -506,15 +624,22 @@ def _graph_score(bars: list[dict], code: str, cfg_a: dict) -> tuple[float, dict,
 
     # 前期跌幅（洗盘空间）：需要的是"回撤过、企稳"，而非一路新高
     # 创新高说明位置偏高、获利盘压力大，与"洗盘充分"相悖
-    if 10 <= dd <= 45:
+    # ★ 单位对齐（v1.26.0）：drawdown_from_high 返回的是**小数**（0.15 = 15%），
+    #   原来拿它直接和 10/45/60 这些**百分数**比 —— 小数最大只有 1，
+    #   于是 `10 <= dd <= 45` 与 `dd > 60` 是**永不命中的死分支**，而
+    #   `dd < 3` 恒成立：加 0.08 的"洗盘空间充分"永远给不出，同时**每一只**
+    #   票都被贴上"处于60日新高、位置偏高、获利盘压力大"的错误警示 ——
+    #   包括实际已回撤 40% 的票，且与同一函数给出的"深度底部"结论直接打架。
+    dd_pct = dd * 100
+    if 10 <= dd_pct <= 45:
         score += 0.08
-        reasons.append(f"距60日高回撤{dd*100:.0f}%，洗盘空间充分")
-    elif dd < 3:
+        reasons.append(f"距60日高回撤{dd_pct:.0f}%，洗盘空间充分")
+    elif dd_pct < 3:
         # 负向结论要进 warnings —— 详情页「为什么选它」列的是理由，
         # 把"位置偏高、获利盘压力大"写进理由列，等于自相矛盾
-        warns.append(f"处于60日新高（回撤{dd*100:.0f}%），位置偏高、获利盘压力大")
-    elif dd > 60:
-        warns.append(f"距高点回撤{dd*100:.0f}%，趋势已破，非洗盘而是走弱")
+        warns.append(f"处于60日新高（回撤{dd_pct:.0f}%），位置偏高、获利盘压力大")
+    elif dd_pct > 60:
+        warns.append(f"距高点回撤{dd_pct:.0f}%，趋势已破，非洗盘而是走弱")
 
     # 筹码分布量化（估算）：获利盘 / 成本乖离 / 集中度 —— 只做小权重加分与提示，
     # 不动选股主口径；详情页展示完整分布

@@ -19,10 +19,21 @@ data/market_amount.json
 data/fetch_memory.json
 data/market_amount_curve.json
 
+# 修复成交额锁死时留的本机数据快照（一次性排查备份，不入库）
+data/_backup_before_fix/
+
 # 个人持仓 / 自选（本地私有，别进 git）
 data/portfolio.json
 
-# 东财 Cookie（凭证，绝不进 git）
+# 代码→名称名单（加自选名称搜索的本地兜底；本机积累，换机会自动重建）
+data/name_index.json
+
+# 通达信选中的服务器（本机网络环境相关，换网络会自动重选）
+data/tdx_server.json
+
+# 东财 Cookie：功能已在 v1.29.0 移除（限流在连接层、配了没用）。
+# 本机若还留着这个文件也无人读取，可以自行删除；这里继续忽略，
+# 避免残留的凭证被误提交。
 data/eastmoney_cookie.txt
 
 # ── 安卓打包 ──

@@ -246,8 +246,18 @@ def _traps(entries: list[dict]) -> list[dict]:
     """
     by_key: dict[tuple, list[dict]] = {}
     for e in entries:
-        if e.get("status") in ("win", "loss"):
-            by_key.setdefault((e.get("signal"), e.get("signal_name")), []).append(e)
+        # ★ 状态口径修正（v1.28.0）：`_settle_one` 只会写
+        #   open / settled / partial / skip —— 从来没有 win / loss（那是更早版本的
+        #   设想，全代码库搜不到第二处）。原来按 ("win","loss") 过滤 → by_key 恒空
+        #   → 踩坑雷达**永远返回空列表**，前端「反复踩同一个坑」那张卡片从未显示过。
+        #   正确口径 = "已结算且有 1 日收益"：settled（1/3/5 日都出来了）+
+        #   partial（已有 1/3 日、5 日还没到，ret1 已经能算）。skip 是买不到/停牌，
+        #   不参与胜率统计。
+        if e.get("status") not in ("settled", "partial"):
+            continue
+        if e.get("ret1") is None:
+            continue
+        by_key.setdefault((e.get("signal"), e.get("signal_name")), []).append(e)
     out = []
     for (t, name), g in by_key.items():
         g = sorted(g, key=lambda e: (e.get("date", ""), e.get("id", "")),

@@ -11,6 +11,9 @@
      东财池接口 `data=null` 是失败，不是"今天没有跌停"；
   ③ 两市成交额取**当日高水位**（累计额只会增不会减，能挡住"只回上证没回深证"的腰斩）；
   ④ 盘中预估全天额用**近 N 日实测占比**校准，样本不足才退回经验曲线。
+  ⑤ 高水位只收「当日真实累计」—— 盘前/集合竞价的指数快照给的是**上一交易日**
+     全天额，绝不能写进今日档案（否则今日一开盘就被昨收全天额锁死）；
+     且"上一交易日基准"不得取当日自己的盘中快照。
 """
 from __future__ import annotations
 
@@ -114,6 +117,34 @@ def main():
     ok(c == 19500.0, "更大的值正常抬升")
     ok(ds.market_amount_hwm("20261013", 100.0) == 100.0, "换日重新计（不串日期）")
 
+    print("\n[5b] 盘前读数不得写进「今日高水位」（2026-10-13 实测：昨收被锁死）")
+    # 盘前指数快照返回的是**上一交易日**全天额（15378 亿）。旧实现不看时段直接取
+    # 高水位 → 今日开盘就被昨收全天额锁死，11:29 实际已成交仅 9987 亿仍显示 15378。
+    clean()
+    r_pre = ds.market_amount_hwm("20261013", 15378.3, live=False)
+    ok(r_pre == 0.0, f"盘前读数 → 返回 0，不入档（得到 {r_pre}）")
+    ok(ds._mem_read("mkt_amount", "20261013") == (None, 0), "今日高水位档案保持为空")
+    r_am = ds.market_amount_hwm("20261013", 9987.06)
+    ok(abs(r_am - 9987.06) < 0.01, f"早盘真实读数正常入库（{r_am}）")
+    # 自愈：旧格式（裸数值）无法证明是"今日累计" → 丢弃重算，不被 max 锁死
+    ds._mem.clear()
+    ds._mem_write("mkt_amount", "20261013", 15378.3)
+    r_heal = ds.market_amount_hwm("20261013", 9987.06)
+    ok(abs(r_heal - 9987.06) < 0.01,
+       f"历史遗留的裸数值污染值被丢弃并重算（得到 {r_heal}，而非 15378.3）")
+
+    print("\n[5c] 上一交易日基准不得取「当日自己的盘中快照」")
+    ds.save_market_amount("20261012", 15378.3, final=True)
+    ds.save_market_amount("20261013", 9987.06, final=False)   # 今天的盘中快照
+    fb = ds.load_last_amount_meta("20261013")
+    ok(fb["date"] == "20261012",
+       f"当日盘中快照不算「上一交易日」（得到 {fb['date']}）")
+    ok(fb["final"] is True, "取到的是完整交易日（final=True）")
+    # 但当日已收盘的完整记录必须能被采用（周末 real_date 就落在最近收盘日）
+    ds.save_market_amount("20261013", 17000.0, final=True)
+    ok(ds.load_last_amount_meta("20261013")["date"] == "20261013",
+       "当日已收盘（final=True）→ 可作完整交易日被采用")
+
     print("\n[6] 日内量能曲线：近 N 日实测占比（样本不足退回经验曲线）")
     clean()
     # 造 3 天样本：全天 1000 亿，截至 60 分钟分别成交 280 / 300 / 320 亿
@@ -133,8 +164,12 @@ def main():
     ok(v["intraday"] is True, "标记为盘中")
     ok(v["pace"] is None and "积累中" in v["pace_txt"], "同期基准不够时明说在积累")
     ok("暂判" in v["basis"] and "累计" in v["basis"], f"口径写明是累计口径+暂判：{v['basis']}")
-    ok(v["mode"] == "comfort_short",
-       f"3000 亿÷30% = 10000 亿 → 舒适区档（得到 {v['mode']}）")
+    # ★ 期望值随 v1.26.0 的量能阶梯修正而更新：老配置 comfort=5000 是**倒挂**的
+    #   （低于 shrink=12000），会把 10000 亿判成"量能舒适"；修正后阶梯为
+    #   峰值 15000 ≥ 舒适 12000 ≥ 缩量 8000，10000 亿正确落在"缩量存量"。
+    #   本用例传 hist=[]，相对口径缺样本 → 退回纯绝对阈值判定。
+    ok(v["mode"] == "shrink_short",
+       f"3000 亿÷30% = 10000 亿 → 缩量存量档（得到 {v['mode']}）")
     v_big = engine.evaluate_volume(cfg, 6000.0, [], session=sess, frac_hint=0.30)
     ok(v_big["mode"] == "peak_swing",
        f"6000 亿÷30% = 20000 亿 → 峰值档（得到 {v_big['mode']}）")

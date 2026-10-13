@@ -205,6 +205,21 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:20px 0 6px;line-
 .fin{width:100%;background:var(--sk);border:1px solid var(--line);border-radius:10px;
   padding:11px 13px;font-size:15px;font-family:inherit;color:var(--tx);margin-top:5px}
 .fin:focus{outline:none;border-color:var(--blu)}
+/* 加自选搜索：名称/拼音关键词的候选列表（触摸友好，行高放大） */
+.sugbox{margin-top:8px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  background:var(--card);display:none}
+.sugbox.on{display:block}
+.sugbox .row{display:flex;align-items:center;gap:8px;padding:12px 13px;font-size:14.5px;
+  border-bottom:1px solid var(--line2)}
+.sugbox .row:last-child{border-bottom:0}
+.sugbox .row:active{background:var(--sk)}
+.sugbox .row.dis{opacity:.5}
+.sugbox .nm{font-weight:700}
+.sugbox .nm b{color:var(--org)}
+.sugbox .cd{font-size:12px;color:var(--tx3);font-family:var(--mono)}
+.sugbox .bd{margin-left:auto;font-size:11.5px;color:var(--tx3)}
+.sugbox .tag{font-size:11px;color:var(--grn);font-weight:800}
+.sugbox .msg{padding:12px 13px;font-size:12.5px;color:var(--tx3);line-height:1.7}
 .capitem{padding:6px 0;border-bottom:1px solid var(--line2);font-size:12.5px;line-height:1.6}
 .capitem:last-child{border-bottom:0}
 .capitem .k3{font-weight:800;margin-right:6px}
@@ -454,44 +469,47 @@ function _afterFirstRender(){
   setTimeout(maybePromptEm,2000);
 }
 
-/* ── 数据源抽屉：状态 / 打开东财 / 重试 / Cookie ── */
+/* ── 数据源抽屉：列出**所有源**的实时状态 + 东财恢复入口 ──
+   状态与桌面端同一个后端出处（GET /api/sources 的 items/groups/summary），
+   取自最近一次真实使用，不额外发探测请求。 */
+const SRC_ST_COL={ok:'var(--grn)',degraded:'var(--org)',blocked:'var(--red)',
+                  down:'var(--red)',disabled:'var(--tx3)',unused:'var(--tx3)'};
+const SRC_ST_BG={ok:'var(--grn-bg)',degraded:'var(--org-bg)',blocked:'var(--red-bg)',
+                 down:'var(--red-bg)',disabled:'var(--sk)',unused:'var(--sk)'};
+const SRC_ST_ORDER=[['ok','正常'],['degraded','降级'],['blocked','受限'],
+                    ['down','不通'],['disabled','未启用'],['unused','未使用']];
+function srcBadge(k,txt){
+  return `<span style="display:inline-block;padding:1px 8px;border-radius:20px;
+    font-size:11px;font-weight:800;min-width:44px;text-align:center;
+    background:${SRC_ST_BG[k]||'var(--sk)'};color:${SRC_ST_COL[k]||'var(--tx3)'}">${esc(txt)}</span>`;
+}
 async function openSrcSheet(){
   await fetchSources();
-  const st=srcState(), c=(SRCINFO&&SRCINFO.cookie)||{},
-        b=(SRCINFO&&SRCINFO.blocked)||[], p2=(SRCINFO&&SRCINFO.push2)||{};
+  const st=srcState();
+  const s=(SRCINFO&&SRCINFO.summary)||{}, groups=(SRCINFO&&SRCINFO.groups)||[];
   $('sheetBody').innerHTML=`<h3>数据源</h3>
-    <div class="sect"><div class="k">当前状态</div>
+    <div class="sect"><div class="k">概览</div>
       <div class="item">${st.any
-        ? '⚠️ '+esc(st.who)+'接口暂时受限 —— 已自动切换备用源，结论不受影响。'
-        : '✅ 数据源正常，无需处理。'}</div>
-      ${b.length?`<div class="item fl" style="font-size:11.5px">${
-        b.map(x=>esc(srcVendor(x.api))+' · 约 '+Math.max(1,Math.ceil(x.seconds_left/60))+' 分钟后自动恢复').join('<br>')}</div>`:''}
-      ${p2.budget_max?`<div class="item fl" style="font-size:11.5px">东财本分钟额度 ${
-        p2.budget_used||0}/${p2.budget_max}${Number(p2.cooling_seconds||0)>0?' · 冷却中':''}</div>`:''}
-      ${st.degraded.length?`<div class="item" style="font-size:11.5px">
-        <b>本轮降级：</b>${st.degraded.map(d=>esc(d.label||d.key)
-          +(d.stale_seconds?`（${d.stale_seconds}秒前）`:'')).join('、')}</div>`:''}
+        ? '⚠️ '+esc(st.who)+'暂时受限 —— 已自动切备用源'
+        : '✅ 全部正常'}</div>
+      <div class="item" style="display:flex;gap:6px;flex-wrap:wrap">${
+        SRC_ST_ORDER.filter(([k])=>s[k]).map(([k,lb])=>srcBadge(k,lb+' '+s[k])).join('')}</div>
     </div>
-    <div class="sect"><div class="k">东财被限速怎么办</div>
-      <div class="item" style="font-size:12.5px">东财对被标记的 IP 会在网页上弹<b>滑块验证</b>，程序绕不过。
-        打开东财网页完成验证，回来点「我已验证，重试」即可立刻恢复。</div>
+    ${groups.map(g=>`<div class="sect"><div class="k">${esc(g.name)}</div>
+      ${g.items.map(x=>`<div class="item" style="display:flex;gap:8px;align-items:flex-start;
+        padding:7px 0;border-bottom:1px solid var(--line2)">
+        ${srcBadge(x.state,x.state_cn)}
+        <span style="flex:1">
+          <b style="font-size:13px">${esc(x.name)}</b>
+          <span class="fl" style="font-size:11px"> ${esc(x.vendor)}</span>
+          <div class="fl" style="font-size:11px;line-height:1.6">${esc(x.detail)}</div>
+        </span></div>`).join('')}</div>`).join('')}
+    <div class="sect"><div class="k">东财被限速</div>
+      <div class="item fl" style="font-size:12px">被标记的 IP 会在网页上弹滑块验证，程序绕不过。</div>
       <button class="btnmain" style="width:100%;margin-top:10px" onclick="openEmPage()">打开东财网页（滑块验证）</button>
       <button class="btnghost" style="width:100%;margin-top:8px" onclick="retryAfterVerify()">我已验证，重试</button>
-    </div>
-    <div class="sect"><div class="k">登录 Cookie（可选）</div>
-      <div class="item fl" style="font-size:12px">${c.configured
-        ? '已配置 · '+esc(c.source||'')+' · '+c.length+' 字符'
-        : '未配置 —— 不影响使用；配了东财部分接口频控更宽'}</div>
-      <input class="fin" id="srcCookieInput" placeholder="粘贴 eastmoney.com 的 Cookie（留空=清除）"
-        autocapitalize="off" autocomplete="off">
-      <button class="btnghost" style="width:100%;margin-top:8px" onclick="saveSrcCookie()">保存 Cookie</button>
     </div>`;
   _sheetOpen();
-}
-async function saveSrcCookie(){
-  const el=$('srcCookieInput');
-  const j=await srcCmd({action:'save_cookie',cookie:el?el.value:''});
-  if(j) await openSrcSheet();
 }
 async function srcCmd(payload){
   try{
@@ -679,6 +697,40 @@ function render(fromCache,ts){
           out.watch.slice(0,4).map(w=>`<li>${esc(w)}</li>`).join('')}</ul>`:''}
       </div>`;
   }
+  /* E5 低位承接方向：退潮期 + 存量博弈 + 机构净卖出 同时成立才出
+     （机构在高位兑现的钱可能去哪 —— 小波段定位，只用试错仓） */
+  const rb=d.rebound||{};
+  if(rb.enabled){
+    const rbGates=Object.values(rb.gate||{});
+    if(!rb.active){
+      t1+=`<h2>低位承接方向 · 本轮不适用</h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(rb.reason||'')}</div>
+        ${rbGates.map(g=>`<div class="dt" style="margin-top:3px">${g.ok?'✅':'⛔'} ${esc(g.txt||'')}</div>`).join('')}
+      </div>`;
+    }else{
+      t1+=`<h2>低位承接方向 <span class="cnt">机构兑现的钱去哪</span></h2><div class="card">
+        ${rbGates.map(g=>`<div class="dt" style="margin-top:3px">${g.ok?'✅':'⛔'} ${esc(g.txt||'')}</div>`).join('')}
+        <div class="fl" style="font-size:12.5px;margin-top:8px">${esc(rb.summary||'')}</div>
+        ${(rb.candidates||[]).map(c=>`<div style="margin-top:10px;padding-top:9px;
+          border-top:1px solid var(--line2)">
+          <div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap">
+            <b style="font-size:14.5px">${esc(c.name)}</b>
+            ${c.role?`<span class="cnt">${esc(c.role)}</span>`:''}
+            <span class="fl" style="font-size:12px">评分 ${c.score}</span></div>
+          <div class="fl" style="font-size:12.5px;margin-top:3px">
+            今日 <span class="${c.pct>=0?'up':'dn'}">${c.pct>=0?'+':''}${c.pct}%</span> ·
+            主力 <span class="${c.main>=0?'up':'dn'}">${c.main>=0?'+':''}${c.main}亿</span> ·
+            ${c.streak<=1?'首日净流入':'连续'+c.streak+'日'} ·
+            ${c.cum==null?'位置无归档':'近3日 '+(c.cum>=0?'+':'')+c.cum+'%'}
+          </div>
+          <div class="dt" style="margin-top:3px">${esc((c.tags||[]).join(' · '))}</div>
+          ${c.catalyst?`<div class="dt" style="margin-top:3px">催化：${esc(c.catalyst)}</div>`:''}
+          <div class="dt" style="margin-top:4px;color:var(--org)">${esc(c.how||'')}<br>${esc(c.size||'')}</div>
+        </div>`).join('')}
+        <div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:8px">${esc(rb.note||'')}</div>
+      </div>`;
+    }
+  }
   t1+=`<footer>扫描 ${m.scanned||'—'} 只 · ${m.elapsed||'—'} 秒 · 归档 ${hist.days||'—'} 天<br>
     数据源：东财/腾讯/财联社/开盘红 ·
     <span style="color:var(--blu);font-weight:700" onclick="openSrcSheet()">数据源设置</span><br>
@@ -712,6 +764,21 @@ function render(fromCache,ts){
     t2+=`<h2>最强板块</h2><div class="card">
       <div class="theme" style="font-size:16px">${esc(st.name)}</div>
       ${(st.facts||[]).length?`<p>${(st.facts||[]).map(f=>esc(f)).join(' · ')}</p>`:''}
+    </div>`;
+  }
+  // 板块轮动（近 N 日每日领涨板块）—— 看"资金从哪挪到哪"。抓不到就没有这块。
+  const rot=(sec.rotation||[]).filter(d=>d&&(d.plates||[]).length);
+  if(rot.length){
+    const nm=d=>(d.plates||[]).slice(0,5).map(p=>p.name);
+    const last=rot[rot.length-1], prev=rot.length>1?rot[rot.length-2]:null;
+    const prevSet=new Set(prev?nm(prev):[]);
+    const fresh=prev?nm(last).filter(n=>!prevSet.has(n)):[];
+    t2+=`<h2>板块轮动</h2><div class="card">
+      ${rot.slice(-3).map(d=>`<div style="display:flex;gap:8px;padding:7px 0;
+        border-bottom:1px solid var(--line2);font-size:13.5px">
+        <span class="fl" style="min-width:76px">${esc(d.date||'')}</span>
+        <span style="flex:1;line-height:1.5">${nm(d).map(esc).join(' · ')}</span></div>`).join('')}
+      ${fresh.length?`<p style="margin-top:8px">最新一日新进：<b style="color:var(--org)">${esc(fresh.join('、'))}</b></p>`:''}
     </div>`;
   }
   const cap=fl.capital||{};
@@ -1052,15 +1119,74 @@ function openHoldForm(){
   _sheetOpen();
 }
 function openWatchForm(){
+  // 名称/拼音搜索为主，代码照旧可输（输 6 位数字或 sh600519 会被就地识别）
   $('sheetBody').innerHTML=`<h3>加自选</h3>
     <div class="sect">
-      <div class="k">股票代码（必填）</div>
-      <input class="fin" id="fCode" placeholder="sh600519 / sz000001" autocapitalize="off" autocomplete="off">
-      <div class="k" style="margin-top:10px">名称（可留空，自动取）</div>
-      <input class="fin" id="fName" placeholder="贵州茅台">
-      <button class="btnmain" style="width:100%;margin-top:14px" onclick="submitWatch()">保存</button>
+      <div class="k">股票名称 或 代码</div>
+      <input class="fin" id="fQuery" placeholder="如 茅台 / gzmt / 600519"
+             autocapitalize="off" autocomplete="off" oninput="onWlInput()"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();submitWatch();}">
+      <div class="sugbox" id="fSug"></div>
+      <button class="btnmain" style="width:100%;margin-top:14px" onclick="submitWatch()">加自选</button>
+      <div class="fl" style="font-size:11px;margin-top:8px;text-align:center;line-height:1.7">
+        输名称/拼音关键词搜（如 茅台 / gzmt），或直接输 6 位代码（如 600519）</div>
     </div>`;
   _sheetOpen();
+}
+// ── 加自选：名称搜索（代码仍可直接输） ──
+let _wlT=null, _wlSeq=0, _wlRows=[], _wlQ='';
+function wlClearSug(){ const el=$('fSug'); if(el){ el.classList.remove('on'); el.innerHTML=''; } }
+function wlHi(name,q){
+  const i=String(name).toLowerCase().indexOf(String(q||'').toLowerCase());
+  if(i<0||!q) return esc(name);
+  return esc(name.slice(0,i))+'<b>'+esc(name.slice(i,i+q.length))+'</b>'+esc(name.slice(i+q.length));
+}
+function wlInList(code){
+  const wl=((REPORT&&REPORT.portfolio)||{}).watchlist||[];
+  return wl.some(w=>w.code===code);
+}
+function renderWlSug(rows,q,note){
+  const el=$('fSug'); if(!el) return;
+  if(!rows.length){
+    el.innerHTML=`<div class="msg">${note?esc(note):'未匹配到股票 —— 试试更短的关键词（如「茅台」「银行」），或直接输 6 位代码'}</div>`;
+    el.classList.add('on'); return;
+  }
+  el.innerHTML=rows.map(r=>{
+    const has=wlInList(r.code);
+    return `<div class="row${has?' dis':''}" data-c="${esc(r.code)}" data-n="${esc(r.name)}">
+      <span class="nm">${wlHi(r.name,q)}</span>
+      <span class="cd">${esc(r.code)}</span>
+      <span class="bd">${esc(r.board||'')}</span>
+      ${has?'<span class="tag">已在自选</span>':''}</div>`;
+  }).join('');
+  el.classList.add('on');
+  el.querySelectorAll('.row').forEach(r=>r.onclick=()=>{
+    if(r.classList.contains('dis')){ toast('该股已在自选里了'); return; }
+    _addWatch(r.dataset.c, r.dataset.n);
+  });
+}
+async function wlSearch(q){
+  const seq=++_wlSeq;
+  try{
+    const r=await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=8',{cache:'no-store'});
+    const j=await r.json();
+    if(seq!==_wlSeq) return null;
+    return j||{ok:true,results:[],source:'error',note:'搜索接口返回异常'};
+  }catch(e){
+    if(seq!==_wlSeq) return null;
+    return {ok:false,results:[],source:'error',note:'搜索请求失败：'+e.message};
+  }
+}
+function onWlInput(){
+  const raw=($('fQuery').value||'').trim();
+  clearTimeout(_wlT);
+  if(!raw){ _wlRows=[]; wlClearSug(); return; }
+  if(/^(sh|sz|bj)\d{6}$/.test(normCode(raw))){ _wlRows=[]; wlClearSug(); return; }
+  _wlT=setTimeout(async ()=>{
+    const j=await wlSearch(raw); if(!j) return;
+    _wlRows=(j.results||[]); _wlQ=raw;
+    renderWlSug(_wlRows,raw,j.note);
+  },220);
 }
 async function _postPortfolio(body){
   const r=await fetch('/api/portfolio',{method:'POST',
@@ -1079,16 +1205,31 @@ async function submitHold(){
     closeSheet(); toast('已记入持仓');
   }catch(e){ toast('保存失败：'+e.message); }
 }
-async function submitWatch(){
-  const code=normCode($('fCode').value);
-  if(!/^(sh|sz|bj)\d{6}$/.test(code)){ toast('代码格式不对（如 sh600519）'); return; }
+async function _addWatch(code, name){
   try{
-    const j=await _postPortfolio({action:'watch_add', code,
-      name:($('fName').value||'').trim()});
+    const j=await _postPortfolio({action:'watch_add', code, name:name||''});
     if(j.error){ toast(j.error); return; }
     if(j.portfolio){ REPORT.portfolio=j.portfolio; saveCache(); render(false,'刚刚'); }
     closeSheet(); toast('已加入自选');
   }catch(e){ toast('保存失败：'+e.message); }
+}
+async function submitWatch(){
+  const raw=($('fQuery').value||'').trim();
+  if(!raw){ toast('请输入股票名称关键词或代码'); return; }
+  const code=normCode(raw);
+  if(/^(sh|sz|bj)\d{6}$/.test(code)) return _addWatch(code, '');   // 代码模式：保持原方式
+  const j=await wlSearch(raw);
+  if(!j){ toast('搜索失败，请重试'); return; }
+  const rows=(j.results||[]);
+  _wlRows=rows; _wlQ=raw;
+  if(!rows.length){
+    renderWlSug([],raw,j.note);
+    toast(j.note||'没匹配到股票 —— 试试更短的关键词，或直接输 6 位代码');
+    return;
+  }
+  if(rows.length===1) return _addWatch(rows[0].code, rows[0].name);
+  renderWlSug(rows,raw,j.note);           // 多条：列出来让用户点选
+  toast('匹配到 '+rows.length+' 只，点一下选择');
 }
 async function delRow(code, kind){
   const label=kind==='hold'?'持仓':'自选';

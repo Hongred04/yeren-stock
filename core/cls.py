@@ -295,7 +295,26 @@ _HEAT_ALIASES = {
     "专业连锁": ["商业零售", "零售"],
     "出版": ["短剧", "影视", "文化传媒"],
     "影视院线": ["短剧", "影视"],
+    # ★ 同义不同名（归一化只能去后缀，去不掉"叫法不同"）：
+    #   东财把酒类叫「酿酒概念」，财联社风口榜叫「白酒」，涨停池叫「白酒Ⅱ」。
+    #   键写成**归一后**的名字，match_heat 会拿归一结果再查一次。
+    "酿酒": ["白酒", "饮料制造"],
+    "食品饮料": ["白酒", "饮料制造"],
 }
+
+
+def _norm_board(name: str) -> str:
+    """板块名归一：去掉「概念/板块/指数/行业」后缀与 Ⅱ/Ⅲ 罗马数字后缀。
+
+    东财、财联社、涨停池是**三套命名体系**，同一个方向叫法不同：
+    东财「酿酒概念」、财联社「白酒」、涨停池「白酒Ⅱ」—— 不归一就永远匹配不上
+    （实测：白酒的催化挂在「白酒」上，「酿酒概念」拿不到，E5 因此漏掉了它）。
+    """
+    t = (name or "").strip()
+    for suf in ("概念", "板块", "指数", "行业"):
+        if t.endswith(suf) and len(t) > len(suf):
+            t = t[:-len(suf)]
+    return t.rstrip("ⅠⅡⅢⅣⅤⅥ")
 
 
 def _clip_sentence(text: str, limit: int = 78) -> str:
@@ -328,10 +347,27 @@ def match_heat(name: str, heats: list[dict] | None = None) -> dict | None:
     by_name = {h["name"]: h for h in heats}
     if name in by_name:
         return by_name[name]
-    for alias in _HEAT_ALIASES.get(name, []):
-        if alias in by_name:
-            return by_name[alias]
+    # 别名表：原名查一次，**归一后的名字再查一次**
+    # （表里的键写归一形式，才能同时命中「酿酒概念」和「酿酒」）
+    norm = _norm_board(name)
+    by_norm = {_norm_board(h["name"]): h for h in heats if h.get("name")}
+    for key in (name, norm):
+        if not key:
+            continue
+        for alias in _HEAT_ALIASES.get(key, []):
+            if alias in by_name:
+                return by_name[alias]
+            # 别名也要归一再比：「白酒」要能命中「白酒Ⅱ」
+            an = _norm_board(alias)
+            if an and an in by_norm:
+                return by_norm[an]
+    # 归一后再精确匹配（跨命名体系的后缀差异：「白酒Ⅱ」↔「白酒」）
+    if norm and norm != name and norm in by_norm:
+        return by_norm[norm]
     cands = [h for h in heats if name in h["name"] or h["name"] in name]
+    if not cands:
+        cands = [h for h in heats
+                 if norm and (_norm_board(h["name"]) in norm or norm in _norm_board(h["name"]))]
     if len(cands) == 1:
         return cands[0]
     return None

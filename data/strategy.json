@@ -11,9 +11,13 @@
   "M2_volume": {
     "enabled": true,
     "peak_threshold": 15000,
-    "comfort_threshold": 5000,
-    "shrink_threshold": 12000,
-    "shrink_red_flag": true
+    "comfort_threshold": 12000,
+    "shrink_threshold": 8000,
+    "shrink_red_flag": true,
+    "lookback": 20,
+    "peak_pct": 0.8,
+    "peak_trend_min": 1.0,
+    "shrink_pct": 0.45
   },
   "M3_sentiment": {
     "enabled": true,

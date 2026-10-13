@@ -129,7 +129,13 @@ class Handler(BaseHTTPRequestHandler):
         的滞回逻辑 —— 盘中会随市场变化，但不会一跳一变。
         """
         from datetime import datetime
-        cached = pipeline.get_cached() or {}
+        # ★ 不能只读内存缓存：它有 3 分钟 TTL（RESULT_TTL=180），过期后
+        #   `get_cached()` 返回 None —— `result_ts` 与 `picks` 双双丢失。
+        #   而前端的静默刷新**正是靠 result_ts 变化**来判断"该换上新报告了"：
+        #   丢了它，页面就永远停在打开时那一份上，行情也不再更新
+        #   （用户实测："没变化啊还是昨天的数据"）。
+        #   回退到磁盘那份 —— /api/result 本来就是这么兜底的，口径保持一致。
+        cached = pipeline.get_cached() or pipeline.get_disk_report() or {}
         cfg = sc.load_config()
         view = {"ts": time.time(),
                 "server_time": datetime.now().strftime("%H:%M:%S")}
@@ -267,17 +273,24 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/portfolio":
                 self._send_json(self._portfolio_view())
             elif path == "/api/sources":
-                self._send_json({"ok": True, "cookie": ds.cookie_status(),
-                                 "blocked": ds.em_blocked(),
-                                 "push2": ds.push2_status(),
-                                 # 通达信(mootdx)：K线首选源是否生效（装了+连得上才算）
-                                 "tdx": ds.tdx_status(),
-                                 # 数据健康度：哪些关键数据这轮降级/用的旧快照
-                                 "health": ds.data_health()})
+                # 所有数据源的实时状态（每个源一条：状态 / 说明 / 主机 / 用途）。
+                # 状态取自最近一次真实使用，不另发探测请求 —— 详见
+                # core/datasource.py 末尾的「数据源总览」。
+                self._send_json({"ok": True, **ds.sources_status()})
             elif path == "/api/stock":
                 # 单只股票详情：自选/持仓里点开不在当日候选中的股票也看得到
                 code = (qs.get("code") or [""])[0]
                 self._send_json(pipeline.stock_detail(code))
+            elif path == "/api/search":
+                # 名称/拼音关键词搜 A 股 —— 供「加自选」输入框用（也支持代码，
+                # 但代码在前端就地识别、不必走这个接口）。
+                q = (qs.get("q") or [""])[0]
+                try:
+                    limit = int((qs.get("limit") or ["8"])[0])
+                except (TypeError, ValueError):
+                    limit = 8
+                limit = max(1, min(20, limit))
+                self._send_json(ds.search_stocks(q, limit))
             elif path == "/api/health":
                 self._send_json({"ok": True, "job": _job, "paths": paths.describe(),
                                  "version": __import__("core.version", fromlist=["x"]).APP_VERSION})
@@ -352,26 +365,14 @@ class Handler(BaseHTTPRequestHandler):
                         payload.get("date", ""), payload.get("note", ""))
                 self._send_json({"ok": True, "portfolio": self._portfolio_view()})
             elif path == "/api/sources":
-                # 数据源治理：Cookie 配置 / 熔断状态
+                # 数据源治理：清除熔断 / 重连。
+                # 原「保存/清空/自动获取东财 Cookie」三个动作已移除（v1.29.0）——
+                # 东财的限流发生在连接层、与 Cookie 无关，配了也没用。
                 act = payload.get("action", "")
-                if act == "save_cookie":
-                    st = ds.save_cookie(payload.get("cookie", ""))
-                    ds.em_reset_blocks()          # 刚配好 cookie，给接口一次重试机会
-                    self._send_json({"ok": True, "cookie": st,
-                                     "blocked": ds.em_blocked(),
-                                     "msg": "已保存" if st["configured"] else "已清空"})
-                elif act == "unblock":
+                if act == "unblock":
                     n = ds.em_reset_blocks()
                     self._send_json({"ok": True, "msg": f"已清除 {n} 条熔断记录",
-                                     "cookie": ds.cookie_status(),
                                      "blocked": ds.em_blocked()})
-                elif act == "auto":
-                    r = ds.auto_fetch_cookie()
-                    self._send_json({"ok": True, "auto": r, "cookie": ds.cookie_status(),
-                                     "blocked": ds.em_blocked(),
-                                     "msg": ("自动获取到 %d 个 cookie" % len(r["cookies"]))
-                                            if r["found"] else
-                                            "东财入口页没有下发 Set-Cookie，匿名 Cookie 拿不到"})
                 elif act == "reconnect":
                     # 丢弃 keep-alive 连接池：盘后长时间挂机后若取不到行情，
                     # 点这里强制重连（_get 已能自愈，这是多一层保险）

@@ -11,6 +11,28 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { c ? pass++ : fail++; console.log((c ? '  ✅ ' : '  ❌ ') + m); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// /api/sources 的返回形状（v1.29.0）：所有源逐条 + 分组 + 概览。
+// 状态取自后端"最近一次真实使用"的记录，前端只负责画。
+function srcPayload({ blocked = [], push2 = {} } = {}) {
+  const down = blocked.length > 0;
+  const items = [
+    { key: 'quote', group: '行情', name: '行情快照', vendor: '腾讯',
+      host: 'qt.gtimg.cn', use: '全市场快照 · 自选/持仓行情',
+      state: 'ok', state_cn: '正常', detail: '最近成功 3 秒前 · 45ms' },
+    { key: 'push2', group: '资金', name: '板块 / 个股资金流', vendor: '东财',
+      host: 'push2.eastmoney.com', use: '主力净额 · 涨跌家数',
+      state: down ? 'blocked' : 'ok', state_cn: down ? '受限' : '正常',
+      detail: down ? '熔断中 · 冷却约 2 分钟（连续失败 3 轮）' : '最近成功 5 秒前 · 120ms' },
+  ];
+  return {
+    ok: true, blocked, push2, tdx: {}, health: { degraded: [] }, items,
+    groups: [{ name: '行情', items: [items[0]] }, { name: '资金', items: [items[1]] }],
+    summary: { total: 2, worst: down ? 'blocked' : 'ok',
+               worst_cn: down ? '受限' : '正常',
+               ok: down ? 1 : 2, blocked: blocked.length },
+  };
+}
+
 (async () => {
   const dom = new JSDOM(html, {
     runScripts: 'dangerously', pretendToBeVisual: true,
@@ -115,13 +137,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
      '提交持仓：成本/股数解析正确');
   ok(!$('sheet').classList.contains('on'), '提交后抽屉自动关闭');
 
-  // 自选同理（只看 payload）
+  // 自选：输入框已从「只填代码」改成「名称 或 代码」（用户 10-13：搜名字加自选），
+  // 代码方式保留 —— 输 6 位数字仍会被就地识别成带前缀代码。
   w.openWatchForm();
-  $('fCode').value = 'sz000001';
+  ok(!!$('fQuery'), '加自选表单是「名称 或 代码」输入框');
+  ok(!$('fCode'), '旧的「只填代码」输入框已移除');
+  $('fQuery').value = 'sz000001';
   await w.submitWatch();
   await new Promise(r => setTimeout(r, 50));
   ok(w.__lastPost && w.__lastPost.action === 'watch_add'
-     && w.__lastPost.code === 'sz000001', '提交自选：action/code 正确');
+     && w.__lastPost.code === 'sz000001', '提交自选：按代码添加（action/code 正确）');
 
   // ⑥ 加载态必须收掉（用户实测：进 App 卡在「正在准备…」半屏白，
   //    根因是缓存路径不经过 refresh()，render 里忘了隐藏 loading）
@@ -136,7 +161,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const url = String(u);
     calls.push(((opt && opt.method) || 'GET') + ' ' + url.replace(/^.*\/api/, '/api').split('?')[0]);
     if (url.includes('/api/status')) return { ok: true, status: 200, json: async () => ({ done: true, pct: 100 }) };
-    if (url.includes('/api/sources')) return { ok: true, status: 200, json: async () => ({ blocked: [], push2: {}, cookie: {} }) };
+    if (url.includes('/api/sources')) return { ok: true, status: 200, json: async () => srcPayload() };
     if (url.includes('/api/invalidate')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
     if (url.includes('/api/start')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
     return { ok: true, status: 200, json: async () => report };
@@ -173,10 +198,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   w.fetch = async (u) => {
     const url = String(u);
     if (url.includes('/api/sources')) {
-      return { ok: true, status: 200, json: async () => ({
+      return { ok: true, status: 200, json: async () => srcPayload({
         blocked: [{ api: 'push2.eastmoney.com/ulist.np', fails: 3, seconds_left: 120 }],
         push2: { cooling_seconds: 120, budget_skipped: 5, budget_max: 15, budget_used: 15 },
-        cookie: {}, }) };
+      }) };
     }
     return { ok: true, status: 200, json: async () => report };
   };
@@ -203,19 +228,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await w.fetchSources();
   ok(confirmCalls === before, '同一轮受限不会反复弹窗（节流生效）');
 
-  // 抽屉里同样有入口（横幅被划走/想看 Cookie 状态时用）
+  // 抽屉里同样有入口，并**列出所有源的实时状态**（v1.29.0：
+  // 东财 Cookie 配置已整体下线 —— 限流发生在连接层，配了也没用）
   await w.openSrcSheet();
   const sheetTxt = $('sheetBody').textContent;
-  ok($('sheet').classList.contains('on') && sheetTxt.includes('打开东财网页')
-     && sheetTxt.includes('Cookie'), '数据源抽屉可打开，含去验证与 Cookie 入口');
+  ok($('sheet').classList.contains('on') && sheetTxt.includes('打开东财网页'),
+     '数据源抽屉可打开，含东财去验证入口');
+  ok(sheetTxt.includes('行情快照') && sheetTxt.includes('板块 / 个股资金流'),
+     '抽屉里列出所有数据源');
+  ok(sheetTxt.includes('正常') && sheetTxt.includes('受限'), '每条带实时状态');
+  ok(!sheetTxt.includes('Cookie'), '不再有东财 Cookie 配置入口');
   w.closeSheet();
 
   // 非东财受限（新浪）→ 不给"去东财验证"入口（人工验证只对东财成立）
   w.fetch = async (u) => {
     if (String(u).includes('/api/sources')) {
-      return { ok: true, status: 200, json: async () => ({
+      return { ok: true, status: 200, json: async () => srcPayload({
         blocked: [{ api: 'vip.stock.finance.sina.com.cn/x', fails: 2, seconds_left: 60 }],
-        push2: { cooling_seconds: 0, budget_max: 15, budget_used: 3 }, cookie: {} }) };
+        push2: { cooling_seconds: 0, budget_max: 15, budget_used: 3 },
+      }) };
     }
     return { ok: true, status: 200, json: async () => report };
   };

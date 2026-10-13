@@ -81,6 +81,7 @@ _E1_DEFAULTS = {
 }
 _E2_DEFAULTS = {
     "enabled": True,                  # E2 龙虎榜·游资席位（数据只进内部判断，不上界面）
+    "top_n": 12,                      # 净买入榜展示条数（lhb.py 读它、配置面板也编辑它）
 }
 _E3_DEFAULTS = {
     "enabled": True,                  # E3 主力资金流
@@ -90,6 +91,15 @@ _E4_DEFAULTS = {
     "enabled": True,                  # E4 信号复盘档案（胜率闭环）
     "cost_pct": 0.002,                # 往返总成本（佣金+印花税+滑点），从收益扣除
     "max_settle_per_scan": 30,        # 每轮最多结算多少只（控数据源压力）
+}
+_E5_DEFAULTS = {
+    "enabled": True,                  # E5 低位承接方向（退潮期机构资金去哪）
+    "max_pct": 1.0,                   # "价没动·钱在进"的涨幅上限（≤此值算吸筹）
+    "min_main": 0.3,                  # 主力净流入低于此额（亿）视为噪音，不参与评分
+    "pos_days": 3,                    # 「位置」看近几个已归档交易日的累计涨幅
+    "top_n": 5,                       # 最多输出几个方向（做"方向清单"，不是 3 个硬推荐）
+    "min_score": 55,                  # 低于此分不输出（宁缺毋滥）
+    "trial_weight": 0.05,             # 仓位口径：退潮期试错仓（与 M5 同口径）
 }
 
 
@@ -108,10 +118,25 @@ PRESETS: dict[str, dict] = {
         },
         "M2_volume": {
             "enabled": True,
-            "peak_threshold": 15000,          # 亿，两市成交额峰值模式阈值
-            "comfort_threshold": 5000,        # 亿，回到此量能=游刃有余
-            "shrink_threshold": 12000,        # 亿，低于此=缩量存量→切短线应对
+            # ---- 绝对档位（亿，两市成交额**全天**口径）----
+            # ★ 三个阈值必须满足 peak ≥ comfort ≥ shrink（单调递减）。
+            #   历史默认值把 comfort 写成 5000、shrink 写成 12000（倒挂），
+            #   而判定按 comfort → shrink 顺序分支，于是整个 [5000, 15000)
+            #   区间都被"量能舒适"吃掉，`shrink_short` 成了**永不触发的死分支**
+            #   —— 实测 8000 亿被报成"量能舒适·游资具备轮动能力"。已修正。
+            "peak_threshold": 15000,          # 峰值量能下限（还需相对位置达标）
+            "comfort_threshold": 12000,       # 量能舒适下限（游资具备轮动能力）
+            "shrink_threshold": 8000,         # 缩量存量下限；低于此=极度缩量→空仓
             "shrink_red_flag": True,          # 极致缩量还红盘 = 筹码结构好
+            # ---- 相对口径（治「只看绝对阈值」）----
+            # 绝对阈值只回答"钱够不够撬动大票"，回答不了"相对最近是多是少"。
+            # 不加这一层，放量后的回落会被判成"峰值量能"：2026-10-12 两市
+            # 15378 亿（较 10-09 的 19006 亿回落 19%）被判峰值，而同日沪指量能
+            # 处于近 29 日的 27.6% 分位 —— 标签与自己的数据打架（用户实测）。
+            "lookback": 20,                   # 分位/环比回看的交易日数
+            "peak_pct": 0.80,                 # 峰值量能要求：近N日分位 ≥ 此值
+            "peak_trend_min": 1.00,           # 峰值量能要求：≥近N日中位数的此倍数
+            "shrink_pct": 0.45,               # 缩量要求：近N日分位 ≤ 此值
         },
         "M3_sentiment": {
             "enabled": True,
@@ -186,6 +211,7 @@ PRESETS: dict[str, dict] = {
         "E2_lhb": dict(_E2_DEFAULTS),
         "E3_flow": dict(_E3_DEFAULTS),
         "E4_journal": dict(_E4_DEFAULTS),
+        "E5_rebound": dict(_E5_DEFAULTS),
     },
 }
 
@@ -240,6 +266,63 @@ def _merge_rules(default_rules: list, saved_rules: list | None) -> list:
 _LEGACY_PRESETS = {"aggressive", "conservative", "firstboard"}
 
 
+# 被「按百分比渲染」写坏过的字段：它们的默认值本身就是**百分数**（3.0 = 3%），
+# 但配置面板曾用 data-pct 渲染（保存时 ÷100）→ 用户只要改一次就存成 0.03，
+# 而 core/swing.py 里是 `abs(pct) > float(cfg["stall_pct"])`（pct 是百分数）
+# → 条件几乎恒真 → **高位放量滞涨离场点 WS1 几乎不再触发**（实测确认）。
+# 这里按 ÷100 的逆运算就地还原；面板渲染器也已改回 num（见 web/index.html）。
+_PCT_FIELDS = {
+    "M11_swing": ("stall_pct",),
+}
+
+
+def _fix_pct_fields(cfg: dict) -> bool:
+    """把被 ÷100 写坏的百分数字段 ×100 还原。只认默认值本身 > 1 的字段。"""
+    changed = False
+    for mod, keys in _PCT_FIELDS.items():
+        m = cfg.get(mod)
+        base = PRESETS[DEFAULT_PRESET].get(mod) or {}
+        if not isinstance(m, dict):
+            continue
+        for k in keys:
+            try:
+                dv = float(base.get(k, 0))
+                v = float(m.get(k, dv))
+            except (TypeError, ValueError):
+                continue
+            if dv > 1 and 0 < v < 1:
+                m[k] = round(v * 100, 4)
+                changed = True
+    return changed
+
+
+def _fix_m2_ladder(cfg: dict) -> bool:
+    """把历史存档里**倒挂**的 M2 量能阶梯重置为单调阶梯，返回是否改动。
+
+    老默认值是 peak=15000 / comfort=5000 / shrink=12000 —— comfort 反而低于
+    shrink。判定按 comfort → shrink 的顺序分支，于是 [5000, 15000) 全被
+    "量能舒适"吃掉，`shrink_short` 永不触发（缩量期切短线的打法形同虚设）。
+
+    只在**确认倒挂**（peak < comfort 或 comfort < shrink）时重置；
+    用户自己调成单调递减的值一律保留。
+    """
+    m2 = cfg.get("M2_volume")
+    if not isinstance(m2, dict):
+        return False
+    base = PRESETS[DEFAULT_PRESET]["M2_volume"]
+    try:
+        peak = float(m2.get("peak_threshold", base["peak_threshold"]))
+        comfort = float(m2.get("comfort_threshold", base["comfort_threshold"]))
+        shrink = float(m2.get("shrink_threshold", base["shrink_threshold"]))
+    except (TypeError, ValueError):
+        peak = comfort = shrink = 0.0
+    if peak >= comfort >= shrink:
+        return False
+    for k in ("peak_threshold", "comfort_threshold", "shrink_threshold"):
+        m2[k] = base[k]
+    return True
+
+
 def load_config() -> dict:
     """读取当前配置；不存在则写入默认。
 
@@ -268,6 +351,12 @@ def load_config() -> dict:
             cfg["preset"] = key
             cfg["name"] = base.get("name", cfg.get("name", ""))
             cfg["desc"] = base.get("desc", "")
+            # 历史存档的两类就地修正，任一命中就落盘：
+            #   · M2 量能阶梯倒挂（老默认 comfort=5000 < shrink=12000）；
+            #   · 百分数字段被配置面板 ÷100 写坏（M11_swing.stall_pct）。
+            fixed = _fix_m2_ladder(cfg) | _fix_pct_fields(cfg)
+            if fixed:
+                save_config(cfg)
             return cfg
         except (json.JSONDecodeError, OSError):
             pass

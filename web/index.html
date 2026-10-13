@@ -132,6 +132,23 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
 .pill.org{background:var(--org-bg);color:var(--org)}
 .pill.blu{background:var(--blu-bg);color:var(--blu)}
 .pill.gry{background:var(--sk);color:var(--tx2)}
+/* 数据源面板：每个源一行（状态 + 名称/厂商/主机 + 说明/用途） */
+.srcsum{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.srcgrp{font-size:11.5px;font-weight:800;color:var(--tx3);letter-spacing:.06em;
+  margin:14px 0 2px;padding-bottom:4px;border-bottom:1px solid var(--line2)}
+.srcgrp:first-child{margin-top:2px}
+.srcline{display:flex;gap:9px;align-items:flex-start;padding:7px 0;
+  border-bottom:1px solid var(--line2)}
+.srcline:last-child{border-bottom:none}
+.srcline .pill{flex:0 0 46px;text-align:center}
+/* 名称列**定宽**（不是 min-width）：定宽各列才对齐，长内容也只在本列内换行，
+   不会把右侧说明列挤成一条缝。 */
+.srcline .nm{font-size:12.5px;font-weight:700;flex:0 0 150px;width:150px;min-width:0}
+.srcline .vn{font-size:10.5px;color:var(--tx3);margin-top:1px;line-height:1.5;
+  word-break:break-all}
+.srcline .hp{font-family:var(--mono);font-size:10px}
+.srcline .dt{flex:1;min-width:0;font-size:11.5px;color:var(--tx2);line-height:1.6;
+  word-break:break-word}
 
 /* ── 决策步骤（竖排大白话） ── */
 .steps{display:flex;flex-direction:column;gap:0}
@@ -296,6 +313,22 @@ details.fold .cnt{background:var(--sk);color:var(--tx2);padding:1px 8px;border-r
 .fld label{display:block;font-size:11.5px;color:var(--tx2);margin-bottom:4px;font-weight:600}
 .fld .r2{display:flex;gap:7px;align-items:center}
 .fld .hint{font-size:11px;color:var(--tx3);margin-top:3px;line-height:1.5}
+/* 股票搜索下拉（加自选）：输入名称/拼音时的候选列表 */
+.wlsug{margin-top:6px;border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  background:var(--card);display:none}
+.wlsug.on{display:block}
+.wlsug .row{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;
+  font-size:13px;border-bottom:1px solid var(--line)}
+.wlsug .row:last-child{border-bottom:none}
+.wlsug .row:hover{background:var(--sk)}
+.wlsug .row.dis{opacity:.5;cursor:default}
+.wlsug .row.dis:hover{background:none}
+.wlsug .nm{font-weight:700;min-width:88px}
+.wlsug .nm b{color:var(--org)}
+.wlsug .cd{font-size:11.5px;color:var(--tx3);font-family:var(--mono,monospace)}
+.wlsug .bd{margin-left:auto;font-size:11px;color:var(--tx3)}
+.wlsug .tag{font-size:10.5px;color:var(--grn);font-weight:700}
+.wlsug .msg{padding:9px 10px;font-size:12px;color:var(--tx3);line-height:1.6}
 .chk{display:flex;align-items:center;gap:8px;font-size:13px;padding:5px 0;cursor:pointer}
 .chk input{width:auto;margin:0;accent-color:var(--grn);width:15px;height:15px}
 .wrow{display:grid;grid-template-columns:1fr 66px;gap:9px;align-items:center;margin-bottom:8px}
@@ -404,7 +437,7 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
     <div class="tag" id="hdTime">—</div>
     <div class="tag clk" id="hdAuto" title="自动刷新：每分钟静默更新行情与情绪，盘中每5分钟后台重扫一次">自动 <b>开</b></div>
     <div class="tag" id="hdLive" title="最近一次静默刷新">—</div>
-    <div class="tag clk" id="hdSrc" title="数据源状态：Cookie / 接口熔断">数据源 <b>—</b></div>
+    <div class="tag clk" id="hdSrc" title="数据源状态：每个源的实时可用性">数据源 <b>—</b></div>
     <div class="sp"></div>
     <button class="btn2" id="btnPanel">调策略</button>
     <button class="btn" id="btnRefresh">重新扫描</button>
@@ -449,6 +482,7 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
         <div class="sh"><h2>明日判断</h2>
           <span class="hint" id="olHint">明天开盘先看什么 · 什么情况能动手</span></div>
         <div id="outlook"></div>
+        <div id="rebound" style="margin-top:12px"></div>
       </div>
     </div>
 
@@ -613,11 +647,14 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
       <button class="btn" id="pfAdd" style="width:100%;margin-top:8px">保存持仓</button>
       <div class="hint">代码格式：沪市 sh600519 / 深市 sz000001 / 北交所 bj430047</div>
     </div>
-    <div class="fld"><label>自选股（只盯不做，点「加自选」在选股页添加）</label>
+    <div class="fld"><label>自选股（只盯不做；输<b>名称/拼音</b>或<b>代码</b>，点结果即可加入）</label>
       <div class="r2">
-        <input type="text" id="wlCode" placeholder="代码 sh600519" style="flex:1.2">
+        <input type="text" id="wlCode" placeholder="如 茅台 / gzmt / 600519 / sh600519"
+               autocomplete="off" autocapitalize="off" spellcheck="false" style="flex:1.2">
         <button class="btn2" id="wlAdd">加自选</button>
       </div>
+      <div class="wlsug" id="wlSug"></div>
+      <div class="hint" id="wlHint">名称搜：<b>茅台</b>、<b>银行</b>（子串匹配）；拼音搜：<b>gzmt</b>；代码照旧：<b>600519</b> / <b>sh600519</b></div>
     </div>
     <div id="portMgmt"></div>
   </div>
@@ -628,55 +665,14 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
   <div class="ph"><h3>数据源</h3>
     <button class="btn2" id="btnSrcClose">关闭</button></div>
   <div class="pb">
-    <div class="fld"><label>东方财富 Cookie</label>
-      <div id="srcCookieState"></div>
-      <textarea id="srcCookieInput" rows="4" style="margin-top:8px"
-        placeholder="在此粘贴完整 Cookie（单行 / 多行都行）"></textarea>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="btn" id="srcSave" style="flex:1">保存</button>
-        <button class="btn2" id="srcClear">清空</button>
-        <button class="btn2" id="srcAuto">自动获取</button>
-      </div>
-      <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
-        保存后立即生效。也可设环境变量 <code>EAST_MONEY_COOKIE</code>，或直接编辑
-        <code>data/eastmoney_cookie.txt</code>（改文件即热加载）。
-      </div>
+    <div id="srcSummary"></div>
+    <div id="srcList"></div>
+    <div class="r2" style="margin-top:14px">
+      <button class="btn2" id="srcUnblock" style="flex:1">清除熔断记录（立即重试）</button>
+      <button class="btn2" id="srcReconnect" style="flex:1">重连（丢弃缓存连接）</button>
     </div>
-    <div class="fld"><label>接口熔断状态</label>
-      <div id="srcBlocked"></div>
-      <div id="srcPush2" style="margin-top:8px"></div>
-      <button class="btn2" id="srcUnblock" style="margin-top:8px;width:100%">清除熔断记录（立即重试）</button>
-    </div>
-    <div class="fld"><label>数据健康度（本轮扫描）</label>
-      <div id="srcHealth"></div>
-      <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
-        关键数据（涨停/跌停/炸板池、指数行情、涨跌家数、个股K线）抓取失败时会自动回退到
-        <b>当日最后一份好数据</b>，这里如实列出哪些降级了。降级不代表结论一定错，
-        但可信度会下降 —— 特别是跌停池/炸板池降级时，"亏钱面积"会偏低。
-      </div>
-    </div>
-    <div class="fld"><label>连接池</label>
-      <button class="btn2" id="srcReconnect" style="width:100%">重连（丢弃缓存连接）</button>
-      <div class="hint" style="font-size:11.5px;color:var(--tx3);margin-top:7px;line-height:1.7">
-        挂机久了如果突然取不到行情（自选股全部打不开详情），点这里强制重新握手。
-        正常情况下系统会自己丢弃坏连接，不用手动点。
-      </div>
-    </div>
-    <div class="fld"><label>关于东财限速</label>
-      <div style="font-size:12px;color:var(--tx2);line-height:1.8;background:#fafbfc;
-        border:1px solid var(--line2);border-radius:9px;padding:11px 13px">
-        <b>东财按「请求量 + IP 信誉」双重风控</b>。系统的对策是<b>主动限流，不被动挨打</b>：
-        ① 每分钟只给它 15 次请求额度，超了就<b>不发</b>（改走备用源，不触发风控）；
-        ② 万一被掐，冷却封顶 4 分钟，每 60 秒半开探测，东财一恢复就自己回来；
-        ③ 被掐期间板块资金改走<b>财联社</b>（同样有主力净额）、涨跌家数改走<b>开盘红</b>，
-        最后才退新浪 —— 界面始终标注数据来自哪家；
-        ④ <b>你开着 Clash 时，系统自动借它的节点出口</b>（换干净 IP —— 家宽 IP 被标记
-        时这招最有效），Clash 没开则自动直连，都不用你操作。<br>
-        <b>关于滑块</b>：那是东财网页对被标记 IP 的人工验证，程序绕不过。要更新 Cookie：
-        点下面按钮在浏览器完成滑块 → F12 → 网络(Network) → 随便一个请求 →
-        请求头里复制 Cookie 值 → 粘贴到上面保存。
-      </div>
-      <button class="btn2" id="srcOpenEm" style="width:100%;margin-top:8px">打开东财行情页（完成滑块验证用）</button>
+    <div class="hint" style="font-size:11px;color:var(--tx3);margin-top:8px;line-height:1.6">
+      状态取自最近一次真实使用，不额外发探测请求。
     </div>
   </div>
   <div class="pf"><button class="btn" id="srcDone" style="flex:1">完成</button></div>
@@ -804,6 +800,18 @@ function go(page){
 }
 
 // ── 载入：先探缓存（毫秒级）→ 命中秒开；否则后台跑 + 轮询 ──
+// 报告是不是「过期的」：服务器标了 stale（内存缓存过期/刚重启，端的是磁盘那份），
+// 或报告日期根本不是今天。两种都必须补扫，否则页面会一直显示旧数据。
+function _reportIsOld(j){
+  if(!j) return false;
+  if(j.stale) return true;
+  const d=String((j.meta||{}).date||'');
+  if(!d) return false;
+  const n=new Date();
+  const today=''+n.getFullYear()
+    +String(n.getMonth()+1).padStart(2,'0')+String(n.getDate()).padStart(2,'0');
+  return d!==today;
+}
 async function load(force){
   $('loading').classList.remove('hide'); $('main').classList.add('hide');
   const bar=$('ldBar'), tx=$('loadTx'), pc=$('ldPct');
@@ -828,7 +836,16 @@ async function load(force){
       if(r.status===204){ hasCache=false; }
       else{
         const j=await r.json();
-        if(j && j.picks && !j.error){ setP(100,'完成'); finish(j); return; }
+        if(j && j.picks && !j.error){
+          setP(100,'完成'); finish(j);
+          // ★ 端出来的是「上次结果」（服务器内存缓存过期 / 刚重启，或报告根本不是
+          //   今天的）→ 后台补一次扫描，扫完由静默刷新换上新数据。
+          //   不做这一步，页面会一直停在旧报告上 —— 用户实测："没变化啊还是昨天的数据"。
+          if(_reportIsOld(j)) setTimeout(()=>{
+            fetch('/api/start?top=20&limit=260',{cache:'no-store'}).catch(()=>{});
+          }, 500);
+          return;
+        }
       }
     }catch(e){ hasCache=false; }
   }
@@ -884,10 +901,17 @@ async function load(force){
 function finish(j){
   REPORT=j; CONFIG=j.config;
   $('loading').classList.add('hide'); $('main').classList.remove('hide');
-  render();
-  buildNav();
-  loadSrc();          // 数据源状态（Cookie / 熔断）
-  startAuto();        // 静默自动刷新
+  // ★ 渲染出错也不能拖垮自动刷新 —— startAuto 必须放 finally。
+  //   否则 render()/buildNav() 一旦抛异常（数据里少个字段就会），
+  //   静默刷新永远不会启动：页面从此冻结在打开时那一份数据上，
+  //   行情也不再更新（用户实测："没变化啊还是昨天的数据"）。
+  try{
+    render();
+    buildNav();
+  }finally{
+    loadSrc();        // 数据源状态（所有源的实时可用性）
+    startAuto();      // 静默自动刷新
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1052,7 +1076,8 @@ function render(){
 
   $('hdPreset').textContent=(CONFIG.name||m.preset_name||m.preset);
   $('hdPreset').title=(CONFIG.desc||'');
-  $('hdDate').textContent=m.date;
+  // 端的是上次结果就如实标出来（不是今天的数据要让人一眼看见，而不是当成今天的）
+  $('hdDate').textContent=m.date+(REPORT.stale?'（上次结果·正在后台刷新）':'');
   $('hdVer').textContent='v'+(m.version||'?');
   const ses=m.session;
   $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')+'扫描'+m.scanned+'只 · 耗时'+m.elapsed+'秒';
@@ -1093,7 +1118,9 @@ function render(){
       : (vol.cum_amount ? Math.round(vol.cum_amount).toLocaleString()+'亿' : '—');
   const volSub = (vol.amount!=null ? '' : '已成交（盘中累计）· ')
       + (VOL_CN[vol.mode]||vol.label)
-      + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '');
+      + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '')
+      // 相对量能读数（分位 / 相对中位数倍数）—— 让"为什么这么判"可见
+      + (vol.rel_txt ? ' · '+vol.rel_txt : '');
   const cards=[
     {t:'今天能买吗',v:canTrade?'能':'不能',
       s:!canTrade?'退潮期或极度缩量':(pos.chain_stage==='probe'?'可以试错':'按计划操作'),
@@ -1237,8 +1264,10 @@ function render(){
           esc(VOL_CN[vol.mode]||vol.label)}</b>${vol.intraday?'（暂判）':''}。<br>${
           vol.intraday&&vol.pace_txt?esc(vol.pace_txt)+'。':''}${esc(vol.advice)}`,
       c:vol.mode==='dry'?'bd':(vol.short_only?'wn':'ok'),
-      pctv:vol.pace!=null?Math.min(100,Math.round(vol.pace*55))
-           :(vol.amount!=null?Math.min(100,vol.amount/180):50),
+      // 进度条标尺由后端按当前配置算（vol.gauge）—— 原来前端写死 amount/180
+      // （即"18000 亿=满格"），改了量能阈值或市场量能中枢，条长却不跟着变，
+      // 15378 亿照样画到 85% 满格，反向坐实了"量能很足"的错觉。
+      pctv:vol.gauge!=null?vol.gauge:50,
       pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
     {q:'大家现在是抢着买还是在跑？',
       a:`<b>${esc(STAGE_CN[sen.stage]||sen.label)}</b>，最高 ${sen.max_boards} 连板，封板率 ${(mm.seal_rate*100).toFixed(0)}%，`
@@ -1275,6 +1304,7 @@ function render(){
   renderFlow(ml);
   renderSectors();
   renderOutlook();
+  renderRebound();
   renderJournal();
   renderPort();
 
@@ -1935,12 +1965,34 @@ function renderFlow(ml){
 }
 
 // ── 板块强弱：主线 / 支线 / 当前最强板块 ──
+// 板块轮动（近 N 日每日领涨板块）—— 看"资金从哪挪到哪"，比单日强弱更有信息量。
+// 数据来自财联社（core/cls.py 的 sector_rotation）；抓不到时 sv.rotation 是空数组，
+// 整块隐藏 —— 不编造"轮动方向"。
+function rotHtml(sv){
+  const rot=(sv.rotation||[]).filter(d=>d&&(d.plates||[]).length);
+  if(!rot.length) return '';
+  const names=d=>(d.plates||[]).slice(0,5).map(p=>p.name);
+  const last=rot[rot.length-1], prev=rot.length>1?rot[rot.length-2]:null;
+  const prevSet=new Set(prev?names(prev):[]);
+  const fresh=prev?names(last).filter(n=>!prevSet.has(n)):[];
+  return `<div class="card" style="margin-top:10px">
+    <div style="font-size:13.5px;margin-bottom:8px">近 ${rot.length} 日板块轮动${
+      fresh.length?`<span class="fl" style="font-size:12px"> · 最新一日新进：<b style="color:var(--org)">${esc(fresh.join('、'))}</b></span>`:''}</div>
+    <div class="tbl"><table><thead><tr><th>日期</th><th>领涨板块（前 5）</th></tr></thead>
+      <tbody>${rot.map(d=>`<tr><td class="num">${esc(d.date||'')}</td>
+        <td style="white-space:normal">${(d.plates||[]).slice(0,5).map(p=>
+          `<span class="pill ${p.rank===1?'red':'gry'}" style="margin:2px 3px 2px 0">${esc(p.name)} ${p.pct>=0?'+':''}${f2(p.pct)}%</span>`).join('')}</td></tr>`).join('')}
+      </tbody></table></div>
+    <div class="fl" style="font-size:11.5px;margin-top:6px">轮动看的是「资金从哪挪到哪」—— 领涨方向<b>连续</b>出现才算主线，一日游只算扰动。</div>
+  </div>`;
+}
 function renderSectors(){
   const el=$('secView'); if(!el) return;
   const sv=REPORT.sectors||{};
   const items=sv.items||[];
+  const rot=rotHtml(sv);
   if(!items.length){
-    el.innerHTML='<div class="card fl" style="font-size:13px">'+esc(sv.data_note||'暂无板块合力数据')+'</div>';
+    el.innerHTML='<div class="card fl" style="font-size:13px">'+esc(sv.data_note||'暂无板块合力数据')+'</div>'+rot;
     return;
   }
   const st=sv.strongest||{};
@@ -1955,10 +2007,59 @@ function renderSectors(){
       ${st.facts&&st.facts.length?`<span class="fl" style="font-size:12px">（${esc(st.facts.join(' · '))}）</span>`:''}</div>
     <div class="tbl"><table><thead><tr><th>板块</th><th>角色</th><th>强弱</th><th>依据</th><th>怎么看</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(sv.summary||'')}${sv.data_note?' · '+esc(sv.data_note):''}</div>`;
+    <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(sv.summary||'')}${sv.data_note?' · '+esc(sv.data_note):''}</div>`+rot;
 }
 
 // ── 明日判断 ──
+function renderRebound(){
+  const el=$('rebound'); if(!el) return;
+  const rb=REPORT.rebound;
+  if(!rb||!rb.enabled){ el.innerHTML=''; return; }
+  const gate=(Object.values(rb.gate||{})||[]);
+  if(!rb.active){
+    el.innerHTML=`<div class="card" style="border-left:4px solid var(--tx3)">
+      <div class="hd2"><div class="ic">🧭</div>
+        <div><div class="ti" style="font-size:15px">低位承接方向 · 本轮不适用</div></div></div>
+      <div class="fl" style="font-size:12.5px;line-height:1.7;margin-top:6px">${esc(rb.reason||'')}</div>
+      ${gate.map(g=>`<div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:3px">
+        ${g.ok?'✅':'⛔'} ${esc(g.txt||'')}</div>`).join('')}
+    </div>`;
+    return;
+  }
+  el.innerHTML=`<div class="verdict hold" style="border-left-color:var(--blu)">
+    <div class="hd2"><div class="ic">🧭</div>
+      <div><div class="ti" style="font-size:16px">低位承接方向 —— 机构兑现的钱可能去哪</div>
+        <div class="sub" style="font-size:11.5px;margin-top:3px">
+          退潮期 + 存量博弈 + 机构净卖出，三个闸门同时成立才出这张卡</div></div></div>
+    ${gate.map(g=>`<div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:2px">
+      ${g.ok?'✅':'⛔'} ${esc(g.txt||'')}</div>`).join('')}
+    <div class="fl" style="font-size:13px;line-height:1.75;margin-top:8px">${esc(rb.summary||'')}</div>
+    <div style="margin-top:12px">
+      ${(rb.candidates||[]).map(c=>`<div class="act" style="display:block;margin-bottom:9px">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <b style="font-size:14.5px">${esc(c.name)}</b>
+          <span class="pill ${c.role==='支线'?'blu':'gry'}">${esc(c.role||'方向')}</span>
+          <span class="num" style="color:var(--tx2)">评分 ${c.score}</span>
+        </div>
+        <div style="font-size:12.5px;margin-top:4px;line-height:1.7">
+          今日 <b class="${pct(c.pct)}">${c.pct>=0?'+':''}${f2(c.pct)}%</b> ·
+          主力净流入 <b class="${c.main>=0?'up':'dn'}">${c.main>=0?'+':''}${f2(c.main)} 亿</b> ·
+          ${c.streak<=1?'首日净流入':'连续 '+c.streak+' 日净流入'} ·
+          ${c.cum==null?'位置无归档':('近3日 '+(c.cum>=0?'+':'')+f2(c.cum)+'%')}
+        </div>
+        <div style="font-size:11.5px;color:var(--tx2);margin-top:4px;line-height:1.65">
+          ${esc((c.tags||[]).join(' · '))}</div>
+        ${c.catalyst?`<div class="fl" style="font-size:11.5px;margin-top:4px">
+          催化：${esc(c.catalyst)}</div>`:''}
+        <div style="font-size:11.5px;margin-top:5px;color:var(--org);line-height:1.7">
+          <b>口径：</b>${esc(c.how||'')}<br><b>仓位：</b>${esc(c.size||'')}</div>
+      </div>`).join('')}
+    </div>
+    <div class="sub" style="margin-top:6px;font-size:11.5px;color:var(--tx3);line-height:1.7">
+      ${esc(rb.note||'')}</div>
+  </div>`;
+}
+
 function renderOutlook(){
   const el=$('outlook'); if(!el) return;
   const o=REPORT.outlook;
@@ -2119,7 +2220,8 @@ function renderPort(){
   if(wp){
     if(!watch.length){
       wp.innerHTML=`<div class="card" style="font-size:13px;color:var(--tx2);line-height:1.8">
-        还没有自选股。在选股页点开个股后按<b>「＋加自选」</b>，或在右上角<b>「管理」</b>里直接输代码添加。</div>`;
+        还没有自选股。在选股页点开个股后按<b>「＋加自选」</b>，或在右上角<b>「管理」</b>里
+        输<b>股票名称</b>（如「茅台」）、<b>拼音首字母</b>（如「gzmt」）或<b>代码</b>搜索添加。</div>`;
     } else {
       const chips=watch.map(w=>`<tr data-w="${w.code}">
         <td><b>${esc(w.name||w.code)}</b> <span class="fl" style="font-size:11px">${w.code}</span></td>
@@ -2141,7 +2243,10 @@ async function openPort(){
   closeAllPanels();
   $('portPanel').classList.add('on'); $('mask').classList.add('on');
   const r=await fetch('/api/portfolio',{cache:'no-store'}); const j=await r.json();
-  renderPortMgmt(unwrapPort(j));
+  const view=unwrapPort(j);
+  // 记进 REPORT：搜索下拉要靠它标「已在自选」，否则同一个票会被重复添加
+  if(REPORT) REPORT.portfolio=view;
+  renderPortMgmt(view);
 }
 // POST 返回 {ok, portfolio:{...}}，GET 直接返回 view —— 统一取出 view
 function unwrapPort(j){ return (j && j.portfolio) ? j.portfolio : (j || {}); }
@@ -2156,6 +2261,132 @@ function renderPortMgmt(view){
   $('portMgmt').querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>portCmd({action:'remove',code:b.dataset.rm}));
   $('portMgmt').querySelectorAll('[data-wrm]').forEach(b=>b.onclick=()=>portCmd({action:'watch_remove',code:b.dataset.wrm}));
 }
+// ── 加自选：名称/拼音搜索（代码仍可直接输） ──
+// 输入既可能是代码也可能是名称关键词 —— 先按代码识别，识别不出再当关键词搜。
+// 识别规则与后端 core/universe.normalize 保持一致：sh600519 / 600519 / 600519.SH
+// / SH600519 都算代码；纯 6 位数字按号段补交易所前缀。
+const WL_CODE_RE=/^(sh|sz|bj)\d{6}$/;
+function wlNormCode(v){
+  let s=String(v||'').trim().toLowerCase().replace(/\s/g,'');
+  for(const suf of ['.sh','.sz','.bj','.ss','.sse','.szse']){
+    if(s.endsWith(suf)){ s=s.slice(0,-suf.length); break; }
+  }
+  if(WL_CODE_RE.test(s)) return s;
+  if(/^\d{6}$/.test(s)){
+    if(/^(600|601|603|605|688|689)/.test(s)) return 'sh'+s;
+    if(/^(000|001|002|003|300|301)/.test(s)) return 'sz'+s;
+    if(/^(430|83\d|87\d|92\d)/.test(s)) return 'bj'+s;
+    return (/^[56]/.test(s)?'sh':'sz')+s;
+  }
+  return s;
+}
+function wlSetHint(msg, warn){
+  const el=$('wlHint'); if(!el) return;
+  el.innerHTML=msg;
+  el.style.color=warn?'var(--org)':'';
+}
+let _wlT=null, _wlSeq=0, _wlRows=[], _wlQ='';
+function wlClearSug(){ const el=$('wlSug'); if(el){ el.classList.remove('on'); el.innerHTML=''; } }
+function wlHi(name,q){
+  const i=String(name).toLowerCase().indexOf(String(q||'').toLowerCase());
+  if(i<0||!q) return esc(name);
+  return esc(name.slice(0,i))+'<b>'+esc(name.slice(i,i+q.length))+'</b>'+esc(name.slice(i+q.length));
+}
+function wlInList(code){
+  const wl=((REPORT&&REPORT.portfolio)||{}).watchlist||[];
+  return wl.some(w=>w.code===code);
+}
+function wlRenderSug(rows,q,note){
+  const el=$('wlSug'); if(!el) return;
+  if(!rows.length){
+    el.innerHTML=`<div class="msg">${note?esc(note):'未匹配到股票 —— 试试更短的关键词（如「茅台」「银行」），或直接输 6 位代码'}</div>`;
+    el.classList.add('on'); return;
+  }
+  el.innerHTML=rows.map(r=>{
+    const has=wlInList(r.code);
+    return `<div class="row${has?' dis':''}" data-c="${esc(r.code)}" data-n="${esc(r.name)}">
+      <span class="nm">${wlHi(r.name,q)}</span>
+      <span class="cd">${esc(r.code)}</span>
+      <span class="bd">${esc(r.board||'')}</span>
+      ${has?'<span class="tag">已在自选</span>':''}</div>`;
+  }).join('');
+  el.classList.add('on');
+  el.querySelectorAll('.row').forEach(r=>r.onclick=()=>{
+    if(r.classList.contains('dis')){ wlSetHint('该股已在自选里了'); return; }
+    wlPick(r.dataset.c, r.dataset.n);
+  });
+}
+async function wlSearch(q){
+  const seq=++_wlSeq;
+  try{
+    const r=await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=8',{cache:'no-store'});
+    const j=await r.json();
+    if(seq!==_wlSeq) return null;              // 用户已经改了输入，丢弃这次结果
+    return j||{ok:true,results:[],source:'error',note:'搜索接口返回异常'};
+  }catch(e){
+    if(seq!==_wlSeq) return null;
+    return {ok:false,results:[],source:'error',note:'搜索请求失败：'+e.message};
+  }
+}
+async function wlPick(code,name){
+  await portCmd({action:'watch_add',code,name});
+  const inp=$('wlCode'); if(inp) inp.value='';
+  _wlRows=[]; wlClearSug();
+  wlSetHint('名称搜：<b>茅台</b>、<b>银行</b>（子串匹配）；拼音搜：<b>gzmt</b>；代码照旧：<b>600519</b> / <b>sh600519</b>');
+}
+async function wlDoAdd(){
+  const raw=($('wlCode').value||'').trim();
+  if(!raw){ wlSetHint('请输入股票<b>名称关键词</b>（如 茅台）或<b>代码</b>（如 600519）', true); return; }
+  const code=wlNormCode(raw);
+  if(WL_CODE_RE.test(code)){                 // 代码模式：保持原方式，直接加
+    await wlPick(code,''); return;
+  }
+  const j=await wlSearch(raw);
+  if(!j) return;
+  const rows=(j.results||[]);
+  _wlRows=rows; _wlQ=raw;
+  if(!rows.length){
+    wlRenderSug([],raw,j.note);
+    wlSetHint(j.note||'未匹配到股票 —— 试试更短的关键词，或直接输 6 位代码', true);
+    return;
+  }
+  if(rows.length===1){ await wlPick(rows[0].code, rows[0].name); return; }
+  wlRenderSug(rows,raw,j.note);
+  wlSetHint(`匹配到 <b>${rows.length}</b> 只，点下面任意一行即可加入`+(j.note?`（${esc(j.note)}）`:''), true);
+}
+// 逐字搜索（防抖 220ms）：代码不搜、直接提示；关键词才发请求
+$('wlCode').addEventListener('input',()=>{
+  const raw=($('wlCode').value||'').trim();
+  clearTimeout(_wlT);
+  if(!raw){ _wlRows=[]; wlClearSug();
+    wlSetHint('名称搜：<b>茅台</b>、<b>银行</b>（子串匹配）；拼音搜：<b>gzmt</b>；代码照旧：<b>600519</b> / <b>sh600519</b>');
+    return; }
+  if(WL_CODE_RE.test(wlNormCode(raw))){      // 已经是代码，无需搜索
+    _wlRows=[]; wlClearSug();
+    wlSetHint('识别为代码 <b>'+esc(wlNormCode(raw))+'</b>，点「加自选」直接加入');
+    return;
+  }
+  _wlT=setTimeout(async ()=>{
+    const j=await wlSearch(raw);
+    if(!j) return;
+    _wlRows=(j.results||[]); _wlQ=raw;
+    wlRenderSug(_wlRows,raw,j.note);
+    if(j.note) wlSetHint(esc(j.note), true);
+  },220);
+});
+$('wlCode').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); wlDoAdd(); }
+  else if(e.key==='Escape'){ wlClearSug(); }
+});
+$('wlCode').addEventListener('focus',()=>{
+  const raw=($('wlCode').value||'').trim();
+  if(_wlRows.length && raw) wlRenderSug(_wlRows,raw,'');
+});
+document.addEventListener('click',e=>{
+  if(!e.target.closest || !e.target.closest('#wlCode') && !e.target.closest('#wlSug'))
+    wlClearSug();
+});
+
 async function portCmd(payload){
   const r=await fetch('/api/portfolio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json();
@@ -2193,81 +2424,57 @@ function toast(msg, jumpTo){
 }
 function hideToast(){ const el=$('toast'); if(el) el.classList.remove('on'); }
 
-// ── 数据源面板（Cookie / 接口熔断） ──
+// ── 数据源面板：所有源的实时状态 ──
 let SRC=null;
 async function loadSrc(){
   try{
     const j=await (await fetch('/api/sources',{cache:'no-store'})).json();
-    SRC={cookie:j.cookie||{}, blocked:j.blocked||[], push2:j.push2||{}, health:j.health||{}};
-    renderSrc();
+    SRC=j; renderSrc();
   }catch(e){}
 }
-function srcVendor(api){
-  const s=String(api||'').toLowerCase();
-  if(s.includes('push2')||s.includes('clist')||s.includes('ulist')||s.includes('datacenter')||s.includes('eastmoney')) return '东财';
-  if(s.includes('sina')) return '新浪';
-  if(s.includes('gtimg')||s.includes('tencent')||s.includes('qq')) return '腾讯';
-  return '未知源';
+// 状态 → pill 配色（与后端 core/datasource.py 的 _STATE_CN 同一套档位）
+function srcPillCls(state){
+  return ({ok:'grn',degraded:'org',blocked:'red',down:'red',
+           disabled:'gry',unused:'gry'})[state]||'gry';
 }
 function renderSrc(){
   if(!SRC) return;
-  const c=SRC.cookie||{}, b=SRC.blocked||[], bad=(SRC.health||{}).degraded||[];
-  const vendors=[...new Set(b.map(x=>srcVendor(x.api)))];
+  const s=SRC.summary||{}, items=SRC.items||[], groups=SRC.groups||[];
+  // 顶栏标签：几个源不正常 + 最严重的那档
   const tag=$('hdSrc');
   if(tag){
-    tag.innerHTML='数据源 <b>'+(b.length? vendors.join('/')+'受限':'正常')
-      +(bad.length?` · ${bad.length}项降级`:'')+'</b>';
-    tag.title=[b.length ? '受限：'+b.map(x=>srcVendor(x.api)+' '+x.api).join('；')
-                        : '数据源状态正常',
-               bad.length ? '数据降级：'+bad.map(x=>x.label||x.key).join('、') : ''
-              ].filter(Boolean).join(' ｜ ');
-    tag.className='tag clk'+((b.length||bad.length)?' srcwarn':'');
+    const bad=(s.blocked||0)+(s.down||0)+(s.degraded||0);
+    tag.innerHTML='数据源 <b>'+(bad
+      ? esc(s.worst_cn)+' · '+bad+' 个异常'
+      : '全部正常 · '+(s.total||0)+' 个源')+'</b>';
+    tag.title=bad
+      ? items.filter(x=>x.state!=='ok'&&x.state!=='unused')
+             .map(x=>x.name+'：'+x.detail).join(' ｜ ')
+      : '所有数据源正常';
+    tag.className='tag clk'+(bad?' srcwarn':'');
   }
-  const st=$('srcCookieState');
-  if(st) st.innerHTML = c.configured
-    ? `<span class="pill grn">已配置</span>
-       <span class="fl" style="font-size:12px">来源：${esc(c.source)} · ${c.length} 字符</span>
-       <div style="font-size:11.5px;color:var(--tx3);margin-top:5px;word-break:break-all;
-         font-family:ui-monospace,Consolas,monospace">${esc(c.preview||'')}</div>`
-    : `<span class="pill gry">未配置</span>
-       <span class="fl" style="font-size:12px">环境变量和文件都没有 Cookie</span>`;
-  const bd=$('srcBlocked');
-  if(bd) bd.innerHTML = b.length
-    ? b.map(x=>`<div class="r2" style="margin-bottom:7px;align-items:flex-start">
-        <span style="flex:1;font-size:12.5px"><span class="pill org">${esc(srcVendor(x.api))}</span>
-        <code>${esc(x.api)}</code>
-        <div class="fl" style="font-size:11px;margin-top:2px">连续失败 ${x.fails} 轮 ·
-        冷却剩余约 ${Math.max(1,Math.ceil(x.seconds_left/60))} 分钟（每 60 秒半开探测一次）</div></span></div>`).join('')
-    : `<div class="fl" style="font-size:12.5px;line-height:1.7">
-        当前没有数据源处于熔断状态。</div>`;
-  // push2 每分钟预算（主动限流：额度用完就不发请求，直接走备用源）
-  const p2=$('srcPush2');
-  if(p2){
-    const u=SRC.push2||{};
-    if(u.budget_max){
-      const cooling=u.cooling_seconds>0;
-      const exit=u.proxy_on
-        ? `出口：代理 <code>${esc(u.proxy||'')}</code>（节点IP，干净）`
-        : '出口：<b style="color:var(--org)">直连（家宽IP）</b> —— 被东财盯上时接口和网页都会受限';
-      p2.innerHTML=`<div style="font-size:12px;line-height:1.8;background:#fafbfc;
-        border:1px solid var(--line2);border-radius:9px;padding:9px 11px">
-        <span class="pill ${cooling?'org':'grn'}">东财 push2</span>
-        <span class="fl" style="font-size:11.5px">本分钟额度 ${u.budget_used||0}/${u.budget_max}${
-          cooling?' · <b style="color:var(--org)">冷却中 '+u.cooling_seconds+' 秒</b>':' · 正常'}</span>
-        <div class="fl" style="font-size:11px;margin-top:3px">${exit}</div>
-        ${u.budget_skipped?`<div class="fl" style="font-size:11px;margin-top:3px">已主动让出 ${
-          u.budget_skipped} 次请求 —— 超额时不硬撞风控，改走备用源</div>`:''}</div>`;
-    } else p2.innerHTML='';
+  // 概览：各状态计数
+  const sum=$('srcSummary');
+  if(sum){
+    const order=[['ok','正常'],['degraded','降级'],['blocked','受限'],
+                 ['down','不通'],['disabled','未启用'],['unused','未使用']];
+    sum.innerHTML='<div class="srcsum">'+(order.filter(([k])=>s[k]).map(([k,lb])=>
+      '<span class="pill '+srcPillCls(k)+'">'+lb+' '+s[k]+'</span>').join('')
+      ||'<span class="pill grn">正常</span>')+'</div>';
   }
-  // 数据健康度：哪些关键数据这轮降级了（回退到当日最后一份好数据 / 备用源）
-  const hd=$('srcHealth');
-  if(hd){
-    hd.innerHTML = bad.length
-      ? bad.map(x=>`<div class="r2" style="margin-bottom:6px;align-items:flex-start">
-          <span style="flex:1;font-size:12.5px"><span class="pill org">${esc(x.label||x.key)}</span>
-          <div class="fl" style="font-size:11.5px;margin-top:2px">${esc(x.note||'')}</div></span></div>`).join('')
-      : `<div class="fl" style="font-size:12.5px;line-height:1.7">本轮关键数据全部正常。</div>`;
-  }
+  // 分组列出每一个源
+  const el=$('srcList');
+  if(!el) return;
+  el.innerHTML=groups.map(g=>'<div class="srcgrp">'+esc(g.name)+'</div>'+
+    g.items.map(x=>'<div class="srcline">'+
+      '<span class="pill '+srcPillCls(x.state)+'">'+esc(x.state_cn)+'</span>'+
+      '<span class="nm" title="'+esc((x.hosts||[]).join('  /  ')||x.host||'')+'">'+
+        esc(x.name)+'<div class="vn">'+esc(x.vendor)+
+        (x.host?' · <span class="hp">'+esc(x.host)+
+          (x.host_n>1?' 等 '+x.host_n+' 个':'')+'</span>':'')+'</div></span>'+
+      '<span class="dt">'+esc(x.detail)+
+        (x.use?'<div class="vn">'+esc(x.use)+'</div>':'')+'</span>'+
+    '</div>').join('')).join('');
 }
 async function srcCmd(payload){
   const j=await (await fetch('/api/sources',{method:'POST',
@@ -2315,6 +2522,7 @@ function renderModules(){
     ['E2_lhb','E2 龙虎榜·游资席位','席位/机构/北向数据 —— 只进「资金在干什么」结论，不在界面展示明细'],
     ['E3_flow','E3 主力资金流','涨停股题材聚合 + 板块主力净流入 + 资金结论'],
     ['E4_journal','E4 信号复盘档案','每次扫描记录可执行的买入信号；T+1 开盘进场回验 1/3/5 日胜率（涨停不可买 / 停牌过滤 / 含成本）'],
+    ['E5_rebound','E5 低位承接方向','退潮期 + 存量博弈 + 机构净卖出 同时成立 → 推演「机构兑现的钱去哪」：主力净流入为正、价格没抬起来、有催化、非主线的板块'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -2322,10 +2530,18 @@ function renderModules(){
     if(k==='M1_macro') body=sw(k,'enabled','启用')+fld(k,'manual_override','周期判定','select',[
       ['auto','自动（按美联储周期）'],['bull_finance','降息→大金融波段'],['bull_tech','降息→科技主升'],
       ['caution','加息/流动性收紧'],['risk_off','危机式降息，避险'],['bottom','加息末期见底']],m.manual_override||'auto');
+    // M2：三个绝对阈值**必须递减**（峰值 ≥ 舒适 ≥ 缩量），否则中间档会被
+    // 上一个分支吃掉（老配置 comfort=5000 < shrink=12000 就是这样把"缩量存量"
+    // 变成死分支的）。相对口径决定"放量后的回落不算峰值"。
     if(k==='M2_volume') body=sw(k,'enabled','启用')+
-      num(k,'peak_threshold','峰值量能阈值(亿)','超过则做中长线波段大票',m.peak_threshold)+
-      num(k,'comfort_threshold','舒适区量能(亿)','回到此量能=游资游刃有余',m.comfort_threshold)+
-      num(k,'shrink_threshold','缩量阈值(亿)','低于此成交额=只做短线题材',m.shrink_threshold)+sw(k,'shrink_red_flag','极致缩量红盘视为筹码结构好');
+      num(k,'peak_threshold','峰值量能阈值(亿)','≥此额，且近N日分位/环比达标才叫峰值',m.peak_threshold)+
+      num(k,'comfort_threshold','量能舒适阈值(亿)','≥此额=游资有轮动能力，题材可做',m.comfort_threshold)+
+      num(k,'shrink_threshold','缩量阈值(亿)','低于此额=极度缩量→空仓',m.shrink_threshold)+
+      pctf(k,'peak_pct','峰值·近N日分位下限(%)','当前量能在近N日中的分位低于此值 → 不算峰值（放量后回落）',(m.peak_pct!=null?m.peak_pct:.8)*100)+
+      num(k,'peak_trend_min','峰值·相对中位数下限(倍)','当前量能÷近N日中位数低于此倍数 → 不算峰值',m.peak_trend_min!=null?m.peak_trend_min:1)+
+      pctf(k,'shrink_pct','缩量·近N日分位上限(%)','分位低于此值=相对近期明显偏低 → 按缩量存量处理',(m.shrink_pct!=null?m.shrink_pct:.45)*100)+
+      num(k,'lookback','相对口径回看天数(交易日)','算分位与环比用的窗口',m.lookback!=null?m.lookback:20)+
+      sw(k,'shrink_red_flag','极致缩量红盘视为筹码结构好');
     if(k==='M3_sentiment') body=sw(k,'enabled','启用')+
       pctf(k,'ebb_hurt_ratio','退潮·亏钱面积阈值(%)','亏钱效应扩散面积超过即退潮',(m.ebb_hurt_ratio||.3)*100)+
       pctf(k,'ebb_limit_down_ratio','退潮·跌停/涨停比(%)','中位股成排跌停',(m.ebb_limit_down_ratio||.15)*100)+
@@ -2388,7 +2604,11 @@ function renderModules(){
       num(k,'shrink_ratio','缩量倍数','≤此值=缩量（缩量回踩=洗盘）',m.shrink_ratio)+
       pctf(k,'converge_pct','均线粘合阈值(%)','5/10/20/30均线极差÷收盘≤此值=高度粘合',(m.converge_pct||0.03)*100)+
       pctf(k,'wave_gain','第二波·第一波涨幅门槛(%)','涨够这么多才谈第二波（30%不足以出货→主力没走）',(m.wave_gain||0.30)*100)+
-      pctf(k,'stall_pct','滞涨判定·涨幅上限(%)','放量但涨跌幅在此范围内=滞涨（出货特征）',m.stall_pct)+
+      // ★ 用 num 不用 pctf：stall_pct 的默认值本身就是**百分数**（3.0 = 3%），
+      //   而 pctf 带 data-pct（保存时 ÷100）→ 用户改一次就存成 0.03，
+      //   而 swing.exit_point 是 `abs(pct) > stall_pct` → 条件恒真 →
+      //   高位放量滞涨离场点 WS1 几乎不再触发（实测确认）。
+      num(k,'stall_pct','滞涨判定·涨幅上限(%)','放量但涨跌幅在此范围内=滞涨（出货特征）',m.stall_pct)+
       pctf(k,'high_pos','高位判定·60日位置(%)','区间位置≥此值算高位',(m.high_pos||0.70)*100);
     if(k==='E1_meter') body=sw(k,'enabled','启用')+
       pctf(k,'ebb_hurt_ratio','退潮预警·亏钱面积阈值(%)','亏钱面积超此值+温度骤降→按退潮对待',(m.ebb_hurt_ratio||0.3)*100);
@@ -2399,6 +2619,13 @@ function renderModules(){
     if(k==='E4_journal') body=sw(k,'enabled','启用')+
       pctf(k,'cost_pct','往返交易成本(%)','佣金+印花税+滑点，直接从回验收益扣除',(m.cost_pct||0.002)*100)+
       num(k,'max_settle_per_scan','每轮最多结算(只)','控制数据源压力的上限',m.max_settle_per_scan);
+    if(k==='E5_rebound') body=sw(k,'enabled','启用')+
+      num(k,'max_pct','「价没动」判定·涨幅上限(%)','涨幅≤此值算资金在低位吸筹，超了就是追涨',m.max_pct)+
+      num(k,'min_main','主力净流入下限(亿)','低于此额视为噪音，不参与评分',m.min_main)+
+      num(k,'pos_days','「位置」看近几日','用板块资金记忆的累计涨幅判断位置高低',m.pos_days)+
+      num(k,'top_n','输出方向数','做成"方向清单"，不是 3 个硬推荐',m.top_n)+
+      num(k,'min_score','入选最低分','宁缺毋滥',m.min_score)+
+      pctf(k,'trial_weight','试错仓(%)','退潮期只用试错仓，不做重仓',(m.trial_weight||0.05)*100);
     return `<div class="mb" data-m="${k}">
       <div class="mh"><b>${t}</b>
         <div class="sw ${on?'on':''}" data-sw="${k}"></div>
@@ -2498,11 +2725,6 @@ document.addEventListener('visibilitychange',()=>{
 window.addEventListener('beforeunload', stopAuto);
 $('btnSrcClose').onclick=closeAllPanels;
 $('srcDone').onclick=closeAllPanels;
-$('srcSave').onclick=()=>srcCmd({action:'save_cookie',cookie:$('srcCookieInput').value});
-$('srcClear').onclick=()=>{ if(!confirm('清空已保存的 Cookie？'))return;
-  $('srcCookieInput').value=''; srcCmd({action:'save_cookie',cookie:''}); };
-$('srcAuto').onclick=()=>srcCmd({action:'auto'});
-$('srcOpenEm').onclick=()=>window.open('https://quote.eastmoney.com/center','_blank');
 $('srcUnblock').onclick=()=>srcCmd({action:'unblock'});
 $('srcReconnect').onclick=()=>srcCmd({action:'reconnect'});
 document.querySelectorAll('.btnPort').forEach(b=>b.onclick=openPort);
@@ -2512,8 +2734,8 @@ $('pfAdd').onclick=()=>{ const c=$('pfCode').value.trim(); if(!c){alert('请填�
   portCmd({action:'add',code:c,name:$('pfName').value.trim(),
     cost:parseFloat($('pfCost').value)||0,shares:parseFloat($('pfShares').value)||0});
 };
-$('wlAdd').onclick=()=>{ const c=$('wlCode').value.trim(); if(!c){alert('请填代码');return;}
-  portCmd({action:'watch_add',code:c}); };
+// 「加自选」：代码直接加；名称/拼音先搜（唯一命中直接加，多条则列出来让用户点选）
+$('wlAdd').onclick=()=>wlDoAdd();
 $('btnSave').onclick=saveCfg;
 $('btnReset').onclick=async()=>{ if(!confirm('恢复当前策略的默认参数？'))return;
   const p=CONFIG.preset||'wildman';

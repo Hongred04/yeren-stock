@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import http.client
-import http.cookiejar
+import inspect
 import json
 import os
 import queue
@@ -26,9 +26,11 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from . import paths
+from . import universe
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -94,110 +96,12 @@ def reset_pool(host: str = "") -> int:
     return closed
 
 
-# ---------------------------------------------------------------- 东财 Cookie
-# 实测（2026-10-08）东财 push2 的 clist 接口会被**按 URL 路径**风控：请求发出后
-# 服务端直接 RST（RemoteDisconnected），而同一域名、同一时刻的
-# ulist.np / ulist / stock 接口全部 200；东财入口页（www / quote / gridlist）
-# 也一个 Set-Cookie 都不下发。
-#   → 该限流发生在连接层，与 Cookie 无关；带不带 Cookie 都一样被掐。
-# 仍然保留 Cookie 注入能力，因为：
-#   1) 东财部分 datacenter 报表接口对已登录会话的频控阈值更宽；
-#   2) 将来若东财改成校验 Cookie，改配置即可生效，不必改代码。
-# 配置来源（优先级从高到低）：
-#   1) 环境变量 EAST_MONEY_COOKIE
-#   2) 文件 data/eastmoney_cookie.txt（支持热加载：改文件即生效，无需重启进程）
-EM_COOKIE_ENV = "EAST_MONEY_COOKIE"
-EM_COOKIE_FILE = paths.data_path("eastmoney_cookie.txt")
-
-_ck_memo: tuple[float, str] | None = None   # (文件 mtime, 拼好的 cookie)
-
-
-def _norm_cookie(txt: str) -> str:
-    """统一 Cookie 文本：既接受单行 `a=b; c=d`，也接受从 DevTools 复制来的多行。
-
-    注意不能把换行直接换成空格 —— 那样 cookie 之间就没有分隔符了。
-    """
-    parts = []
-    for chunk in (txt or "").replace("\r", "\n").split("\n"):
-        for piece in chunk.split(";"):
-            s = piece.strip()
-            if s:
-                parts.append(s)
-    return "; ".join(parts)
-
-
-def em_cookie() -> str:
-    """当前生效的东财 Cookie：环境变量优先，否则读文件（按 mtime 热加载）。"""
-    global _ck_memo
-    env = (os.environ.get(EM_COOKIE_ENV) or "").strip()
-    if env:
-        return _norm_cookie(env)
-    try:
-        mt = os.path.getmtime(EM_COOKIE_FILE)
-    except OSError:
-        _ck_memo = None
-        return ""
-    if _ck_memo is not None and _ck_memo[0] == mt:
-        return _ck_memo[1]
-    try:
-        with open(EM_COOKIE_FILE, encoding="utf-8") as f:
-            txt = f.read()
-    except OSError:
-        return ""
-    txt = _norm_cookie(txt)
-    _ck_memo = (mt, txt)
-    return txt
-
-
-def cookie_status() -> dict:
-    """Cookie 当前状态（给前端/自检看）。"""
-    env = (os.environ.get(EM_COOKIE_ENV) or "").strip()
-    ck = em_cookie()
-    return {
-        "configured": bool(ck),
-        "source": "环境变量" if env else ("文件" if ck else "未配置"),
-        "env_var": EM_COOKIE_ENV,
-        "file": EM_COOKIE_FILE,
-        "length": len(ck),
-        "preview": (ck[:28] + "…") if len(ck) > 28 else ck,
-    }
-
-
-def save_cookie(text: str) -> dict:
-    """把粘贴的 Cookie 落盘（前端「保存」用），立即生效、无需重启。"""
-    global _ck_memo
-    txt = _norm_cookie(text)
-    os.makedirs(os.path.dirname(EM_COOKIE_FILE), exist_ok=True)
-    with open(EM_COOKIE_FILE, "w", encoding="utf-8") as f:
-        f.write(txt)
-    _ck_memo = None
-    return cookie_status()
-
-
-def auto_fetch_cookie(timeout: int = 12) -> dict:
-    """尝试自动获取东财**匿名设备** Cookie（走 CookieJar 收 Set-Cookie）。
-
-    实测当前东财入口页不下发任何 Set-Cookie，所以通常返回 found=False ——
-    登录态 Cookie 没有自动途径，只能手动导出一次。保留此函数是为了东财将来
-    启用设备 Cookie 时能自动接上，不必改数据层。
-    """
-    cj = http.cookiejar.CookieJar()
-    op = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(cj),
-        urllib.request.HTTPSHandler(context=_SSL_CTX))
-    op.addheaders = [("User-Agent", UA), ("Accept", "text/html,*/*")]
-    for url in ("https://quote.eastmoney.com/center/gridlist.html",
-                "https://www.eastmoney.com/"):
-        try:
-            with op.open(url, timeout=timeout):
-                pass
-        except Exception:
-            continue
-        got = [f"{c.name}={c.value}" for c in cj]
-        if got:
-            return {"found": True, "cookies": got, "header": "; ".join(got),
-                    "from": url}
-    return {"found": False, "cookies": [], "header": "", "from": ""}
+# 说明：这里原来有一套「东财 Cookie」注入（环境变量 / data/eastmoney_cookie.txt /
+# 前端粘贴保存 / 自动获取匿名 Cookie）。已**整体移除**（v1.29.0）——
+# 代码自己的实测结论就是它没用：「东财 push2 的 clist 接口按 URL 路径风控，
+# 请求发出后服务端直接 RST；而同一域名同一时刻的其它接口全部 200；东财入口页
+# 一个 Set-Cookie 都不下发 → 该限流发生在连接层，与 Cookie 无关，带不带都一样被掐」。
+# 留着它只会让「数据源」面板多一块没人用得上的配置项。
 
 
 # ---------------------------------------------------------------- 接口熔断
@@ -243,7 +147,7 @@ def em_blocked() -> list[dict]:
 
 
 def em_reset_blocks() -> int:
-    """清空熔断记录（例如刚配好 Cookie，想立刻重试）。"""
+    """清空熔断记录（数据源面板的「清除熔断记录」按钮）。"""
     with _em_lock:
         n = len(_em_down_until)
         _em_down_until.clear()
@@ -278,6 +182,33 @@ def _new_conn(host: str, timeout: int) -> http.client.HTTPSConnection:
     return conn
 
 
+# ---------------------------------------------------------------- 主机级实时状态
+# 「数据源」面板要列出**每一个源**的实时状态。最省事也最准的做法不是在面板里
+# 另发一轮探测请求，而是在 `_get` 这**唯一出口**上记一笔：谁、什么时候、成没成、
+# 花了多久。这样面板看到的就是系统真实使用中的状态，零额外请求、零额外延迟。
+_HOST_STAT: dict[str, dict] = {}
+_HOST_LOCK = threading.Lock()
+
+
+def _host_note(host: str, ok: bool, ms: int, err: Exception | None = None) -> None:
+    """记录一次主机请求结果（成功/失败、耗时、连续失败次数）。"""
+    if not host:
+        return
+    with _HOST_LOCK:
+        old = _HOST_STAT.get(host) or {}
+        _HOST_STAT[host] = {
+            "ok": bool(ok), "ts": time.time(), "ms": int(ms),
+            "fails": 0 if ok else int(old.get("fails", 0)) + 1,
+            "err": "" if ok else f"{type(err).__name__}" if err else "请求失败",
+        }
+
+
+def host_stat(host: str) -> dict:
+    """某主机的最近一次请求结果（没有记录返回 {}）。"""
+    with _HOST_LOCK:
+        return dict(_HOST_STAT.get(host) or {})
+
+
 def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
     """HTTPS GET，keep-alive 连接池复用。
 
@@ -293,12 +224,9 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
         "Accept-Encoding": "identity",
         "Host": p.netloc,
     }
-    if "eastmoney.com" in host:
-        ck = em_cookie()
-        if ck:
-            headers["Cookie"] = ck
     q = _conn_pool.setdefault(host, queue.Queue())
     last_err: Exception | None = None
+    t0 = time.time()
     for attempt in range(3):
         conn = None
         reused = False
@@ -328,6 +256,7 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
                 q.put(conn)
             else:
                 conn.close()
+            _host_note(host, True, int((time.time() - t0) * 1000))
             return data
         except Exception as e:
             last_err = e
@@ -345,6 +274,7 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
                     pass
             # 已被复用的坏连接：立即再试一次（下一轮 get_nowait 拿到的要么是新连接，
             # 要么是池里另一条；池空则新建，天然自愈）
+    _host_note(host, False, int((time.time() - t0) * 1000), last_err)
     raise last_err  # type: ignore[misc]
 
 
@@ -699,18 +629,29 @@ def load_last_complete_amount(date_limit: str) -> float:
 
 
 def load_last_amount_meta(date_limit: str) -> dict:
-    """<= date_limit 的最近一条成交额记录 → {date, amount, final}。
+    """<= date_limit 的最近一条**上一交易日**成交额记录 → {date, amount, final}。
 
     final=False 说明那天只扫到盘中（值偏低），界面要如实说明 —— 不能当成
     "上一完整交易日全天"。老档案没有 final 字段，按 True 处理（那时只有
     收盘后才写，值本来就是全天终值）。
+
+    ★ 排除「当日自己的盘中快照」：档案会把今天的高水位也写进去（final=False），
+      那不是"上一交易日"；盘前兜底若取到它，等于拿今天的半个数当昨天全天
+      （实测 2026-10-13 盘前会把当日写下的 15378 亿当成"上一交易日全天额"）。
+      当日记录只有在**已收盘（final=True）**时才代表一个完整交易日 ——
+      周末/节假日的 real_date 正落在最近一个已收盘交易日上，那天必须能被采用。
     """
+    limit = date_limit or "99999999"
     best = {"date": "", "amount": 0.0, "final": True}
     for e in _amount_entries():
-        if str(e.get("date", "")) <= (date_limit or "99999999"):
-            best = {"date": e.get("date", ""),
-                    "amount": float(e.get("amount") or 0),
-                    "final": bool(e.get("final", True))}
+        d = str(e.get("date", ""))
+        if d > limit:
+            continue
+        if d == limit and not e.get("final", True):
+            continue                      # 今天的盘中快照 ≠ 上一交易日
+        best = {"date": e.get("date", ""),
+                "amount": float(e.get("amount") or 0),
+                "final": bool(e.get("final", True))}
     return best
 
 
@@ -902,18 +843,34 @@ def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
                        empty={}, valid=lambda v: len(v or {}) >= 2)
 
 
-def market_amount_hwm(date: str, current_yi: float) -> float:
+def market_amount_hwm(date: str, current_yi: float, live: bool = True) -> float:
     """当日两市成交额的**高水位**（亿）。
 
     盘中累计成交额只会增不会减，所以取 max 天然安全；而"部分响应"
     （只回了上证没回深证）会让 sum 直接腰斩 —— 高水位正好挡住这种丢失。
     落盘保存，跨扫描/跨重启都有效。
+
+    ★ live：这次读数是不是**今日盘中/收盘后**的真实累计额。盘前/集合竞价/休市
+      时，指数快照里的成交额是**上一交易日**的全天额 —— 若当今日累计记下来，
+      今日一开盘就被昨收全天额**锁死**（实测 2026-10-13：08:48 盘前扫到上一日
+      全天 15378 亿并入选今日高水位，11:29 实际已成交仅 9987 亿，界面却仍显示
+      15378 亿、"比近期同期快 104%（明显放量）"，节奏与进度条全被放大）。所以
+      live=False 直接返回 0 —— 由调用方改走"上一交易日全天额"兜底，不碰今日档案。
+
+    自愈：旧实现无 live 概念，落盘的是裸数值——无法证明它记的是"今日累计"，
+    读取时一律不采信（视为 0 重新起算）。这样历史遗留的污染值会被自动丢弃，
+    不需要手工清档；新写法落盘 {"value","live":True}，重读即可正常续用。
     """
     cur = float(current_yi or 0)
+    if not live:
+        return 0.0
     old, _ = _mem_read("mkt_amount", date)
-    best = max(cur, float(old or 0))
-    if best > 0 and best != float(old or 0):
-        _mem_write("mkt_amount", date, best)
+    old_val = 0.0
+    if isinstance(old, dict) and old.get("live"):
+        old_val = float(old.get("value") or 0)
+    best = max(cur, old_val)
+    if best > 0 and best != old_val:
+        _mem_write("mkt_amount", date, {"value": best, "live": True})
     return best
 
 
@@ -948,13 +905,143 @@ _tdx_fail = 0
 _tdx_probed = False
 TDX_FAIL_LIMIT = 3      # 连续失败到此数 → 本次会话弃用通达信，防拖慢全市场扫描
 
+# ★ 选服务器（v1.30.0 修）—— 这是「通达信一直显示不可用」的**真正原因**。
+#
+# mootdx 不传 server 时会用 `~/.mootdx/config.json` 里的 `BESTIP`，而那份 BESTIP
+# 可能指向一台**早已下线**的机器（实测本机 BESTIP=218.6.170.47：连不上 → 每次
+# K 线调用白等 4~15 秒后返回空）。更麻烦的是 `mootdx.config.set()` **只改内存、
+# 不落盘**，所以每次启动都会重新读回那台死服务器 —— 通达信等于永远没用上。
+#
+# 而且「TCP 连得上」≠「能出数据」：实测 55 台候选里 14 台 TCP 通，
+# **只有 1 台真能返回 K 线**（通达信服务端协议近年改过，大量老站点只应答
+# 「股票列表」这类请求，K线/行情一律回空）。所以选服必须**真拉一次 K 线**才算数。
+TDX_SERVERS = [                     # 已知可用站点（社区维护，实测有效）
+    ("117.34.114.14", 7709),
+]
+TDX_PROBE_TIMEOUT = 2.5             # 单台探测超时（秒）
+TDX_CACHE_PATH = paths.data_path("tdx_server.json")
+
+
+def _tdx_candidates() -> list[tuple[str, int]]:
+    """候选服务器：内置已知可用 → 上次选中的 → mootdx 配置里的 SERVER.HQ。
+
+    顺序即优先级；去重。配置表通常有几十台，一并纳入 —— 哪天内置那台挂了，
+    还能从配置里挑到活的。
+    """
+    out: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(ip, port=7709):
+        try:
+            key = (str(ip).strip(), int(port))
+        except (TypeError, ValueError):
+            return
+        if key[0] and key not in seen:
+            seen.add(key)
+            out.append(key)
+
+    for ip, port in TDX_SERVERS:
+        add(ip, port)
+    try:
+        with open(TDX_CACHE_PATH, encoding="utf-8") as f:
+            c = json.load(f)
+        add(c.get("ip"), c.get("port", 7709))
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    try:                                        # mootdx 自带的站点表
+        cfg = os.path.join(os.path.expanduser("~"), ".mootdx", "config.json")
+        with open(cfg, encoding="utf-8") as f:
+            hq = (json.load(f).get("SERVER") or {}).get("HQ") or []
+        for row in hq:
+            if isinstance(row, (list, tuple)) and len(row) >= 3:
+                add(row[1], row[2])
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return out
+
+
+def _tcp_ok(ip: str, port: int, timeout: float = TDX_PROBE_TIMEOUT) -> bool:
+    import socket as _s
+    try:
+        c = _s.create_connection((ip, int(port)), timeout=timeout)
+        c.close()
+        return True
+    except OSError:
+        return False
+
+
+def _tdx_data_ok(ip: str, port: int, timeout: float = TDX_PROBE_TIMEOUT) -> bool:
+    """真拉一次 K 线 —— 只有能出数据才算「可用」。
+
+    用 tdxpy 的裸客户端探测（mootdx 内部就是它），**不走 mootdx 的 factory** ——
+    factory 会写 mootdx 的全局配置，多线程并行探测时会互相覆盖。
+    """
+    try:
+        from tdxpy.hq import TdxHq_API
+    except Exception:
+        return False
+    api = TdxHq_API(raise_exception=False)
+    try:
+        if not api.connect(ip, int(port), time_out=timeout):
+            return False
+        return bool(api.get_security_bars(9, 1, "600519", 0, 3))
+    except Exception:
+        return False
+    finally:
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+
+
+def _tdx_pick_server(force: bool = False) -> tuple[str, int] | None:
+    """选一台**真能出数据**的服务器，结果落盘复用。选不到返回 None。
+
+    两步：① 并行 TCP 探活（便宜，先砍掉大半）；② 对活下来的逐个做数据探测。
+    整个过程加锁只做一次；之后走缓存，不再重复探测（`_tdx_picked_once` 记住
+    "已经探过了"，免得在确实没有可用服务器的环境里每次开面板都白等几秒）。
+    """
+    global _tdx_server, _tdx_picked_once
+    with _tdx_lock:
+        if _tdx_server and not force:
+            return _tdx_server
+        if _tdx_picked_once and not force:
+            return None
+        cands = _tdx_candidates()
+        if not cands:
+            _tdx_server = None
+            return None
+        live: list[tuple[str, int]] = []
+        with ThreadPoolExecutor(max_workers=min(24, len(cands))) as ex:
+            for c, good in zip(cands, ex.map(lambda x: _tcp_ok(*x), cands)):
+                if good:
+                    live.append(c)
+        for c in live:                      # 数据探测：按候选顺序取第一台能出数据的
+            if _tdx_data_ok(*c):
+                _tdx_server = c
+                try:
+                    os.makedirs(os.path.dirname(TDX_CACHE_PATH), exist_ok=True)
+                    with open(TDX_CACHE_PATH, "w", encoding="utf-8") as f:
+                        json.dump({"ip": c[0], "port": c[1], "ts": int(time.time())}, f)
+                except OSError:
+                    pass
+                _tdx_picked_once = True
+                return c
+        _tdx_server = None
+        _tdx_picked_once = True
+        return None
+
+
+_tdx_server: tuple[str, int] | None = None
+_tdx_picked_once = False        # 是否已经探过一轮（避免反复白等）
+
 
 def _tdx_client():
     """本线程的 mootdx 连接（惰性建、线程内复用）。不可用/已弃用 → None。
 
-    ★ 一次性健康探测：首次建连后**试拉一次真实K线**，拿不到就立刻全局弃用 ——
-    否则在连不上的网络里，每次 K 线调用都要白等几秒（全市场扫描会明显变慢）。
-    探测只做一次、加锁串行，失败后 _tdx_fail 直接顶到上限。
+    ★ 一次性健康探测：先选到一台能出数据的服务器，再试拉一次真实K线；
+    拿不到就立刻全局弃用 —— 否则在连不上的网络里，每次 K 线调用都要白等几秒
+    （全市场扫描会明显变慢）。探测只做一次、加锁串行，失败后 _tdx_fail 顶到上限。
     """
     global _tdx_fail, _tdx_probed
     if not _TDX_AVAILABLE or _tdx_fail >= TDX_FAIL_LIMIT:
@@ -965,8 +1052,13 @@ def _tdx_client():
     with _tdx_lock:
         if _tdx_fail >= TDX_FAIL_LIMIT:
             return None
+    srv = _tdx_pick_server()
+    if srv is None:
+        _tdx_fail = TDX_FAIL_LIMIT
+        return None
+    with _tdx_lock:
         try:
-            cli = _TdxQuotes.factory(market="std")
+            cli = _TdxQuotes.factory(market="std", server=srv, timeout=6)
         except Exception:
             _tdx_fail = TDX_FAIL_LIMIT
             return None
@@ -986,34 +1078,108 @@ def _tdx_client():
 
 def tdx_status() -> dict:
     """通达信可用性（给数据源面板用）。"""
+    srv = _tdx_server
     return {"available": _TDX_AVAILABLE, "fail": _tdx_fail,
-            "disabled": _tdx_fail >= TDX_FAIL_LIMIT}
+            "disabled": _tdx_fail >= TDX_FAIL_LIMIT,
+            "server": (f"{srv[0]}:{srv[1]}" if srv else ""),
+            "candidates": len(_tdx_candidates()) if _TDX_AVAILABLE else 0,
+            "picked": bool(srv)}
 
 
-def _kline_from_tdx(code: str, n: int) -> list[dict]:
-    """通达信(mootdx) 前复权日K —— 首选源。失败返回 []，调用方自动降级。"""
-    global _tdx_fail
-    cli = _tdx_client()
-    if cli is None:
-        return []
-    sym = code[2:] if code[:2].lower() in ("sh", "sz", "bj") else code
-    df = None
+def tdx_server_probe() -> dict:
+    """重新选服（面板/自检用）：清掉缓存与弃用标记，再挑一台能出数据的。"""
+    global _tdx_fail, _tdx_probed, _tdx_server, _tdx_picked_once
+    with _tdx_lock:
+        _tdx_fail = 0
+        _tdx_probed = False
+        _tdx_server = None
+        _tdx_picked_once = False
+    _tdx_local.cli = None
+    _tdx_pick_server(force=True)
+    return tdx_status()
+
+
+@contextmanager
+def _pandas_legacy_fillna():
+    """临时给 pandas 的 `fillna` 补回 1.x 的 `method=` 参数。
+
+    mootdx 的**复权**实现里调了 `fillna(method='ffill', axis=0)`，而 pandas 2.2+
+    已移除该参数（`TypeError: NDFrame.fillna() got an unexpected keyword argument
+    'method'`）→ 走 `adjust="qfq"` 必崩。降级 pandas 不可行：Python 3.13 没有
+    pandas<2.2 的 wheel，只能源码编译（实测 3 分钟没编完）。
+
+    所以只在这一个调用点上打补丁，用完立刻还原 —— 不动进程里其它地方的 pandas 行为。
+    """
     try:
-        # 新版 mootdx 日线用 frequency=9；老版用 category=4 —— 两个都试。
+        import pandas as pd
+    except Exception:                                  # noqa: BLE001
+        yield
+        return
+    # ★ DataFrame 和 Series 都要打：mootdx 复权里是 `data.factor.fillna(...)`，
+    #   而 `data.factor` 是 **Series** —— 只补 DataFrame 等于没补。
+    targets = [pd.DataFrame, pd.Series]
+    origs = {}
+    for cls in targets:
+        orig = cls.fillna
         try:
-            df = cli.bars(symbol=sym, frequency=9, offset=n, adjust="qfq")
+            if "method" in inspect.signature(orig).parameters:
+                continue                               # 老版本本来就支持
+        except (TypeError, ValueError):
+            continue
+
+        def _fillna(self, value=None, *, method=None, axis=None, inplace=False,
+                    limit=None, _orig=orig, **kw):
+            if method in ("ffill", "pad"):
+                return self.ffill(limit=limit, inplace=inplace)
+            if method in ("bfill", "backfill"):
+                return self.bfill(limit=limit, inplace=inplace)
+            return _orig(self, value, axis=axis, inplace=inplace, limit=limit, **kw)
+
+        origs[cls] = orig
+        cls.fillna = _fillna
+    try:
+        yield
+    finally:
+        for cls, orig in origs.items():
+            cls.fillna = orig
+
+
+def _tdx_bars(cli, sym: str, n: int, index: bool = False) -> list[dict]:
+    """把 mootdx 的 K 线 DataFrame 转成我们的 bar 列表（含两处必要的清洗）。
+
+    ① **前复权优先、失败退回不复权**：mootdx 的复权依赖 pandas，旧版 pandas
+       里 `fillna(method=...)` 还在、新版已移除 —— 一旦复权路径抛异常，
+       退回不复权至少还能给出可用数据（调用方只关心形态与量能）。
+    ② **丢掉未走完的当日 bar**：盘中（尤其开盘前）服务器会返回一根
+       `open==close==high==low` 且 `vol≈0` 的占位K线。把它当成真K线喂给
+       形态判定，会凭空多出一根"一字板"，`_graph_score` / `swash` 全被带偏。
+       判据：成交量<=0 或 四价全等 且 日期==今天。
+    """
+    df = None
+    for kwargs in ({"adjust": "qfq"}, {}):
+        try:
+            with _pandas_legacy_fillna():              # 复权要用到，见该函数说明
+                df = (cli.index_bars(symbol=sym, frequency=9, offset=n, **kwargs)
+                      if index else cli.bars(symbol=sym, frequency=9, offset=n, **kwargs))
+            if df is not None and len(df):
+                break
         except TypeError:
-            df = cli.bars(symbol=sym, category=4, offset=n)
-    except Exception:
-        _tdx_fail += 1
-        return []
+            try:                       # 极老版本 mootdx 用 category=4
+                df = (cli.index_bars(symbol=sym, category=4, offset=n)
+                      if index else cli.bars(symbol=sym, category=4, offset=n))
+                if df is not None and len(df):
+                    break
+            except Exception:                          # noqa: BLE001
+                pass
+        except Exception:                              # noqa: BLE001
+            pass
     if df is None or len(df) == 0:
-        _tdx_fail += 1
         return []
     try:
         df = df.reset_index()          # datetime 可能是索引，摊平成列
     except Exception:
         pass
+    today = datetime.now().strftime("%Y-%m-%d")
     out = []
     try:
         rows = df.iterrows()
@@ -1027,12 +1193,47 @@ def _kline_from_tdx(code: str, n: int) -> list[dict]:
             vol = r.get("vol")
             if vol is None:
                 vol = r.get("volume", 0)
-            out.append({"date": d, "open": float(r["open"]), "close": float(r["close"]),
-                        "high": float(r["high"]), "low": float(r["low"]),
-                        "volume": float(vol or 0)})
+            vol = float(vol or 0)
+            o, c = float(r["open"]), float(r["close"])
+            h, low = float(r["high"]), float(r["low"])
+            # 未走完的当日占位 bar（四价全等 + 无成交量）—— 丢掉，别当一字板。
+            # ★ 判据不能用 `vol <= 0`：服务器给的是 5.877471754111438e-39 这种
+            #   **非规格化浮点**（协议里"空"字段的位模式），它 > 0，会漏判。
+            #   真实成交量以手/股计，永远 >= 1，所以用 < 1 当"没有量"。
+            if d == today and vol < 1 and o == c == h == low:
+                continue
+            if vol < 1 and o <= 0:
+                continue
+            out.append({"date": d, "open": o, "close": c, "high": h, "low": low,
+                        "volume": vol})
         except Exception:
             continue
     out.sort(key=lambda x: x["date"])
+    return out
+
+
+def _kline_from_tdx(code: str, n: int) -> list[dict]:
+    """通达信(mootdx) 前复权日K —— 首选源。失败返回 []，调用方自动降级。"""
+    global _tdx_fail
+    cli = _tdx_client()
+    if cli is None:
+        return []
+    sym = code[2:] if code[:2].lower() in ("sh", "sz", "bj") else code
+    out = _tdx_bars(cli, sym, n)
+    if not out:
+        _tdx_fail += 1
+        return []
+    _tdx_fail = 0
+    return out
+
+
+def _kline_from_tdx_index(symbol: str, n: int) -> list[dict]:
+    """通达信指数日K（沪指 000001 / 深成指 399001）—— 指数走 index_bars。"""
+    global _tdx_fail
+    cli = _tdx_client()
+    if cli is None:
+        return []
+    out = _tdx_bars(cli, symbol, n, index=True)
     if out:
         _tdx_fail = 0
     return out
@@ -1454,8 +1655,17 @@ def fetch_limit_up_history(days: int = 30, end_date: str = "") -> list[dict]:
 
 
 def market_amount_history(days: int = 40) -> list[dict]:
-    """沪指日K（近 N 日），用于量能趋势。"""
-    bars = _kline_from_tx("sh000001", days + 5)
+    """沪指日K（近 N 日），用于量能趋势。
+
+    源优先级与个股日K同一套：**通达信（TCP 不被 IP 封）→ 腾讯 → 新浪**。
+    量能分位/环比全靠这条数据（见 engine._relative_volume），多一层首选源
+    就多一层保险 —— 腾讯一限流，量能判定就只剩新浪一条腿。
+    """
+    bars = _kline_from_tdx_index("000001", days + 5)
+    if not bars:
+        bars = _kline_from_tx("sh000001", days + 5)
+    if not bars:
+        bars = _kline_from_sina("sh000001", days + 5)
     if not bars:
         return []
     return bars[-days:]
@@ -2278,3 +2488,469 @@ def fetch_board_constituents_raw(bk_code: str) -> list[dict]:
                     "pct": _num(it.get("f3")),
                     "float_mv": _norm_mv_yi(_num(it.get("f21")))})
     return out
+
+
+# ---------------------------------------------------------------- 股票名称搜索
+# 自选股原来只能输代码（用户 10-13 反馈：记不住代码，想直接搜名字）。
+# 名称 → 代码 的解析放在这里，因为只有这一步需要联网：
+#   ① 主源：腾讯 smartbox 联想接口（与行情同域，支持**名称子串**与**拼音首字母**）；
+#   ② 兜底：本地名单 data/name_index.json —— 由全市场扫描的快照累积而成，
+#      主源被限流/断网时仍可搜（覆盖范围 = 历史扫描过的代码，通常是全市场）。
+# 写入路径（portfolio.watch_upsert）不改：前端先搜到代码，再按原接口提交。
+
+SEARCH_URL = "https://smartbox.gtimg.cn/s3/?t=all&q={q}"
+NAME_INDEX_PATH = paths.data_path("name_index.json")
+_NAME_INDEX_LOCK = threading.Lock()
+
+# smartbox 返回的是 \uXXXX 转义串，用正则还原（比 unicode_escape 稳：
+# 后者会把已解码的多字节字符再拆一遍，中文名容易变乱码）。
+_HINT_ESC = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _hint_unescape(s: str) -> str:
+    return _HINT_ESC.sub(lambda m: chr(int(m.group(1), 16)), s or "")
+
+
+def _parse_search_hint(raw: str) -> list[dict]:
+    """解析 smartbox 的 v_hint 串 → [{code, name, pinyin, board}]（只留 A 股）。
+
+    单条记录形如 `sh~600519~\\u8d35\\u5dde\\u8305\\u53f0~gzmt~GP-A`，
+    字段依次是 市场 / 代码 / 名称 / 拼音首字母 / 类型，记录之间用 `^` 分隔。
+    港股（GP）、美股、权证（QZ）等一律剔除 —— 自选股只认 A 股。
+    """
+    m = re.search(r'v_hint="(.*?)"', raw or "", re.S)
+    if not m:
+        return []
+    out = []
+    for rec in m.group(1).split("^"):
+        p = rec.split("~")
+        if len(p) < 5:
+            continue
+        market, num, name, py, typ = p[0].strip(), p[1].strip(), p[2], p[3], p[4]
+        if market not in ("sh", "sz", "bj"):
+            continue                       # 港股 / 美股 / 其他市场
+        if not typ.upper().startswith("GP-A"):
+            continue                       # 权证、基金以外的非 A 股类型
+        if not re.fullmatch(r"\d{6}", num):
+            continue
+        code = market + num
+        out.append({"code": code, "name": _hint_unescape(name),
+                    "pinyin": (py or "").strip().lower(),
+                    "board": universe.board_of(code)})
+    return out
+
+
+def _rank_search(rows: list[dict], q: str, limit: int) -> list[dict]:
+    """统一排序：名称前缀 > 名称包含 > 拼音前缀 > 拼音包含；同级短名优先、再按代码。
+
+    排序必须稳定可复现 —— 同一个关键词每次给出同样的顺序，否则用户
+    "上一条还是它、这一条就变了"，点错就加错票。
+    """
+    ql = (q or "").strip().lower()
+
+    def key(r):
+        n = str(r.get("name", "")).lower()
+        py = str(r.get("pinyin", "")).lower()
+        if n.startswith(ql):
+            tier = 0
+        elif ql and ql in n:
+            tier = 1
+        elif py.startswith(ql):
+            tier = 2
+        elif ql and ql in py:
+            tier = 3
+        else:
+            tier = 4
+        return (tier, len(n), str(r.get("code", "")))
+
+    return sorted(rows, key=key)[:max(1, int(limit))]
+
+
+def _name_index_read_file() -> dict:
+    try:
+        with open(NAME_INDEX_PATH, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _name_index_seed() -> dict:
+    """用本地板块成员表冷启动名单（全市场 6000+ 只）。
+
+    为什么需要冷启动：`name_index.json` 要等一次全市场扫描才会生成，而用户
+    可能装完就想加自选。板块成员表（data/board_members.json）已经覆盖全市场，
+    正好拿来当初始名单。
+    名字带「(已切换)」的是**已作废的旧代码**（如北交所 835xxx → 920xxx），
+    必须剔除 —— 否则用户搜出来加进去的是一只查不到行情的死票。
+    """
+    try:
+        with open(paths.data_path("board_members.json"), "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    idx: dict[str, str] = {}
+    for arr in (obj.get("members") or {}).values():
+        for it in arr or []:
+            c = it.get("code")
+            n = (it.get("name") or "").strip()
+            if not c or not n or "(已切换)" in n:
+                continue
+            idx.setdefault(c, n)
+    return idx
+
+
+# 名单内存缓存：搜索框是**逐字触发**的，不能每敲一下都去读 4MB 的板块表。
+_IDX_CACHE: dict = {"ts": 0.0, "data": None}
+
+
+def _name_index_write(idx: dict) -> bool:
+    try:
+        with _NAME_INDEX_LOCK:
+            os.makedirs(os.path.dirname(NAME_INDEX_PATH), exist_ok=True)
+            tmp = NAME_INDEX_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(idx, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, NAME_INDEX_PATH)
+        return True
+    except OSError:
+        return False
+
+
+def _name_index_load(max_age: float = 30.0) -> dict:
+    """本地名单 {code: name}（带 30 秒内存缓存）。
+
+    文件不存在或明显不全（< 500 条）时用板块成员表冷启动，并落盘 ——
+    下次直接读小文件，不再碰 4MB 的板块表。
+    """
+    now = time.time()
+    if _IDX_CACHE["data"] is not None and now - _IDX_CACHE["ts"] < max_age:
+        return _IDX_CACHE["data"]
+    idx = _name_index_read_file()
+    if len(idx) < 500:
+        seeded = _name_index_seed()
+        if len(seeded) > len(idx):
+            idx = seeded
+            _name_index_write(idx)
+    _IDX_CACHE["data"], _IDX_CACHE["ts"] = idx, now
+    return idx
+
+
+def _name_index_reset_cache() -> None:
+    """让下一次读取重新落盘（测试与 remember_names 写盘后调用）。"""
+    _IDX_CACHE["data"], _IDX_CACHE["ts"] = None, 0.0
+
+
+def remember_names(snaps: dict) -> int:
+    """把一次全市场快照的「代码 → 名称」并进本地名单，返回新增条数。
+
+    只在**全市场扫描**后调用（见 pipeline）。名字变了（加 ST 前缀、更名）
+    也一并更新 —— 行情源的名字永远比冷启动的板块表新。
+    无变化则不落盘，避免每轮扫描都写盘。
+    """
+    if not snaps or len(snaps) < 100:      # 单只详情那种调用不更新名单
+        return 0
+    idx = dict(_name_index_load())
+    before = dict(idx)
+    added = 0
+    for code, s in snaps.items():
+        nm = (s or {}).get("name")
+        if not code or not nm:
+            continue
+        if idx.get(code) != nm:
+            if code not in idx:
+                added += 1
+            idx[code] = nm
+    if idx == before:
+        return 0
+    if _name_index_write(idx):
+        _name_index_reset_cache()
+    return added
+
+
+def _search_local(keyword: str, limit: int = 20) -> list[dict]:
+    """本地全市场名单子串匹配（名称命中；名单不含拼音，故不参与匹配）。"""
+    ql = (keyword or "").strip().lower()
+    if not ql:
+        return []
+    rows = []
+    for code, name in _name_index_load().items():
+        nm = str(name)
+        if ql in nm.lower():
+            rows.append({"code": code, "name": nm, "pinyin": "",
+                         "board": universe.board_of(code)})
+    return _rank_search(rows, ql, limit)
+
+
+def name_index_size() -> int:
+    """本地名单条数（数据源面板/自检展示用）。"""
+    return len(_name_index_load())
+
+
+def search_stocks(keyword: str, limit: int = 8) -> dict:
+    """按**名称/拼音**关键词搜 A 股 → {ok, results, source, note}。
+
+    ★ 为什么是「本地名单 + 在线联想」两个源合并，而不是只用在线：
+      腾讯 smartbox 是**联想**接口 —— 结果条数有限（约 10 条）且**前缀优先**，
+      搜"银行"会被「银行ETF…」占满，真正的招商银行/工商银行一个都出不来；
+      且它不覆盖全部北交所（实测"贝特瑞"直接返回无结果）。
+      本地名单是**全市场 6000+ 只**的名称子串匹配，召回完整，正好补上这块。
+      反过来，拼音首字母（"gzmt"）只有在线源支持 —— 两边都不能少。
+
+    匹配规则（合并后统一排序，见 `_rank_search`）：
+      名称前缀 > 名称包含 > 拼音前缀 > 拼音包含；同级**短名优先**、再按代码升序。
+      只保留 A 股（sh/sz/bj，含 `GP-A-KCB` 科创板）；港股/美股/ETF/基金/权证一律剔除。
+
+    source 取值：`live`（仅在线）/ `local`（仅本地）/ `live+local`（两者都有）/
+    `error`（在线失败且本地也没命中）/ `none`（关键词为空）。
+    """
+    q = (keyword or "").strip()
+    if not q:
+        return {"ok": True, "results": [], "source": "none", "note": ""}
+
+    # ① 本地全市场名单：召回完整（子串匹配），但无拼音
+    local = _search_local(q, max(int(limit), 20))
+    # ② 在线联想：唯一支持拼音首字母，且名称比冷启动的板块表新
+    live: list[dict] = []
+    err = ""
+    try:
+        url = SEARCH_URL.format(q=urllib.parse.quote(q))
+        raw = _get(url, timeout=8, referer="https://gu.qq.com/").decode(
+            "utf-8", errors="ignore")
+        live = _parse_search_hint(raw)
+    except Exception as e:                       # noqa: BLE001 —— 网络类异常一律兜底
+        err = f"搜索接口这次没响应（{type(e).__name__}）"
+
+    # 合并：同一代码以在线源为准（名称更新、且带拼音），本地补齐在线没召回的部分
+    merged: dict[str, dict] = {}
+    for r in local:
+        merged[r["code"]] = r
+    for r in live:
+        merged[r["code"]] = r
+    rows = _rank_search(list(merged.values()), q, limit)
+
+    if rows:
+        src = ("live+local" if (live and local) else
+               "live" if live else "local")
+        note = ""
+        if err:
+            note = f"{err} —— 拼音搜索暂不可用，名称/代码不受影响"
+        return {"ok": True, "results": rows, "source": src, "note": note}
+
+    if err:
+        return {"ok": False, "results": [], "source": "error",
+                "note": err + "，本地名单也没匹配到；也可以直接输 6 位代码（如 600519）"}
+    return {"ok": True, "results": [], "source": "live+local", "note": ""}
+
+
+# ---------------------------------------------------------------- 数据源总览
+# 「数据源」面板的唯一数据出处：把系统用到的**每一个**源列出来 + 实时状态。
+#
+# 状态全部取自"最近一次真实使用"的记录，**不另发探测请求** ——
+# 面板里再打一轮探测既慢、又会消耗东财的每分钟额度（甚至把熔断撞出来），
+# 得不偿失。数据来源：
+#   · _HOST_STAT      —— _get 每次请求的结果（成功/失败/耗时/连续失败次数）
+#   · em_blocked()    —— 东财 push2 接口级熔断（冷却剩余、连续失败轮数）
+#   · push2_status()  —— push2 每分钟预算、代理出口
+#   · tdx_status()    —— 通达信（TCP，不走 _get）
+#   · data_health()   —— 关键数据是否降级（回退到当日旧快照）
+#
+# 放在文件末尾是因为要引用 EM_PUSH2_HOSTS 等常量（它们定义在中段）。
+
+SOURCE_REGISTRY: list[dict] = [
+    # ---- 行情 ----
+    {"key": "quote", "group": "行情", "name": "行情快照", "vendor": "腾讯",
+     "hosts": ["qt.gtimg.cn"], "use": "全市场快照 · 自选/持仓行情"},
+    {"key": "index", "group": "行情", "name": "指数行情", "vendor": "腾讯",
+     "hosts": ["qt.gtimg.cn"], "health": ["index"], "use": "两市成交额 · 指数涨跌"},
+    {"key": "search", "group": "行情", "name": "名称搜索", "vendor": "腾讯",
+     "hosts": ["smartbox.gtimg.cn"], "use": "加自选时按名称/拼音搜股票"},
+    # ---- K线 ----
+    {"key": "kline_tdx", "group": "K线", "name": "日K线（首选）", "vendor": "通达信",
+     "hosts": [], "tdx": True, "use": "前复权日K，走 TCP 不走 HTTP"},
+    {"key": "kline_tx", "group": "K线", "name": "日K线（备用）", "vendor": "腾讯",
+     "hosts": ["ifzq.gtimg.cn", "web.ifzq.gtimg.cn"], "health": ["klines"],
+     "use": "通达信不可用时接管"},
+    {"key": "kline_sina", "group": "K线", "name": "日K线（兜底）", "vendor": "新浪",
+     "hosts": ["money.finance.sina.com.cn"], "health": ["klines"],
+     "use": "前两者都失败时"},
+    # ---- 资金 ----
+    {"key": "push2", "group": "资金", "name": "板块 / 个股资金流", "vendor": "东财",
+     "hosts": list(EM_PUSH2_HOSTS) + ["push2his.eastmoney.com"], "push2": True,
+     "health": ["board_flow", "stock_flow", "breadth"],
+     "use": "主力净额 · 涨跌家数 · 板块清单"},
+    {"key": "lhb", "group": "资金", "name": "龙虎榜", "vendor": "东财",
+     "hosts": ["datacenter-web.eastmoney.com"], "health": ["lhb"],
+     "use": "席位买卖明细"},
+    {"key": "sina_hy", "group": "资金", "name": "板块分类（兜底）", "vendor": "新浪",
+     "hosts": ["vip.stock.finance.sina.com.cn"], "health": ["board_list"],
+     "use": "行业 / 概念板块清单"},
+    # ---- 情绪池 ----
+    {"key": "pool", "group": "情绪池", "name": "涨停 / 跌停 / 炸板池", "vendor": "东财",
+     "hosts": ["push2ex.eastmoney.com"], "health": ["pool:ZT", "pool:DT", "pool:ZB"],
+     "use": "情绪周期 · 亏钱面积的地基"},
+    {"key": "yzt", "group": "情绪池", "name": "昨日涨停池", "vendor": "东财",
+     "hosts": ["push2ex.eastmoney.com"], "health": ["yzt"],
+     "use": "打板溢价 · 晋级率"},
+    {"key": "kph", "group": "情绪池", "name": "开盘红（历史回溯）", "vendor": "开盘红",
+     "hosts": ["apphwshhq.kaipanhong.com", "apphis.kaipanhong.com"],
+     "use": "历史涨停池 · 实时情绪（涨跌家数备用口径）"},
+    # ---- 消息 ----
+    {"key": "cls", "group": "消息", "name": "财联社快讯 / 涨停原因", "vendor": "财联社",
+     "hosts": ["api3.cls.cn", "x-quote.cls.cn"], "health": ["cls_reason"],
+     "use": "消息定级 · 涨停原因 · 市场情绪"},
+    {"key": "cls_plate", "group": "消息", "name": "板块热度 / 风口 / 轮动", "vendor": "财联社",
+     "hosts": ["x-quote.cls.cn"], "use": "板块轮动 · 热度榜 · 催化"},
+    {"key": "sina_news", "group": "消息", "name": "新浪 7x24 快讯", "vendor": "新浪",
+     "hosts": ["zhibo.sina.com.cn", "feed.mix.sina.com.cn"], "use": "快讯备用源"},
+    {"key": "cctv", "group": "消息", "name": "央视新闻", "vendor": "央视",
+     "hosts": ["news.cctv.com"], "use": "部委 / 政策原文"},
+    {"key": "ths_news", "group": "消息", "name": "同花顺快讯", "vendor": "同花顺",
+     "hosts": ["news.10jqka.com.cn"], "use": "快讯备用源"},
+    {"key": "em_news", "group": "消息", "name": "东财快讯", "vendor": "东财",
+     "hosts": ["np-listapi.eastmoney.com"], "use": "快讯兜底源"},
+    {"key": "ths_hot", "group": "消息", "name": "同花顺人气榜", "vendor": "同花顺",
+     "hosts": ["dq.10jqka.com.cn", "www.10jqka.com.cn"], "health": ["hot_rank"],
+     "use": "散户关注度"},
+]
+
+# 排序权重：**有问题的排最前**，然后是"确认正常"，最后才是中性档
+# （未启用/未使用 —— 它们不是故障，但也没提供"一切正常"的确认）。
+# 注意：ok 要排在 unused 前面，否则同组里"本次运行还没用到"会挤掉已确认正常的源。
+_STATE_RANK = {"blocked": 0, "down": 1, "degraded": 2, "ok": 3,
+               "disabled": 4, "unused": 5}
+# 只有这三档算「异常」—— 决定顶栏标签与总体严重度。
+# 未启用（如没装通达信）/ 未使用（本次运行还没轮到）都不该被报成故障。
+_PROBLEM_STATES = ("blocked", "down", "degraded")
+_STATE_CN = {"blocked": "受限", "down": "不通", "degraded": "降级",
+             "disabled": "未启用", "unused": "未使用", "ok": "正常"}
+
+
+def _ago(sec: int) -> str:
+    if sec < 60:
+        return f"{sec} 秒前"
+    if sec < 3600:
+        return f"{sec // 60} 分钟前"
+    return f"{sec // 3600} 小时前"
+
+
+def _source_state(spec: dict, now: float, blocked: list[dict], p2: dict,
+                  tdx: dict, bad_health: dict) -> tuple[str, str]:
+    """算一个源的 (状态, 说明)。优先级：熔断 > 数据降级 > 主机最近一次请求。"""
+    # ① 接口级熔断（目前只有东财 push2 家族会进这个名单）
+    if spec.get("push2"):
+        hit = [b for b in blocked if b.get("api")]
+        if hit:
+            left = max(int(b.get("seconds_left") or 0) for b in hit)
+            fails = max(int(b.get("fails") or 0) for b in hit)
+            return "blocked", (f"熔断中 · 冷却约 {max(1, -(-left // 60))} 分钟"
+                               f"（连续失败 {fails} 轮，每 60 秒半开探测）")
+    # ② 通达信（TCP，没有 _get 记录）
+    if spec.get("tdx"):
+        if not tdx.get("available"):
+            return "disabled", "未安装 mootdx —— 已自动退回腾讯/新浪K线"
+        srv = tdx.get("server") or ""
+        if tdx.get("disabled"):
+            n = tdx.get("candidates") or 0
+            why = (f"{n} 台候选里没有一台能出数据" if n else "连不上任何服务器")
+            return "down", (f"暂不可用（{why}）—— 已自动退回腾讯/新浪K线")
+        if not tdx.get("picked"):
+            return "unused", "尚未选服（首次用K线时才探测）"
+        return "ok", f"可用（K线首选源）· {srv}" if srv else "可用（K线首选源）"
+    # ③ 关键数据降级（比"主机通不通"更贴近用户关心的事）
+    bad = [bad_health[k] for k in (spec.get("health") or []) if k in bad_health]
+    if bad:
+        labels = "、".join(str(x.get("label") or x.get("key")) for x in bad)
+        return "degraded", f"{labels}：{bad[0].get('note') or '本轮未取到'}"
+    # ④ 主机最近一次真实请求
+    last: tuple[str, dict] | None = None
+    for h in spec.get("hosts") or []:
+        st = host_stat(h)
+        if st and (last is None or st["ts"] > last[1]["ts"]):
+            last = (h, st)
+    if last is None:
+        return "unused", "本次运行还没用到"
+    host, st = last
+    age = int(now - st["ts"])
+    if st.get("ok"):
+        return "ok", f"最近成功 {_ago(age)} · {st.get('ms')}ms"
+    return "down", (f"最近失败 {_ago(age)}（{st.get('err') or '请求失败'}）"
+                    f" · 连续 {st.get('fails')} 次")
+
+
+def sources_status() -> dict:
+    """所有数据源的实时状态 —— 给「数据源」面板用。
+
+    返回 {items, groups, summary, blocked, push2, tdx, health}：
+      · items   —— 每个源一条（含 group / state / detail / host / use）
+      · summary —— 各状态的计数 + 总体严重度（决定顶栏标签颜色）
+    """
+    now = time.time()
+    # 首次开面板时顺手探一次通达信服务器（之后就走上限缓存）—— 否则那一行永远
+    # 显示"尚未选服"，用户看不到它到底通不通。只探一次，失败也不会反复白等。
+    if _TDX_AVAILABLE and not _tdx_picked_once:
+        try:
+            _tdx_pick_server()
+        except Exception:                                  # noqa: BLE001
+            pass
+    blocked = em_blocked()
+    p2 = push2_status()
+    tdx = tdx_status()
+    health = data_health()
+    bad_health = {x.get("key"): x for x in (health.get("degraded") or [])}
+
+    items = []
+    for spec in SOURCE_REGISTRY:
+        state, detail = _source_state(spec, now, blocked, p2, tdx, bad_health)
+        # 东财 push2 额外带上限速闸门与出口信息（这是它最容易受限的原因）
+        if spec.get("push2") and p2.get("budget_max"):
+            extra = f"本分钟额度 {p2.get('budget_used', 0)}/{p2['budget_max']}"
+            if p2.get("cooling_seconds"):
+                extra += f" · 家族冷却 {p2['cooling_seconds']}s"
+            extra += (" · 出口走代理" if p2.get("proxy_on") else " · 出口直连")
+            if p2.get("budget_skipped"):
+                extra += f" · 已让出 {p2['budget_skipped']} 次"
+            detail = f"{detail} · {extra}" if detail else extra
+        hosts = spec.get("hosts") or []
+        items.append({
+            "key": spec["key"], "group": spec.get("group") or "其它",
+            "name": spec["name"], "vendor": spec.get("vendor") or "",
+            # ★ 只给**主域名**，多域名/多镜像折叠成"等 N 个"（完整列表在 hosts 里，
+            #   前端放 title 提示）。原来把 5 个 push2 镜像拼成一行 112 字符的串，
+            #   而面板名称列是内容撑开的 —— 那一行把说明列挤成一条缝、文字竖着排，
+            #   整行被拉得很高，下面全是空白（用户 10-13 实测："资金接口下面空白很多"）。
+            "host": (hosts[0] if hosts else ("TCP" if spec.get("tdx") else "")),
+            "host_n": len(hosts),
+            "hosts": hosts,
+            "use": spec.get("use") or "",
+            "state": state, "state_cn": _STATE_CN.get(state, state),
+            "detail": detail,
+        })
+
+    # 同组内：严重的排前面；组之间按注册顺序（行情 → K线 → 资金 → 情绪池 → 消息）
+    order = {}
+    for i, spec in enumerate(SOURCE_REGISTRY):
+        order.setdefault(spec.get("group") or "其它", i)
+    items.sort(key=lambda x: (order.get(x["group"], 99), _STATE_RANK.get(x["state"], 9)))
+
+    cnt: dict[str, int] = {}
+    for x in items:
+        cnt[x["state"]] = cnt.get(x["state"], 0) + 1
+    worst = "ok"
+    for st in _PROBLEM_STATES:
+        if cnt.get(st):
+            worst = st
+            break
+    groups = []
+    for x in items:
+        if not groups or groups[-1]["name"] != x["group"]:
+            groups.append({"name": x["group"], "items": []})
+        groups[-1]["items"].append(x)
+
+    return {
+        "items": items, "groups": groups,
+        "summary": {"total": len(items), "worst": worst,
+                    "worst_cn": _STATE_CN.get(worst, worst), **cnt},
+        "blocked": blocked, "push2": p2, "tdx": tdx,
+        "health": health,
+    }

@@ -180,16 +180,27 @@ def ma_bull_alignment(bars: list[dict]) -> dict:
 
 
 def base_pattern(bars: list[dict], lookback: int = 20) -> dict:
-    """底部形态：区间位置 + 缩量程度。"""
-    if len(bars) < lookback:
-        return {"pos": 0.5, "shrink": 1.0, "near_base": False}
+    """底部形态：区间位置 + 缩量程度。
+
+    ★ 返回值必须**始终**含 pos/shrink/near_base/deep_base 四个键：
+    调用方（engine._graph_score）是 `base["deep_base"]` 直接下标取值的，
+    原来 K 线不足 lookback 时的提前返回漏了 deep_base —— 只要一只票的
+    K 线少于 20 根（次新股、上市不久、或K线源只回了部分数据），
+    `/api/stock` 详情就会 KeyError 崩掉（screen 有 >=25 根的过滤兜着，
+    score_one 没有）。样本够 2 根就按实际根数算，比一律返回中性值更有信息量。
+    """
+    if len(bars) < 2:
+        return {"pos": 0.5, "shrink": 1.0, "near_base": False, "deep_base": False}
+    lookback = max(2, min(int(lookback or 20), len(bars)))
     seg = bars[-lookback:]
     highs = [b["high"] for b in seg]
     lows = [b["low"] for b in seg]
     hi, lo = max(highs), min(lows)
     rng = hi - lo
     pos = (bars[-1]["close"] - lo) / rng if rng > 0 else 0.5
-    sh = shrink_ratio(bars, min(5, lookback // 4))
+    # max(1, ...)：lookback 小于 8 时 lookback//4 会是 0，而 shrink_ratio 的
+    # n=0 会走 bars[-0:]（=全序列）再除以 0 → ZeroDivisionError。
+    sh = shrink_ratio(bars, max(1, min(5, lookback // 4)))
     return {
         "pos": pos,
         "shrink": sh,

@@ -98,6 +98,32 @@ def board_streaks(real_date: str = "") -> dict[str, int]:
     return runs
 
 
+def board_cum_pct(real_date: str = "", days: int = 3) -> dict[str, float]:
+    """{板块名: 近 N 个已归档交易日的累计涨幅%} —— 「板块位置」的代理指标。
+
+    没有板块指数K线，就用归档快照里的逐日涨幅累加：**近 N 日跌得多 = 位置低**。
+    只统计已归档的日子（覆盖不全就是"没数据"，返回里干脆不带这个板块名，
+    由调用方当中性处理 —— 不猜）。
+    """
+    try:
+        with open(BOARD_HIST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    dates = sorted(data.keys())
+    if real_date:
+        dates = [d for d in dates if d <= real_date]
+    dates = dates[-max(1, int(days)):]
+    out: dict[str, float] = {}
+    for d in dates:
+        for b in data.get(d, []):
+            n = b.get("name")
+            p = b.get("pct")
+            if n and isinstance(p, (int, float)):
+                out[n] = round(out.get(n, 0.0) + float(p), 2)
+    return out
+
+
 def _f(v, d: float = 0.0) -> float:
     try:
         return float(v)
@@ -151,6 +177,10 @@ def capital_view(flow: dict, lhb: dict | None = None,
     lhb = lhb or {}
     ml = ml or {}
     items: list[dict] = []
+    # 结构化净额（亿）—— E5 等下游模块直接读这几个字段，
+    # 不要去 `"净买" in inst_txt` 那样解析中文文案（脆，改一个字就崩）
+    inst_net_val: float | None = None
+    north_net_val: float | None = None
 
     # ① 游资：席位活跃度
     hm = lhb.get("hotmoney") or []
@@ -179,6 +209,7 @@ def capital_view(flow: dict, lhb: dict | None = None,
     inst = lhb.get("institutions") or {}
     if lhb.get("available") and inst.get("net") is not None:
         net = _f(inst.get("net"))
+        inst_net_val = net            # 结构化暴露给下游模块（别去解析中文文案）
         if net >= 0:
             items.append({"k": "机构", "level": "red",
                           "v": f"机构专用席位净买 {net:+.2f} 亿",
@@ -191,6 +222,7 @@ def capital_view(flow: dict, lhb: dict | None = None,
     north = lhb.get("northbound") or {}
     if lhb.get("available") and north.get("net") is not None:
         net = _f(north.get("net"))
+        north_net_val = net
         items.append({"k": "北向", "level": "red" if net >= 0 else "gry",
                       "v": f"北向资金净{'买' if net >= 0 else '卖'} {net:+.2f} 亿",
                       "note": ("外资方向偏多" if net >= 0 else "外资方向偏空") +
@@ -247,7 +279,11 @@ def capital_view(flow: dict, lhb: dict | None = None,
 
     note = flow.get("source_note") or ""
     return {"available": bool(items), "headline": headline,
-            "items": items, "note": note}
+            "items": items, "note": note,
+            # 结构化净额（亿，None = 该项没数据）—— 给下游模块（如 E5）用
+            "inst_net": inst_net_val,
+            "hotmoney_net": (round(hm_net, 2) if lhb.get("available") and hm else None),
+            "north_net": north_net_val}
 
 
 def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,

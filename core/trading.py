@@ -406,7 +406,12 @@ def buy_signals(stock: dict, bars: list[dict], sentiment: dict,
             "type": "B3", "name": "缩量红盘低吸",
             "priority": "B",
             "kind": "buy", "style": "short",
-            "trigger": (f"极致缩量（{volume.get('amount',0):.0f}亿）仍红盘 "
+            # ★ 盘中 volume["amount"] 恒为 None（engine 的既有契约：不给全天外推
+            #   数字），而 dict.get(k, 默认值) 在**键存在但值为 None** 时仍返回 None
+            #   → f"{None:.0f}" 抛 TypeError，buy_signals 外层没有 try/except，
+            #   **会打断整轮扫描**（实测：盘中命中缩量红盘时必崩）。
+            #   盘中退回当日已成交额（cum_amount，事实值）。
+            "trigger": (f"极致缩量（{(volume.get('amount') or volume.get('cum_amount') or 0):.0f}亿）仍红盘 "
                         f"{stock.get('pct',0):.2f}%，控盘好、筹码结构稳"),
             "entry": (f"不追高：回落到 {close*0.99:.2f} 附近分两笔低吸"
                       if not after else
@@ -596,7 +601,13 @@ def position_plan(cfg: dict, picks: list[dict], sentiment: dict,
     """M5 仓位操作系统：试错 → 加仓 → 推仓 → 锁仓。"""
     p = cfg.get("M5_position", {})
     if not p.get("enabled", True):
-        return {"chain": [], "total": 0, "note": "仓位模块已关闭，自行控制"}
+        # ★ 必须和其它分支**同形**：前端读 pos.target_total / pos.chain_stage
+        #   （index.html 的结论卡「总仓位」、决策步骤第 5 问、仓位卡），
+        #   缺了它们就是 undefined*100 → 界面显示 "NaN%"。chain_stage 用
+        #   "disabled"，前端 STAGE_CN 已把它映射成「已关闭」。
+        return {"chain": [], "total": 0, "target_total": 0.0,
+                "chain_stage": "disabled",
+                "note": "仓位模块已关闭，自行控制"}
 
     n = p.get("pick_count", 4)
     first_w = p.get("first_weight", 0.20)

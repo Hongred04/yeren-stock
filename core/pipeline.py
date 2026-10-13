@@ -19,6 +19,7 @@ from . import moneyflow as flow_mod
 from . import outlook
 from . import portfolio as portfolio_mod
 from . import regime
+from . import rebound as rebound_mod
 from . import sentiment_meter
 from . import strategy_config as sc
 from . import swing as swing_mod
@@ -90,8 +91,16 @@ def save_disk_report(report: dict) -> None:
         pass
 
 
+_disk_memo: tuple | None = None      # (mtime, report)，按文件 mtime 记忆
+
+
 def get_disk_report() -> dict | None:
-    """读上次落盘的结果（标 stale=true 供前端识别）。没有/损坏返回 None。"""
+    """读上次落盘的结果（标 stale=true 供前端识别）。没有/损坏返回 None。
+
+    按文件 mtime 记忆：这份 JSON 有两百多 KB，而 `/api/live`（每分钟一次）和
+    `/api/result` 都会走这里 —— 不能每次都重新解析。
+    """
+    global _disk_memo
     p = _disk_cache_path()
     if not p:
         return None
@@ -99,7 +108,11 @@ def get_disk_report() -> dict | None:
         import json
         import os
         if not os.path.exists(p):
+            _disk_memo = None
             return None
+        mt = os.path.getmtime(p)
+        if _disk_memo is not None and _disk_memo[0] == mt:
+            return _disk_memo[1]
         with open(p, encoding="utf-8") as f:
             obj = json.load(f)
         rep = obj.get("report")
@@ -108,6 +121,7 @@ def get_disk_report() -> dict | None:
         rep = dict(rep)
         rep["stale"] = True
         rep["stale_ts"] = obj.get("ts")
+        _disk_memo = (mt, rep)
         return rep
     except Exception:
         return None
@@ -125,6 +139,35 @@ def invalidate():
 # 并把它为什么没进候选逐条列出来。
 
 _CODE_RE = re.compile(r"^(sh|sz|bj)\d{6}$")
+
+
+def _annotate_moneyflow_reasons(picks: list[dict]) -> int:
+    """给候选补「低位 + 主力净流入刚转正」这条理由，返回补了几条。
+
+    ★ 两个必须守住的口径（v1.28.0 修）：
+
+    ① **调用时机**：必须在 `flow_mod.evaluate(...)` **之后**。`p["moneyflow"]`
+       是它写进去的；原来这段写在候选循环里（循环早于资金流调用结束），
+       `p.get("moneyflow")` 永远是 None → `_main` 恒为 0 → 这条理由
+       **从未产生过**（实测确认，界面上一行都没出现过）。
+
+    ② **单位**：`moneyflow["main"]` 已经是**亿**（见 moneyflow.evaluate 里的
+       `round(f["main"] / 1e8, 2)`）。原来又按"元"做了一次 `/1e8`，
+       即便时序修对也只会显示 `+0.0 亿`。
+    """
+    n = 0
+    for p in picks:
+        try:
+            pos = float((p.get("graph_detail") or {}).get("base_pos") or 1.0)
+            main = float((p.get("moneyflow") or {}).get("main") or 0)
+        except (TypeError, ValueError):
+            continue
+        if 0 < pos <= 0.4 and main > 0:
+            p.setdefault("reasons", []).append(
+                f"低位（60日位置 {pos*100:.0f}%）+ 主力净流入 "
+                f"{main:+.1f} 亿 —— 资金刚动，要信早信")
+            n += 1
+    return n
 
 
 def stock_detail(code: str) -> dict:
@@ -342,7 +385,16 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         # 当日累计成交额只会增不会减 → 取高水位。挡两类丢失：
         #   · 只回了上证、没回深证 → sum 直接腰斩（比"没数据"更危险，会判成极度缩量）
         #   · 接口整次抖动 → 回退当日最后一份好数据（fetch_index_snapshots 已兜）
-        amt_yi = ds.market_amount_hwm(real_date, amt_yi)
+        #
+        # ★ 但**盘前/集合竞价**的指数快照给的是**上一交易日**的全天额，不是今日累计。
+        #   旧实现不看时段直接取高水位 → 今日一开盘就被昨收全天额锁死：实测
+        #   2026-10-13 08:48 盘前把上一日 15378 亿写进今日高水位，11:29 实际已成交
+        #   仅 9987 亿，界面却仍显示「两市已成交 15378 亿 · 比近期同期快 104%」，
+        #   节奏倍数与进度条同步被放大。故只有真正形成当日累计的时段才允许入库；
+        #   盘前/竞价把读数清零，由 load_last_amount_meta 的"上一交易日全天额"兜底。
+        #   （休市/收盘后照常入库 —— 那时快照对应的正是 real_date 这一天的完整值。）
+        live_read = sess["phase"] not in ("pre_open", "auction")
+        amt_yi = ds.market_amount_hwm(real_date, amt_yi, live=live_read)
         amount = amt_yi * 1e8
         fb = ds.load_last_amount_meta(real_date)
         # 盘中折算用**近 N 日实测占比曲线**（写死的经验曲线在不同量能形态下偏差明显）；
@@ -379,6 +431,13 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         if from_enum and snaps:
             # 当日首扫：把真实标的名单落盘，同日重扫少发 ~8 倍请求
             ds.save_valid_codes(sorted(snaps))
+        # 「代码 → 名称」名单：名称搜索（加自选）的本地兜底数据源。
+        # 每次全市场扫描顺手更新，行情源的名字永远比冷启动的板块表新
+        # （加 ST 前缀、更名都能跟上）。失败不影响主流程。
+        try:
+            ds.remember_names(snaps)
+        except Exception:                                  # noqa: BLE001
+            pass
         _prog(f"粗筛候选（已扫 {len(snaps)} 只）…", 0, 100)
         pre = _snapshot_prefilter(snaps, cfg, zt, kline_limit, preopen=preopen)
         _prog(f"拉取 {len(pre)} 只K线…", 0, len(pre))
@@ -407,16 +466,6 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 p["hot_rank"] = h["rank"]
                 if h.get("tag"):
                     p["hot_tag"] = h["tag"]
-            # 野人：资金代表异动，「要信早信」—— 低位 + 主力净流入刚转正 = 资金刚动
-            try:
-                _pos = float((p.get("graph_detail") or {}).get("base_pos") or 1.0)
-                _main = float((p.get("moneyflow") or {}).get("main") or 0)
-            except (TypeError, ValueError):
-                _pos, _main = 1.0, 0.0
-            if 0 < _pos <= 0.4 and _main > 0:
-                p["reasons"].append(
-                    f"低位（60日位置 {_pos*100:.0f}%）+ 主力净流入 "
-                    f"{_main/1e8:+.1f} 亿 —— 资金刚动，要信早信")
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
 
@@ -472,8 +521,25 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         flow = flow_mod.evaluate(cfg, picks, snaps, ml.get("theme", ""), zt,
                                  lhb=lhb_data, real_date=real_date)
 
+        # 野人：资金代表异动，「要信早信」—— 低位 + 主力净流入刚转正 = 资金刚动。
+        # ★ 必须在 flow_mod.evaluate **之后**（p["moneyflow"] 是它写进去的），
+        #   详见 _annotate_moneyflow_reasons 的说明。
+        _annotate_moneyflow_reasons(picks)
+
         # ---- 板块主线/支线/强势判断 ----
         sectors = mainline.sector_view(ml, flow, zt)
+        # 板块轮动（近 N 日每日领涨板块）—— 财联社数据源。抓不到就留空列表，
+        # 界面据此隐藏该块；绝不编造"轮动方向"。
+        try:
+            sectors["rotation"] = cls_mod.sector_rotation(4)
+        except Exception:                                   # noqa: BLE001
+            sectors["rotation"] = []
+
+        # ---- E5 低位承接方向（退潮期机构兑现的钱去哪） ----
+        # 输入全部是上面已经算好的东西（情绪/量能/资金/板块强弱），不新增数据源。
+        # ★ 必须在 flow / sectors / lhb_data 都就绪之后。
+        rebound = rebound_mod.evaluate(cfg, sentiment, volume, flow, sectors,
+                                       lhb=lhb_data, ml=ml, real_date=real_date)
 
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
@@ -543,6 +609,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "history": hist_info,
             "mainline": ml,
             "sectors": sectors,
+            "rebound": rebound,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,

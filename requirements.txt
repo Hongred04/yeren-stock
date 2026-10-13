@@ -1,0 +1,14 @@
+# 运行时依赖
+#
+# 本系统**只依赖 Python 标准库**即可运行 —— 数据源全部用标准库直接实现
+# （http.client / urllib / json / ssl），不引入 requests、akshare 之类。
+#
+# 下面这个是**可选**的软依赖，装了就多一层「通达信」首选源：
+#   · 日K线 / 指数日K 走通达信 TCP（7709 端口，不按 IP 封），腾讯/新浪作兜底；
+#   · 没装也能跑，只是少这层首选源（自动退回腾讯/新浪）。
+# 安卓包不带它（Chaquopy 打不进去，也不需要在手机上跑 TCP 长连接）。
+#
+# 安装（推荐装进虚拟环境，见 start.bat 的解释器选择顺序）：
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+mootdx>=0.11.7
