@@ -400,13 +400,19 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         # 盘中折算用**近 N 日实测占比曲线**（写死的经验曲线在不同量能形态下偏差明显）；
         # ref_amount 给"与近期同期的节奏对比"当基准。注意：盘中**不外推全天额**
         # （见 engine.evaluate_volume 的说明），界面上只报已成交额 + 节奏。
+        # 同期基准一次算齐（节奏对比与折算共用同一份样本，避免两处口径漂移）：
+        #   · cum      实测「过去几天在同一时刻已成交多少钱」——节奏对比用它（钱对钱）
+        #   · frac     实测「截至当前时刻的累计占比」——模式折算用它（≥3 天才给）
+        #   · 两者都排除当日自身样本（今天的分子分母是同一个高水位值，比值恒≈1）
+        ibase = ds.intraday_baseline(sess.get("tmin", 240), exclude_date=real_date)
         volume = engine.evaluate_volume(cfg, amount, hist, session=sess,
                                         fallback_amount=fb["amount"],
                                         fallback_final=fb["final"],
-                                        frac_hint=ds.intraday_fraction(
-                                            sess.get("tmin", 240)),
+                                        frac_hint=ibase["frac"],
                                         ref_amount=ds.recent_amount_median(
-                                            8, exclude_date=real_date))
+                                            8, exclude_date=real_date),
+                                        ref_cum=ibase["cum"],
+                                        ref_cum_days=ibase["days"])
         # 归档当日高水位：既进长期档案（次日盘前的基准），也进日内曲线（供折算校准）
         if amt_yi > 0:
             ds.save_market_amount(

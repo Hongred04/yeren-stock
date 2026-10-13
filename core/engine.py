@@ -158,7 +158,9 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                     fallback_amount: float = 0.0,
                     fallback_final: bool = True,
                     frac_hint: float | None = None,
-                    ref_amount: float = 0.0) -> dict:
+                    ref_amount: float = 0.0,
+                    ref_cum: float = 0.0,
+                    ref_cum_days: int = 0) -> dict:
     """M2 量能定模式 —— 整个体系的模式总开关。
 
     session/fallback_amount：量能阈值是「全天成交额」口径，而快照里的
@@ -170,6 +172,11 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     一半的值明显偏低，界面必须说明，不能冒充"全天"。
 
     frac_hint：由调用方从历史实测曲线算出的「截至当前时刻的累计占比」。
+
+    ref_cum：**实测的「近期同一时刻累计成交额」中位数**（亿），见
+        datasource.intraday_baseline。节奏对比必须用它 —— 它是钱对钱的事实，
+        不需要"全天额 × 某个占比"这种二次换算。ref_cum_days 是它的样本天数，
+        用于在样本不足时收敛措辞强度（措辞规则见下方节奏分支）。
 
     ★ 盘中**不外推全天额**（v1.24.1）：拿一条平均曲线把几十分钟的进度放大到
     全天，误差大到没有参考价值 —— 实测 10:29 已成交 7795 亿 → 外推 28487 亿，
@@ -184,7 +191,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     if not v.get("enabled", True):
         return {"mode": "disabled", "label": "量能模块已关闭", "advice": "自行判断",
                 "short_only": False, "amount": None, "cum_amount": 0.0,
-                "intraday": False, "pace": None, "pace_txt": "", "basis": "",
+                "intraday": False, "pace": None, "pace_txt": "", "pace_src": "", "basis": "",
                 "rel": None, "trend": None, "rel_txt": "", "gauge": None}
 
     amt_raw = market_amount / 1e8 if market_amount > 1e5 else market_amount
@@ -204,7 +211,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                            "别急着定模式，开盘半小时后再看量能"),
                 "short_only": False,
                 "amount": None, "cum_amount": 0.0, "intraday": False,
-                "pace": None, "pace_txt": "", "raw_amount": round(amt_raw, 0),
+                "pace": None, "pace_txt": "", "pace_src": "", "raw_amount": round(amt_raw, 0),
                 "basis": "无（当日数据未形成）", "red_flag": "",
                 "rel": None, "trend": None, "rel_txt": "", "gauge": None,
             }
@@ -220,7 +227,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                            "先不动手"),
                 "short_only": False,
                 "amount": None, "cum_amount": 0.0, "intraday": True,
-                "pace": None, "pace_txt": "", "raw_amount": 0,
+                "pace": None, "pace_txt": "", "pace_src": "", "raw_amount": 0,
                 "basis": "无（盘中数据未就绪）", "red_flag": "",
                 "rel": None, "trend": None, "rel_txt": "", "gauge": None,
             }
@@ -237,26 +244,56 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         amt = amt_raw
         basis = "当日实时"
 
-    # 节奏倍数：当前累计 ÷ 「近期同期该有的累计」。这是**事实型**对比，
+    # 节奏倍数：当前累计 ÷ 「近期**同一时刻**该有的累计」。这是**事实型**对比，
     # 比"外推全天额"稳得多，也是界面上真正有用的那句话。
+    #
+    # ★ 口径必须是钱对钱（v1.32.2）：基准只能取**档案里实测的同期累计额**。
+    #   原条件的 `ref_amount > 0 and amt_raw > 0` 漏掉了"必须有实测同期基准"这一条，
+    #   于是 frac_hint 为 None（实测占比样本不足）时仍强行用"全天额中位数 × 写死的
+    #   经验曲线"造出一个看着确定的 pace —— 实测 2026-10-13 午间：经验曲线认为只走了
+    #   45%，而 10-12 档案实测走了 67%，两者差 36%，足以把"与近期同期相当"
+    #   渲染成"快 33%（明显放量）"；而分支阈值(1.25/0.8)本身就落在模型误差里。
+    #
+    # 三档边界（样本不足的档位不许把话说满）：
+    #   ① 有实测同期累计 → 直接比（钱对钱）；样本 < min_base_days 时把天数写进文案
+    #   ② 只有"实测占比 + 全天额中位数" → 折算后比（兼容不传实测累计的调用方）
+    #   ③ 两者都没有 → 明说"同期基准积累中"，**不给数字**（不造一个看着确定的数）
     pace = None
     pace_txt = ""
+    pace_src = ""
     if intraday:
-        if ref_amount > 0 and amt_raw > 0:
-            frac_now = max(_traded_fraction(tmin), 0.02)
-            if frac_hint and 0.02 <= float(frac_hint) <= 1.0:
-                frac_now = max(float(frac_hint), 0.02)
-            exp = ref_amount * frac_now
-            if exp > 0:
-                pace = round(amt_raw / exp, 2)
-                if pace >= 1.25:
-                    pace_txt = f"比近期同期快 {(pace-1)*100:.0f}%（明显放量）"
-                elif pace <= 0.8:
-                    pace_txt = f"比近期同期慢 {(1-pace)*100:.0f}%（明显缩量）"
-                else:
-                    pace_txt = "与近期同期相当"
+        pace_fast, pace_slow, min_base_days = 1.25, 0.80, 3
+        try:
+            pace_fast = float(v.get("pace_fast", pace_fast) or pace_fast)
+            pace_slow = float(v.get("pace_slow", pace_slow) or pace_slow)
+            min_base_days = int(v.get("min_base_days", min_base_days) or min_base_days)
+        except (TypeError, ValueError):
+            pace_fast, pace_slow, min_base_days = 1.25, 0.80, 3
+        frac_now = max(_traded_fraction(tmin), 0.02)
+        frac_ok = bool(frac_hint) and 0.02 <= float(frac_hint) <= 1.0
+        if frac_ok:
+            frac_now = max(float(frac_hint), 0.02)
+        exp, base_days = 0.0, 0
+        if ref_cum > 0:
+            exp, pace_src, base_days = float(ref_cum), "实测同期", int(ref_cum_days or 0)
+        elif ref_amount > 0 and frac_ok:
+            exp, pace_src = ref_amount * frac_now, "实测占比折算"
+        if exp > 0 and amt_raw > 0:
+            # ★ 判定用**原始比值**，四舍五入只用于对外显示：原来先 round(…, 2) 再比阈值，
+            #   1.2450~1.2499 这类"差一点点"的读数会被进位成 1.25 而误判成"明显放量"
+            #   （实测 12499/10000 = 1.2499 正落在这个缝里）—— 等于把阈值边界整体
+            #   挪了 0.005。内部保持原值，只在返回时 round。
+            pace = amt_raw / exp
+            if pace >= pace_fast:
+                pace_txt = f"比近期同期快 {(pace-1)*100:.0f}%（明显放量）"
+            elif pace <= pace_slow:
+                pace_txt = f"比近期同期慢 {(1-pace)*100:.0f}%（明显缩量）"
+            else:
+                pace_txt = "与近期同期相当"
+            if pace_src == "实测同期" and 0 < base_days < min_base_days:
+                pace_txt += f"（同期样本 {base_days} 天，仅供参考）"
         else:
-            pace_txt = "同期基准积累中（需 3 个以上交易日）"
+            pace_txt = f"同期基准积累中（需 {min_base_days} 个以上交易日）"
 
     try:
         peak = float(v.get("peak_threshold", 15000) or 15000)
@@ -366,8 +403,9 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         "amount": None if intraday else round(amt, 0),
         "cum_amount": round(amt_raw, 0),      # 盘中"已成交"（事实）
         "intraday": intraday,
-        "pace": pace,                         # 相对近期同期的节奏倍数（None=基准不够）
+        "pace": None if pace is None else round(pace, 2),   # 节奏倍数（None=基准不够）
         "pace_txt": pace_txt,
+        "pace_src": pace_src,                 # 基准口径：实测同期 / 实测占比折算 / ""
         "raw_amount": round(amt_raw, 0),
         "basis": basis,
         "red_flag": red_flag,

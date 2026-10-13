@@ -165,6 +165,8 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
 .step .a b{color:var(--tx);font-weight:700}
 .step .bar3{height:4px;background:var(--sk);border-radius:3px;margin-top:7px;overflow:hidden;max-width:220px}
 .step .bar3 i{display:block;height:100%;border-radius:3px}
+/* 没有依据的格子：画斜纹"无刻度"条，绝不用一个写死的百分比冒充读数 */
+.step .bar3 i.unk{background:repeating-linear-gradient(90deg,var(--tx3) 0 5px,transparent 5px 10px);opacity:.3}
 
 /* ── 表格 ── */
 .tbl{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
@@ -1267,7 +1269,10 @@ function render(){
       // 进度条标尺由后端按当前配置算（vol.gauge）—— 原来前端写死 amount/180
       // （即"18000 亿=满格"），改了量能阈值或市场量能中枢，条长却不跟着变，
       // 15378 亿照样画到 85% 满格，反向坐实了"量能很足"的错觉。
-      pctv:vol.gauge!=null?vol.gauge:50,
+      // 同期基准不足时 gauge 为 null —— 这里原来兜底成写死的 50%，
+      // 等于画一根凭空的进度条假装"量能刚好一半"，是假数据。
+      // 交给渲染层画斜纹"无刻度"条，明说这一格没有依据。
+      pctv:vol.gauge,
       pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
     {q:'大家现在是抢着买还是在跑？',
       a:`<b>${esc(STAGE_CN[sen.stage]||sen.label)}</b>，最高 ${sen.max_boards} 连板，封板率 ${(mm.seal_rate*100).toFixed(0)}%，`
@@ -1287,7 +1292,9 @@ function render(){
   $('steps').innerHTML=steps.map((s,i)=>
     `<div class="step ${s.c}"><div class="num2">${i+1}</div>
       <div class="bd2"><div class="q">${s.q}</div><div class="a">${s.a}</div>
-      <div class="bar3"><i style="width:${s.pctv.toFixed(0)}%;background:${s.pc}"></i></div></div>
+      <div class="bar3">${s.pctv==null
+        ? '<i class="unk" style="width:100%"></i>'
+        : `<i style="width:${s.pctv.toFixed(0)}%;background:${s.pc}"></i>`}</div></div>
     </div>`).join('');
 
   /* ── ⑤ 仓位 ── */

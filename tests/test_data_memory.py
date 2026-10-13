@@ -14,6 +14,10 @@
   ⑤ 高水位只收「当日真实累计」—— 盘前/集合竞价的指数快照给的是**上一交易日**
      全天额，绝不能写进今日档案（否则今日一开盘就被昨收全天额锁死）；
      且"上一交易日基准"不得取当日自己的盘中快照。
+  ⑥ 节奏对比（"比近期同期快/慢"）必须**钱对钱**：基准只能取档案里实测的同期
+     累计额，不许拿"全天额中位数 × 写死的经验曲线"顶替；样本不足就明说在积累。
+     同期基准的样本边界：排除当日自身（比值恒≈1 的自证样本）、排除采样时刻与
+     查询时刻对不上的日子；阈值判定用原始比值，不被四舍五入挪动。
 """
 from __future__ import annotations
 
@@ -194,6 +198,62 @@ def main():
     v_ft = engine.evaluate_volume(cfg, 0, [], session=pre, fallback_amount=19000.0,
                                   fallback_final=True)
     ok("全天" in v_ft["basis"], f"收盘终值才叫全天：{v_ft['basis']}")
+
+    print("\n[8] 节奏对比必须「钱对钱」：基准只能取实测同期累计")
+    # 原 bug（2026-10-13 实测）：分支条件是 `ref_amount > 0 and amt_raw > 0`，漏了
+    # "必须有实测同期基准"这一条 —— frac_hint 为 None 时仍拿"全天额中位数 × 写死的
+    # 经验曲线"造出一个看着确定的 pace：经验曲线给 0.45、档案实测是 0.672，差 36%，
+    # 足以把"与近期同期相当"渲染成"快 33%（明显放量）"。
+    clean()
+    rn = engine.evaluate_volume(cfg, 10082.0, [], session=sess,
+                                ref_amount=16821.3, frac_hint=None)
+    ok(rn["pace"] is None,
+       "只有全天额中位数、没有实测同期基准 → 不给 pace（不再用经验曲线造数）")
+    ok("积累中" in rn["pace_txt"], f"明说在积累：{rn['pace_txt']}")
+    ok(rn["gauge"] is None, "gauge 一并空缺（前端不得拿写死的 50% 冒充读数）")
+
+    rn2 = engine.evaluate_volume(cfg, 10082.0, [], session=sess,
+                                 ref_amount=16821.3, ref_cum=10329.9, ref_cum_days=1)
+    ok(rn2["pace_src"] == "实测同期", f"基准口径 = 实测同期（{rn2['pace_src']}）")
+    ok(abs(rn2["pace"] - 0.98) < 0.01, f"钱对钱 → 0.98「相当」（得到 {rn2['pace']}）")
+    ok("相当" in rn2["pace_txt"] and "明显放量" not in rn2["pace_txt"],
+       f"结论被纠正为：{rn2['pace_txt']}")
+    ok("仅供参考" in rn2["pace_txt"], "同期样本仅 1 天 → 文案标注天数")
+    ok(rn2["gauge"] is not None and rn2["gauge"] < 70,
+       f"进度条不再顶格（{rn2['gauge']}）")
+
+    print("\n[8b] 阈值按**原始比值**判定，不被四舍五入挪动边界")
+    r_fast = engine.evaluate_volume(cfg, 12500.0, [], session=sess,
+                                    ref_cum=10000.0, ref_cum_days=3)
+    r_edge = engine.evaluate_volume(cfg, 12499.0, [], session=sess,
+                                    ref_cum=10000.0, ref_cum_days=3)
+    r_slow = engine.evaluate_volume(cfg, 8000.0, [], session=sess,
+                                    ref_cum=10000.0, ref_cum_days=3)
+    r_over = engine.evaluate_volume(cfg, 8001.0, [], session=sess,
+                                    ref_cum=10000.0, ref_cum_days=3)
+    ok("明显放量" in r_fast["pace_txt"], f"1.25 恰好触发：{r_fast['pace_txt']}")
+    ok("相当" in r_edge["pace_txt"],
+       f"1.2499 不触发（旧实现先 round→1.25 会误判放量）：{r_edge['pace_txt']}")
+    ok("明显缩量" in r_slow["pace_txt"], f"0.80 恰好触发：{r_slow['pace_txt']}")
+    ok("相当" in r_over["pace_txt"], f"0.8001 不触发：{r_over['pace_txt']}")
+
+    print("\n[8c] 同期基准的样本边界：当日自身、时刻对不上的样本都不得进来")
+    clean()
+    for d, cum in (("20261009", 6000.0), ("20261010", 7000.0)):
+        ds.save_market_amount(d, 10000.0, final=True)
+        ds.save_intraday_amount(d, 60, cum)
+    ds.save_market_amount("20261013", 10000.0, final=False)   # 今天：仅盘中快照
+    ds.save_intraday_amount("20261013", 60, 10000.0)
+    bb = ds.intraday_baseline(60)                # 故意不传 exclude_date
+    ok(bb["days"] == 2, f"当日自身被排除（样本 {bb['days']} 天，不是 3 天）")
+    ok(abs(bb["cum"] - 6500.0) < 0.1, f"中位数未被今天的值拉高（{bb['cum']}）")
+    ok(bb["frac"] is None, "分母必须是收盘终值 → 今天不参与占比")
+    clean()
+    ds.save_market_amount("20261010", 10000.0, final=True)
+    ds.save_intraday_amount("20261010", 50, 5000.0)          # 只采到 tmin=50
+    ok(ds.intraday_baseline(90)["days"] == 0,
+       "采样时刻差 40 分钟 > tol → 弃用（否则基准被压低→假放量）")
+    ok(ds.intraday_baseline(55)["days"] == 1, "差 5 分钟 → 采信")
 
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0

@@ -695,37 +695,109 @@ def save_intraday_amount(date: str, tmin: int, cum_yi: float) -> None:
     _curve_save(obj)
 
 
-def intraday_fraction(tmin: int, days: int = 8, min_days: int = 3):
-    """近 N 日「截至 tmin 的累计额 ÷ 当日全天额」的中位数。
+def _session_minutes(day: dict, tmin: int, tol: int = 10) -> float | None:
+    """某日曲线里「截至 tmin 分钟的累计成交额」（亿）；无贴近采样返回 None。
 
-    样本不足 min_days 天返回 None（调用方退回经验曲线）。
-    用中位数而不是均值：单日的极端形态不该把基准拽跑。
+    tol：允许的采样时差（分钟）。桶是 5 分钟粒度、采样时刻也不规则，如果最近的
+    一个采样比 tmin 早了 10 分钟以上，拿它当"截至 tmin"会把基准压低（时间越早
+    累计越小）→ 分母偏小 → 节奏倍数被高估成"放量"。宁可弃用该日，不要用一个
+    时刻对不上的样本。
+    """
+    best_kv, best = None, 0.0
+    for k, v in day.items():
+        try:
+            kv = int(k)
+        except (TypeError, ValueError):
+            continue
+        if kv <= tmin and (best_kv is None or kv > best_kv):
+            best_kv, best = kv, float(v or 0)
+    if best_kv is None or (tmin - best_kv) > tol:
+        return None
+    return best
+
+
+def _full_day_amounts() -> dict[str, float]:
+    """有**收盘终值**的交易日 → 全天成交额（亿）。
+
+    盘中快照（final=False）记的是当日高水位、不是全天额，拿它当分母会让
+    "同期占比"虚高到接近 1.0，所以只认收盘终值。
+    """
+    out: dict[str, float] = {}
+    for e in _amount_entries():
+        d = str(e.get("date", ""))
+        v = float(e.get("amount") or 0)
+        if d and v > 0 and e.get("final", True):
+            out[d] = v
+    return out
+
+
+def intraday_baseline(tmin: int, days: int = 8, min_days: int = 3,
+                      exclude_date: str = "", tol: int = 10) -> dict:
+    """近 N 日的**盘中同期基准**，一次算齐（节奏对比与折算共用同一份样本）。
+
+    返回 {"cum", "days", "frac", "frac_days", "days_total"}：
+      cum       截至 tmin 的**实测累计额**中位数（亿）—— 钱对钱，最硬的口径
+      days      参与 cum 的天数（≥1 即给数，调用方按天数决定措辞强度）
+      frac      截至 tmin 的累计额 ÷ 当日全天额 的中位数；天数 < min_days 时为 None
+      frac_days 参与 frac 的天数
+      days_total 有可用同期采样的天数（= days，供界面显示）
+
+    两条**边界**必须挡住，否则基准会被自己的样本污染：
+
+      ① **排除当日**（exclude_date）：今天的分子分母是同一个"当日高水位"值，
+         比值恒 ≈ 1.0。这是自证样本，混进来只会把占比整体推高
+         （实测：样本 [0.672(10-12), 1.000(今天)] 中位数被抬到 0.836）。
+      ② **分母必须是收盘终值**：盘中快照记的是高水位，不是全天额。
+         同时只采信**采样时刻贴近 tmin** 的日子（见 _session_minutes 的 tol）。
     """
     obj = _curve_load()
-    if not obj:
-        return None
-    totals = {e.get("date"): float(e.get("amount") or 0) for e in _amount_entries()}
     tmin = max(0, min(240, int(tmin)))
-    fr = []
+    if not obj:
+        return {"cum": 0.0, "days": 0, "frac": None, "frac_days": 0, "days_total": 0}
+    totals = _full_day_amounts()
+    newest = max(obj)
+    cums: list[float] = []
+    fr: list[float] = []
     for date in sorted(obj)[-days:]:
-        day = obj.get(date) or {}
-        cum = 0.0
-        for k, v in day.items():
-            try:
-                kv = int(k)
-            except (TypeError, ValueError):
-                continue
-            if kv <= tmin:
-                cum = max(cum, float(v or 0))
-        total = totals.get(date) or 0.0
-        if total <= 0:                   # 全天额没归档 → 用该日记录到的最大值近似
-            total = max([float(v or 0) for v in day.values()] or [0.0])
-        if cum > 0 and total > 0 and cum <= total * 1.001:
+        if exclude_date and date == exclude_date:
+            continue
+        # ③ "进行中"的那一天（曲线里最新日期 + 成交额档案还没标收盘终值）一律不用：
+        #    它的分子分母是同一个高水位值，比值恒 ≈ 1.0。调用方漏传 exclude_date 时
+        #    也要挡得住，所以这里再判一次（而不是只依赖调用方）。
+        if date == newest and date not in totals:
+            continue
+        cum = _session_minutes(obj.get(date) or {}, tmin, tol)
+        if cum is None or cum <= 0:
+            continue
+        cums.append(cum)
+        total = totals.get(date)
+        if total and cum <= total * 1.001:
             fr.append(cum / total)
-    if len(fr) < min_days:
-        return None
-    fr.sort()
-    return round(fr[len(fr) // 2], 4)
+
+    def _med(xs: list[float]) -> float:
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    frac = round(_med(fr), 4) if len(fr) >= min_days else None
+    return {
+        "cum": round(_med(cums), 1) if cums else 0.0,
+        "days": len(cums),
+        "frac": frac,
+        "frac_days": len(fr),
+        "days_total": len(cums),
+    }
+
+
+def intraday_fraction(tmin: int, days: int = 8, min_days: int = 3,
+                      exclude_date: str = "", tol: int = 10):
+    """近 N 日「截至 tmin 的累计额 ÷ 当日全天额」的中位数（≥min_days 天才给）。
+
+    保留为薄封装：折算层只需要这个比例，而节奏对比还需要原始累计额，
+    两者共用 intraday_baseline 的同一份样本，避免各算各的、口径漂移。
+    """
+    return intraday_baseline(tmin, days=days, min_days=min_days,
+                             exclude_date=exclude_date, tol=tol)["frac"]
 
 
 def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
