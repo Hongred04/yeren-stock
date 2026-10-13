@@ -22,6 +22,7 @@ from . import regime
 from . import rebound as rebound_mod
 from . import industry as industry_mod
 from . import substitute as substitute_mod
+from . import sowing as sowing_mod
 from . import sentiment_meter
 from . import strategy_config as sc
 from . import swing as swing_mod
@@ -606,6 +607,14 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         industry = industry_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
                                          real_date=real_date)
 
+        # ---- E8 题材播种（事件 → 受益 → 标的）· 前置题材池 ----
+        # 用户 10-13「打板要提前找题材，不然看谁封板打谁是乱玩」。候选股是
+        # 当天量价打分，形态是结果不是原因；缺的是"事件→受益→标的"的前瞻映射
+        # 与题材生命周期（首日/N日/退潮/重复启动）。全部离线：从涨停池 reason
+        # 富文本抽标签与事件，从归档算题材日历/独苗/重复启动，零新增接口。
+        sowing = sowing_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
+                                     real_date=real_date)
+
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
@@ -677,6 +686,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "rebound": rebound,
             "substitute": substitute,
             "industry": industry,
+            "sowing": sowing,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,

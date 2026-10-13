@@ -786,6 +786,42 @@ function render(fromCache,ts){
       </div>`;
     }
   }
+
+  /* E8 题材播种（前置题材池）：事件→受益→标的，题材生命周期 + 独苗 + 重复启动。
+     用户 10-13「打板要提前找题材，不然看谁封板打谁是乱玩」。备选池，不是买入信号。 */
+  const sw8=d.sowing||{};
+  if(sw8.enabled){
+    if(!sw8.active){
+      t1+=`<h2>题材播种 · 本轮无</h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(sw8.reason||'')}</div></div>`;
+    }else{
+      const tc={新播种:'var(--red)',加固中:'var(--org)',持平:'var(--tx2)',减弱:'var(--blu)',熄火:'var(--tx3)'};
+      t1+=`<h2>题材播种 <span class="cnt">明天该盯哪几条线</span></h2><div class="card">
+        <div class="fl" style="font-size:12.5px">${esc(sw8.summary||'')}</div>
+        ${(sw8.themes||[]).length?`<div style="margin-top:10px"><div class="mini">题材生命周期</div>
+          ${(sw8.themes||[]).map(t=>`<div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap;margin-top:5px">
+            <span class="cnt">${esc(t.label_cn)}</span><b style="font-size:13.5px">${esc(t.theme)}</b>
+            <span class="cnt" style="color:${tc[t.label_cn]||'var(--tx2)'}">今 ${t.today_n} / 昨 ${t.prev_n}</span>
+            ${t.max_boards?`<span class="cnt">最高 ${t.max_boards} 板</span>`:''}
+            ${(t.events||[]).length?`<span class="cnt">${esc(t.events.join('、'))}</span>`:''}</div>`).join('')}</div>`:''}
+        ${(sw8.lonely||[]).length?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line2)">
+          <div class="mini">独苗首板 —— 题材刚冒头</div>
+          ${(sw8.lonely||[]).map(x=>`<div style="margin-top:6px">
+            <div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap">
+              <b style="font-size:14px">${esc(x.name)}</b><span class="cnt">${esc(x.theme)}</span>
+              <span class="cnt">${x.new_theme?'全新题材':'老树新芽'}</span></div>
+            <div class="dt" style="margin-top:3px">${esc(x.why||'')}</div></div>`).join('')}</div>`:''}
+        ${(sw8.restarts||[]).length?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line2)">
+          <div class="mini">重复启动 —— 启动→沉寂→再启动</div>
+          ${(sw8.restarts||[]).map(x=>`<div style="margin-top:6px">
+            <div style="display:flex;gap:7px;align-items:baseline;flex-wrap:wrap">
+              <b style="font-size:14px">${esc(x.name)}</b><span class="cnt">${x.launch_count} 次启动</span>
+              <span class="cnt">空 ${x.gap_days} 日</span>${x.drifted?`<span class="cnt">标签漂移</span>`:''}</div>
+            <div class="dt" style="margin-top:3px">${esc(x.why||'')}</div></div>`).join('')}</div>`:''}
+        <div class="fl" style="font-size:11.5px;color:var(--tx3);margin-top:8px">${esc(sw8.note||'')}</div>
+      </div>`;
+    }
+  }
   t1+=`<footer>扫描 ${m.scanned||'—'} 只 · ${m.elapsed||'—'} 秒 · 归档 ${hist.days||'—'} 天<br>
     数据源：东财/腾讯/财联社/开盘红 ·
     <span style="color:var(--blu);font-weight:700" onclick="openSrcSheet()">数据源设置</span><br>

@@ -487,6 +487,7 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
         <div id="rebound" style="margin-top:12px"></div>
         <div id="substitute" style="margin-top:12px"></div>
         <div id="industry" style="margin-top:12px"></div>
+        <div id="sowing" style="margin-top:12px"></div>
       </div>
     </div>
 
@@ -1351,6 +1352,7 @@ function render(){
   renderRebound();
   renderSubstitute();
   renderIndustry();
+  renderSowing();
   renderJournal();
   renderPort();
 
@@ -2215,6 +2217,63 @@ function renderIndustry(){
   </div>`;
 }
 
+function renderSowing(){
+  const el=$('sowing'); if(!el) return;
+  const sw=REPORT.sowing;
+  if(!sw||!sw.enabled){ el.innerHTML=''; return; }
+  if(!sw.active){
+    el.innerHTML=`<div class="card" style="border-left:4px solid var(--tx3)">
+      <div class="hd2"><div class="ic">🌱</div>
+        <div><div class="ti" style="font-size:15px">题材播种 · 本轮无</div></div></div>
+      <div class="fl" style="font-size:12.5px;line-height:1.7;margin-top:6px">${esc(sw.reason||'')}</div>
+    </div>`;
+    return;
+  }
+  const trendColor={新播种:'var(--red)',加固中:'var(--org)',持平:'var(--tx2)',减弱:'var(--blu)',熄火:'var(--tx3)'};
+  const themes=(sw.themes||[]).map(t=>`<div class="act" style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+      <span class="pill gry" style="font-size:11px">${esc(t.label_cn)}</span>
+      <b style="font-size:13.5px">${esc(t.theme)}</b>
+      <span class="num" style="color:${trendColor[t.label_cn]||'var(--tx2)'}">今 ${t.today_n==null?'—':t.today_n} / 昨 ${t.prev_n==null?'—':t.prev_n}</span>
+      ${t.max_boards?`<span class="num" style="color:var(--tx2)">最高 ${t.max_boards} 板</span>`:''}
+      ${(t.events||[]).length?`<span class="pill blu" style="font-size:10.5px">${esc(t.events.join('、'))}</span>`:''}
+    </div>`).join('');
+  const lonely=(sw.lonely||[]).map(x=>`<div class="act" style="display:block;margin-bottom:8px">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <b style="font-size:13.5px">${esc(x.name)}</b>
+        <span class="pill gry">${esc(x.code||'')}</span>
+        <span class="pill blu">${esc(x.theme)}</span>
+        <span class="${pct(x.pct)}">${x.pct>=0?'+':''}${f2(x.pct)}%</span>
+        <span class="num" style="color:var(--tx2)">${x.new_theme?'全新题材':'老树新芽'} · 分 ${x.score==null?'—':x.score}</span>
+      </div>
+      <div style="font-size:11.5px;margin-top:3px;color:var(--tx2);line-height:1.65">${esc(x.why||'')}</div>
+    </div>`).join('');
+  const restarts=(sw.restarts||[]).map(x=>`<div class="act" style="display:block;margin-bottom:8px">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <b style="font-size:13.5px">${esc(x.name)}</b>
+        <span class="pill gry">${esc(x.code||'')}</span>
+        <span class="num" style="color:var(--org)">${x.launch_count==null?'—':x.launch_count} 次启动</span>
+        <span class="num" style="color:var(--tx2)">空 ${x.gap_days==null?'—':x.gap_days} 个交易日</span>
+        ${x.max_boards?`<span class="num" style="color:var(--tx2)">最高 ${x.max_boards} 板</span>`:''}
+        ${x.drifted?`<span class="pill blu" style="font-size:10.5px">标签漂移</span>`:''}
+        <span class="num" style="color:var(--tx2)">分 ${x.score==null?'—':x.score}</span>
+      </div>
+      ${(x.events||[]).length?`<div style="font-size:11px;color:var(--tx3);margin-top:2px">事件：${esc(x.events.join('、'))}</div>`:''}
+      <div style="font-size:11.5px;margin-top:3px;color:var(--tx2);line-height:1.65">${esc(x.why||'')}</div>
+    </div>`).join('');
+  el.innerHTML=`<div class="verdict hold" style="border-left-color:var(--grn)">
+    <div class="hd2"><div class="ic">🌱</div>
+      <div><div class="ti" style="font-size:16px">题材播种 —— 明天该盯哪几条线</div>
+        <div class="sub" style="font-size:11.5px;margin-top:3px">
+          事件 → 受益 → 标的；新播种 / 加固 / 熄灭 + 独苗首板 + 重复启动。这是备选池，不是买入信号</div></div></div>
+    <div class="fl" style="font-size:13px;line-height:1.75;margin-top:8px">${esc(sw.summary||'')}</div>
+    ${themes?`<div style="margin-top:10px"><div class="k" style="font-size:12px;color:var(--tx2);margin-bottom:6px">题材生命周期</div>${themes}</div>`:''}
+    ${lonely?`<div style="margin-top:10px"><div class="k" style="font-size:12px;color:var(--tx2);margin-bottom:6px">独苗首板 —— 题材刚冒头，只有一颗种子</div>${lonely}</div>`:''}
+    ${restarts?`<div style="margin-top:10px"><div class="k" style="font-size:12px;color:var(--tx2);margin-bottom:6px">重复启动 —— 启动 → 沉寂 → 再启动</div>${restarts}</div>`:''}
+    <div class="sub" style="margin-top:8px;font-size:11.5px;color:var(--tx3);line-height:1.7">
+      ${esc(sw.note||'')}</div>
+  </div>`;
+}
+
 function renderOutlook(){
   const el=$('outlook'); if(!el) return;
   const o=REPORT.outlook;
@@ -2680,6 +2739,7 @@ function renderModules(){
     ['E5_rebound','E5 低位承接方向','退潮期 + 存量博弈 + 机构净卖出 同时成立 → 推演「机构兑现的钱去哪」：主力净流入为正、价格没抬起来、有催化、非主线的板块'],
     ['E6_substitute','E6 停牌·补位推演','龙头停牌核查/重组 → 同题材里谁在补位：零成交=停牌，题材与连板高度取本地涨停池归档，同题材今日涨停票按「接棒概率」排序'],
     ['E7_industry','E7 逆势连板·独立通道','退潮日照样连板的票（驱动大概率不在情绪周期里）—— 情绪闸门量的是"接力资金"，这类票靠的是独立产业逻辑，不该被一刀切掉。只回答"谁的连板不是情绪撑的"，不是买点'],
+    ['E8_sowing','E8 题材播种·前置题材池','事件→受益→标的的前瞻映射：题材生命周期（新播种/加固/持平/减弱/熄火）+ 独苗首板 + 重复启动（含标签漂移）。打板要提前找题材，而不是看谁封板打谁。备选池，不是买入信号'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -2800,6 +2860,13 @@ function renderModules(){
       num(k,'shrink_ratio','「缩量一字」判定：本板换手 ÷ 前板换手 ≤','≤此值算缩量；一字=集合竞价即封且未炸',m.shrink_ratio)+
       num(k,'reseal_breaks','「炸板回封」判定：炸板次数 ≥','炸这么多次仍收在涨停 = 承接强',m.reseal_breaks)+
       sw(k,'mv_check','取日K算首板市值（关掉可省一次请求，但市值分就不参与）');
+    if(k==='E8_sowing') body=sw(k,'enabled','启用')+
+      num(k,'lookback_days','看几个归档交易日','判题材生命周期与"重复启动"。默认 30：两次启动间隔可能达 9 个交易日，太短会漏掉首次启动',m.lookback_days)+
+      num(k,'top_themes','题材日历最多列几个','',m.top_themes)+
+      num(k,'top_lonely','独苗首板最多列几个','',m.top_lonely)+
+      num(k,'top_restarts','重复启动最多列几只','',m.top_restarts)+
+      num(k,'lonely_max_peers','独苗定义：题材今日涨停 ≤ 几只','且必须是首板，才叫"题材刚冒头"',m.lonely_max_peers)+
+      sw(k,'drifted_only','重复启动只列"标签漂移"的','更聚焦，但会漏掉"同一逻辑二次发动"的票');
     return `<div class="mb" data-m="${k}">
       <div class="mh"><b>${t}</b>
         <div class="sw ${on?'on':''}" data-sw="${k}"></div>

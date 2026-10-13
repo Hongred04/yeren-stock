@@ -144,6 +144,20 @@ _E7_DEFAULTS = {
     "mv_check": True,                 # 是否取日K算首板市值（关掉可省一次请求）
 }
 
+# E8 题材播种（事件 → 受益 → 标的）· 前置题材池（用户 10-13「打板要提前找题材」）
+_E8_DEFAULTS = {
+    "enabled": True,
+    # 看几个归档交易日来判题材生命周期与"重复启动"。默认 30：实测九阳两次启动
+    # 间隔 9 个交易日（09-11 → 09-28），15 天窗口会把第一次启动挤出视野，
+    # 把"两次启动"误判成"一路连板"。
+    "lookback_days": 30,
+    "top_themes": 8,                  # 题材日历最多列几个
+    "top_lonely": 3,                  # 独苗题材最多列几个
+    "top_restarts": 6,                # 重复启动最多列几只
+    "lonely_max_peers": 1,            # 独苗定义：题材今日涨停 ≤ 此数且是首板
+    "drifted_only": False,            # True=重复启动只列"标签漂移"的（更聚焦但更少）
+}
+
 
 PRESETS: dict[str, dict] = {
     # ===== 单一融合体系：四套预设已合并，个股打法写在详情页 =====
@@ -266,6 +280,7 @@ PRESETS: dict[str, dict] = {
         "E5_rebound": dict(_E5_DEFAULTS),
         "E6_substitute": dict(_E6_DEFAULTS),
         "E7_industry": dict(_E7_DEFAULTS),
+        "E8_sowing": dict(_E8_DEFAULTS),
     },
 }
 
