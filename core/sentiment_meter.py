@@ -169,7 +169,9 @@ def _save_hist(real_date: str, row: dict) -> list[dict]:
     hist = [h for h in hist if h.get("date") != real_date]
     hist.append({"date": real_date, **row})
     hist.sort(key=lambda x: x["date"])
-    hist = hist[-120:]
+    # 上限 260：归档回补后有一年的数据，留 120 会让重建的历史被实时扫描
+    # 逐步挤掉（每天新增 1 条、挤掉 1 条，几个月后又回到只有 120 天）。
+    hist = hist[-260:]
     try:
         os.makedirs(os.path.dirname(HIST_PATH), exist_ok=True)
         tmp = HIST_PATH + ".tmp"
@@ -332,9 +334,13 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "limit_down": n_dt, "broken": n_zb, "max_boards": max_boards,
         "promote_rate": promote_rate, "broken_ratio": round(broken_ratio, 3),
     })
+    # ★ 曲线上限从 30 提到 120：归档回补后有近一年的数据（243 天），
+    #   只画 30 天等于把补来的历史又丢掉。前端按需截取，这里给全。
+    #   src 字段透传（"rebuild" = 由归档重建、缺炸板率，前端据此标注）。
     heat_series = [{"date": h.get("date"), "temperature": h.get("temperature"),
-                    "limit_up": h.get("limit_up"), "max_boards": h.get("max_boards")}
-                   for h in _load_hist()][-30:]
+                    "limit_up": h.get("limit_up"), "max_boards": h.get("max_boards"),
+                    "src": h.get("src") or "live"}
+                   for h in _load_hist()][-120:]
 
     return {
         "enabled": True, "temperature": temp, "stage": stage,

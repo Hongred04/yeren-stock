@@ -2324,7 +2324,16 @@ function renderMeter(){
     </div>
     <span class="fl" style="font-size:11.5px;min-width:132px;max-width:180px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((x.names||[]).join('、'))}">${esc((x.names||[]).join('、'))}</span>
   </div>`).join('');
-  const hs=(m.heat_series||[]).map(x=>x.temperature);
+  // ★ 曲线里混了两种来源：实盘扫描写下的真实温度，和用归档重建的估算值
+  //   （重建的没有炸板率，固定用中性档 —— 实测与真实值平均差 2.4 分）。
+  //   不标出来就是把估算当实测，所以图上标一段说明。
+  const srcOf=m.heat_series||[];
+  const nReal=srcOf.filter(x=>x.src!=='rebuild').length;
+  const rebuilt=srcOf.length-nReal;
+  const hs=srcOf.map(x=>x.temperature);
+  const srcNote=nReal&&rebuilt
+    ? `最近 ${nReal} 天为实盘记录，更早的 ${rebuilt} 天由归档重建（缺炸板率，用中性档估）`
+    : (rebuilt&&!nReal ? `全部为归档重建（缺炸板率，用中性档估）` : '');
   let spark='';
   if(hs.length>=2){
     const W=760,H=54,pl=4,pr=4,pt=6,pb=12, iw=W-pl-pr, ih=H-pt-pb;
@@ -2335,8 +2344,9 @@ function renderMeter(){
       ${[0,0.5,1].map(g=>`<line x1="${pl}" y1="${(pt+ih*g).toFixed(1)}" x2="${W-pr}" y2="${(pt+ih*g).toFixed(1)}" stroke="#eef1f5"/>`).join('')}
       <path d="${line}" fill="none" stroke="#2563d9" stroke-width="1.7"/>
       ${hs.map((v,i)=>i===hs.length-1?`<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3" fill="var(--red)"/>`:'').join('')}
-      <text x="${pl}" y="${H-2}" font-size="9.5" fill="#9aa3b2">${esc((m.heat_series[0]||{}).date||'')}</text>
-      <text x="${W-pr}" y="${H-2}" font-size="9.5" fill="#9aa3b2" text-anchor="end">温度曲线（近30个交易日）</text></svg>`;
+      <text x="${pl}" y="${H-2}" font-size="9.5" fill="#9aa3b2">${esc((srcOf[0]||{}).date||'')}</text>
+      <text x="${W-pr}" y="${H-2}" font-size="9.5" fill="#9aa3b2" text-anchor="end">温度曲线（共 ${hs.length} 个交易日）</text></svg>
+      ${srcNote?`<div class="fl" style="font-size:11px;margin-top:4px">${srcNote}</div>`:''}`;
   }
   const f=(v,d=1)=>(v==null?'—':Number(v).toFixed(d));
   // 同一张卡片里原来的兜底并不一致：晋级率/赚钱效应用了 `==null?'—'`，
