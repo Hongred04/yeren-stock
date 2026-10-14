@@ -207,6 +207,64 @@ tbody tr:last-child td{border-bottom:none}
 @media(max-width:1100px){.mvgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.mvgrid{grid-template-columns:1fr;gap:var(--s4)}}
 
+/* ── 持仓体检：每只票一张卡 ──
+   原是一张 8 列表格，「为什么」那栏塞了卖出理由+解套参考+做长警示三件事，
+   在 300px 里换行成一坨。用户要的是「今天该干什么、到什么价该动」，
+   所以改成一行一只票的卡片：行动句在最上，卖出参考价逐条列出。 */
+.hlist{display:flex;flex-direction:column;gap:var(--s3)}
+.hcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r-md);
+  box-shadow:var(--sh);padding:var(--s4);cursor:pointer;transition:box-shadow var(--dur-fast) var(--ease)}
+.hcard:hover{box-shadow:var(--sh2)}
+/* 需要当天动手的票：左边一道红/橙竖条，扫一眼就能挑出来 */
+.hcard.critical{border-left:4px solid var(--red)}
+.hcard.high{border-left:4px solid var(--org)}
+.hc-h{display:flex;align-items:baseline;gap:var(--s2);flex-wrap:wrap}
+.hc-nm{font-size:16px}
+.hc-cd{font-family:var(--mono);font-size:11.5px}
+.hc-sp{flex:1}
+.hc-pnl{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+.hc-mv{font-size:11.5px}
+/* 行动句：这张卡最重要的一行，单独给底色 */
+.hc-act{margin-top:var(--s2);font-size:14px;font-weight:800;line-height:1.5;
+  padding:8px 11px;border-radius:7px;background:var(--sk);color:var(--tx)}
+.hcard.critical .hc-act{background:var(--red-bg);color:var(--red)}
+.hcard.high .hc-act{background:var(--org-bg);color:var(--org)}
+.hc-num{display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s2);
+  font-size:12px;color:var(--tx3);font-variant-numeric:tabular-nums}
+/* ★ 顺序要紧：.hc-num b 必须写在 .hc-num b.up/.dn **之前**，否则同权重下
+   后者被前者覆盖，涨跌幅会一律渲染成黑色（踩过：`<b class="dn">-2.40%</b>`
+   量出来是 (25,23,19) 的近黑，而不是跌色）。 */
+.hc-num b{color:var(--tx);font-weight:700}
+.hc-num b.up{color:var(--red)}
+.hc-num b.dn{color:var(--grn)}
+.hc-sec{margin-top:var(--s3);border-top:1px solid var(--line2);padding-top:var(--s2)}
+.hc-st{font-size:11.5px;font-weight:800;color:var(--tx3);letter-spacing:.06em;margin-bottom:var(--s1)}
+/* 卖出参考价：一行 = 一条线（标签 · 价位 · 到什么价做什么）
+   ★ 三列都必须能收缩：标签与价位给固定宽，说明文字 flex:1 +
+   min-width:0 —— 少了 min-width，flex 项不会缩到内容宽度以下，
+   长句会溢出卡片右边被裁掉（实测「第二天站不回来就清掉」被切掉）。 */
+.lvrow{display:flex;gap:var(--s3);align-items:baseline;padding:5px 0;font-size:12.5px;line-height:1.6}
+.lvrow+.lvrow{border-top:1px dashed var(--line2)}
+.lvtag{flex:0 0 132px;font-size:11.5px;font-weight:700;color:var(--tx2)}
+.lvtag.red{color:var(--red)} .lvtag.org{color:var(--org)}
+.lvtag.blu{color:var(--blu)} .lvtag.grn{color:var(--grn)}
+.lvtag.gry{color:var(--tx3)}
+.lvpx{flex:0 0 62px;font-family:var(--mono);font-weight:800;
+  font-size:13.5px;font-variant-numeric:tabular-nums;text-align:right}
+.lvpx.up{color:var(--tx)} .lvpx.dn{color:var(--red)}
+.lvwhat{flex:1;min-width:0;color:var(--tx2);word-break:break-word}
+.hc-note{margin-top:var(--s2);font-size:11.5px;color:var(--tx3);line-height:1.65}
+.sigrow{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap;padding:4px 0;font-size:12.5px}
+.sigact{color:var(--tx);line-height:1.6}
+.sigtrig{font-size:11.5px;width:100%}
+.hc-warn{margin-top:var(--s2);font-size:11.5px;line-height:1.65;padding:6px 9px;border-radius:6px}
+.hc-warn.org{color:var(--org);background:var(--org-bg);border-left:3px solid var(--org)}
+@media(max-width:700px){
+  .lvrow{flex-wrap:wrap;gap:var(--s1) var(--s2)}
+  .lvtag{width:auto} .lvpx{width:auto;text-align:left}
+  .lvwhat{width:100%;flex:none}
+}
+
 /* ── 详情：右侧弹出面板 ──
    原来是嵌在「选股决策」页表格下面的一块卡片：点一行 → 表格被撑开 → 还要往下滚
    才看得见，页面变成「表格 + 一屏半详情」两截。改成从右侧滑出的独立面板后，
@@ -3194,31 +3252,60 @@ function renderPort(){
         系统会用同一套卖出信号（退潮清仓/破位/A字杀/机构加速/断板/庄股）帮你每天盯一遍。</div>`;
     } else {
       const vc={'清仓离场':'red','减仓':'org','观察/减半':'org','持有':'grn'};
-      const rows=hold.map(h=>`<tr data-c="${h.code}">
-        <td><b>${esc(h.name||h.code)}</b> <span class="fl" style="font-size:11px">${h.code}</span></td>
-        <td class="num">${f2(h.cost)}</td><td class="num">${f2(h.price)}</td>
-        <td class="num ${pct(h.pct)}">${f2(h.pct)}%</td>
-        <td class="num ${(h.pnl_pct||0)>=0?'up':'dn'}" style="font-weight:800">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</td>
-        <td class="num">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</td>
-        <td><span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span></td>
-        <td class="fl" style="white-space:normal;max-width:300px;font-size:12px">${esc((h.signals[0]||{}).action||(h.signals[0]||{}).name||'—')}${
-          h.unwind?`<div style="margin-top:4px;font-size:11px;color:var(--org);background:#fffdf8;
-            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">${esc(h.unwind)}</div>`:''}${
-          h.swing_alert?`<div style="margin-top:4px;font-size:11px;color:var(--org);background:#fffdf8;
-            border-left:3px solid var(--org);border-radius:4px;padding:4px 7px;line-height:1.6">⚠️ ${esc(h.swing_alert)}</div>`:''}</td>
-      </tr>`).join('');
+      // ★ 用户反馈「不够好理解要说人话」「选进持仓的要积极观察走势分析卖出时间」：
+      //   原来是 8 列大表，「为什么」那一栏把 4 件事挤在 300px 里，
+      //   看完仍然不知道「今天到底该干什么、到什么价该动」。
+      //   改成每只票一张卡：① 第一行就是「今天做什么」② 关键数字一行
+      //   ③ 卖出参考价逐条列出（到哪个价 → 做什么）④ 卖点信号与做长警示。
+      const cards=hold.map(h=>{
+        const e=h.exit_plan||{};
+        const lv=(e.levels||[]).map(l=>`<div class="lvrow">
+            <span class="lvtag ${l.tone||'gry'}">${esc(l.label)}</span>
+            <span class="lvpx ${l.rel==='dn'?'dn':'up'}">${f2(l.price)}</span>
+            <span class="lvwhat">${esc(l.what)}</span>
+          </div>`).join('');
+        const sigs=(h.signals||[]).map(s=>`<div class="sigrow">
+            <span class="pill ${s.urgency==='critical'?'red':(s.urgency==='high'?'org':'gry')}">${esc(s.name||s.type||'信号')}</span>
+            <span class="sigact">${esc(s.action||'')}</span>
+            ${s.trigger?`<span class="fl sigtrig">触发条件：${esc(s.trigger)}</span>`:''}
+          </div>`).join('');
+        const pnlCls=(h.pnl_pct||0)>=0?'up':'dn';
+        const lvlCls=h.level==='critical'?'critical':(h.level==='high'?'high':'');
+        return `<div class="hcard ${lvlCls}" data-c="${h.code}">
+          <div class="hc-h">
+            <b class="hc-nm">${esc(h.name||h.code)}</b>
+            <span class="fl hc-cd">${h.code}</span>
+            <span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span>
+            <span class="hc-sp"></span>
+            <span class="hc-pnl ${pnlCls}">${h.pnl_pct==null?'—':(h.pnl_pct>=0?'+':'')+f2(h.pnl_pct)+'%'}</span>
+            <span class="fl hc-mv">${h.mv?f2(h.mv/1e4,1)+'万':'—'}</span>
+          </div>
+          <div class="hc-act">${esc(h.plain||'')}</div>
+          <div class="hc-num">
+            <span>成本 <b>${f2(h.cost)}</b></span>
+            <span>现价 <b>${f2(h.price)}</b></span>
+            <span>今日 <b class="${pct(h.pct)}">${f2(h.pct)}%</b></span>
+            ${e.last_close?`<span>收盘 <b>${f2(e.last_close)}</b></span>`:''}
+            ${h.r3!=null?`<span>近3日 <b class="${h.r3>=0?'up':'dn'}">${h.r3>=0?'+':''}${f2(h.r3)}%</b></span>`:''}
+          </div>
+          ${lv?`<div class="hc-sec"><div class="hc-st">卖出参考价 · 到什么价做什么</div>${lv}
+            ${e.note?`<div class="hc-note">${esc(e.note)}</div>`:''}</div>`:''}
+          ${sigs?`<div class="hc-sec"><div class="hc-st">卖出信号</div>${sigs}</div>`:''}
+          ${h.unwind?`<div class="hc-warn org">${esc(h.unwind)}</div>`:''}
+          ${h.swing_alert?`<div class="hc-warn org">⚠️ ${esc(h.swing_alert)}</div>`:''}
+        </div>`;
+      }).join('');
       hp.innerHTML=`<div class="grid g4" style="margin-bottom:12px">
           <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">持仓总市值</div><div class="v">${f2((p.total_mv||0)/1e4,1)}万</div><div class="s">成本 ${f2((p.total_cost||0)/1e4,1)}万</div></div>
           <div class="mc ${(p.total_pnl||0)>=0?'g':'r'}"><div class="t">总盈亏</div><div class="v ${(p.total_pnl||0)>=0?'up':'dn'}">${(p.total_pnl||0)>=0?'+':''}${f2((p.total_pnl||0)/1e4,2)}万</div><div class="s">${p.total_pnl_pct==null?'—':(p.total_pnl_pct>=0?'+':'')+f2(p.total_pnl_pct)+'%'}</div></div>
           <div class="mc b"><div class="t">持仓数</div><div class="v">${p.n_holdings||0}</div><div class="s">自选 ${p.n_watch||0} 只</div></div>
           <div class="mc ${(p.checks||[]).some(c=>c.level==='red')?'r':'o'}"><div class="t">体检告警</div><div class="v">${(p.checks||[]).length}</div><div class="s">${(p.checks||[]).length?'有持仓需要处理':'持仓暂无告警'}</div></div>
         </div>
-        <div class="tbl"><table><thead><tr><th>持仓</th><th class="num">成本</th><th class="num">现价</th>
-          <th class="num">今日</th><th class="num">盈亏</th><th class="num">市值</th><th>建议</th><th>为什么</th></tr></thead>
-          <tbody>${rows}</tbody></table></div>
-        <div class="fl" style="font-size:11.5px;margin-top:8px">${esc(p.note||'')}</div>`;
+        <div class="hlist">${cards}</div>
+        <div class="fl" style="font-size:11.5px;margin-top:10px">${esc(p.note||'')}</div>`;
     }
-    hp.querySelectorAll('tr[data-c]').forEach(tr=>tr.onclick=()=>showDetail(tr.dataset.c));
+    // 整张卡可点 → 打开该股详情（含走势图、筹码、卖出信号全文）
+    hp.querySelectorAll('.hcard').forEach(c=>c.onclick=()=>showDetail(c.dataset.c));
   }
 
   if(wp){
@@ -3774,9 +3861,18 @@ $('srcReconnect').onclick=()=>srcCmd({action:'reconnect'});
 document.querySelectorAll('.btnPort').forEach(b=>b.onclick=openPort);
 $('btnPortClose').onclick=closeAllPanels;
 $('pfDone').onclick=closeAllPanels;
-$('pfAdd').onclick=()=>{ const c=$('pfCode').value.trim(); if(!c){alert('请填代码');return;}
-  portCmd({action:'add',code:c,name:$('pfName').value.trim(),
-    cost:parseFloat($('pfCost').value)||0,shares:parseFloat($('pfShares').value)||0});
+$('pfAdd').onclick=()=>{
+  const c=$('pfCode').value.trim();
+  if(!c){alert('请填股票代码（如 600519 / sh600519）');return;}
+  // ★ 这里必须显式判空再报错，不能用 `parseFloat(x)||0` 把空值悄悄当 0。
+  //   原来就是这样：成本留空 → 传 cost:0 → 后端照存 → 盈亏算成「—」、
+  //   保本线不出现，界面看起来「记上了」其实记了个废数据，
+  //   而用户完全不知道是自己漏填了成本 —— 这就是「记持仓用不了」的真相之一。
+  const costRaw=$('pfCost').value.trim(), shRaw=$('pfShares').value.trim();
+  const cost=parseFloat(costRaw), shares=parseFloat(shRaw);
+  if(!costRaw || !isFinite(cost) || cost<=0){alert('请填买入成本（每股多少钱，必须大于 0）—— 不填成本就算不出盈亏和保本线');return;}
+  if(!shRaw || !isFinite(shares) || shares<=0){alert('请填股数（必须大于 0）');return;}
+  portCmd({action:'add',code:c,name:$('pfName').value.trim(),cost:cost,shares:shares});
 };
 // 「加自选」：代码直接加；名称/拼音先搜（唯一命中直接加，多条则列出来让用户点选）
 $('wlAdd').onclick=()=>wlDoAdd();

@@ -359,9 +359,27 @@ class Handler(BaseHTTPRequestHandler):
                 elif act == "watch_remove":
                     portfolio_mod.watch_remove(code)
                 else:
+                    # ★ 成本/股数必须能转成正数才许录入。
+                    #   原来直接 payload.get("cost", 0) 透传，成本 0 会被当成
+                    #   合法持仓存下来 —— 后果不是报错，而是所有盈亏静默失真：
+                    #   pnl_pct 算成 None、保本线不出现、「回落到成本附近」这类
+                    #   提示全消失，用户看到一张「像是正常的」空卡片，
+                    #   却不知道是因为自己漏填了成本。宁可当场拒绝。
+                    try:
+                        _c = float(payload.get("cost") or 0)
+                        _s = float(payload.get("shares") or 0)
+                    except (TypeError, ValueError):
+                        self._send_json({"error": "成本/股数要填数字"}, 400)
+                        return
+                    if _c <= 0:
+                        self._send_json({"error": "成本必须大于 0 —— 不填成本就算不出盈亏和保本线"}, 400)
+                        return
+                    if _s <= 0:
+                        self._send_json({"error": "股数必须大于 0"}, 400)
+                        return
                     portfolio_mod.upsert_holding(
                         code, payload.get("name", ""),
-                        payload.get("cost", 0), payload.get("shares", 0),
+                        _c, _s,
                         payload.get("date", ""), payload.get("note", ""))
                 self._send_json({"ok": True, "portfolio": self._portfolio_view()})
             elif path == "/api/sources":
