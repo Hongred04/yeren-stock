@@ -1,0 +1,20 @@
+feat: 数据源备用链路 + 扫描提速 + E10 组合回测
+
+数据源（core/datasource.py）
+- 资金流主链路 ulist.np -> clist（原注释的前提实测是反的）
+- push2 硬失败立即熔断，不再 4 台镜像各撞一遍：fetch_breadth 冷取 2.56s -> 1.74s
+- 板块/个股 clist 走 fs= 表达式，_mk_code 修北交所 92 号段误判
+
+扫描提速（core/kph.py, core/pipeline.py）
+- 开盘红 kph 兜底链路
+- 全链路 15.1s -> 11.5s
+
+E10 组合回测（core/backtest.py, tests/test_backtest.py）
+- 把 E4 逐笔收益聚合成组合级净值曲线
+- 想要的口径没样本时自动降档并如实说明，不给空白页
+- 样本不足时不出夏普/年化，宁缺勿编
+
+前端（web/index.html）
+- 新增「组合回测」页：净值曲线 SVG + 指标卡 + 分档诊断
+- 顶栏加上证指数实时快照（取不到显示 — 而不是 0.00）
+- 结论卡「能买/不能买」换成人话 + 重新考虑的条件

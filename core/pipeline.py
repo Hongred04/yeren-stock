@@ -13,6 +13,7 @@ from . import auction as auction_mod
 from . import datasource as ds
 from . import engine
 from . import journal as journal_mod
+from . import backtest as backtest_mod
 from . import kph as kph_mod
 from . import lhb as lhb_mod
 from . import mainline
@@ -450,9 +451,22 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             codes = universe.enumerate_all()
         _prog("扫描全市场快照…", 0, 100)
         snap_batch = 80
-        snaps = ds.fetch_snapshots(codes, batch=snap_batch, workers=24,
+        diag: dict = {}
+        snaps = ds.fetch_snapshots(codes, batch=snap_batch, workers=24, diag=diag,
                                    progress=lambda d, t: _prog(
                                        f"扫描全市场 {d*snap_batch}/{t*snap_batch} 只…", d, t))
+        # ★ 腾讯这条链路偶发 RemoteDisconnected（用户实测「行情快照经常不通」）。
+        #   整批失败时**不能让全市场扫描就此空手而归** —— 退到新浪快照：
+        #   链路完全独立，字段是同一套（成交量单位已统一成手），只是慢一些
+        #   （全市场约 2.2s vs 0.6s）。只在真丢数据时触发，正常情况零开销。
+        #   判据用 failed_batches：它统计的是「整批传输失败」，
+        #   不含「腾讯明确回答没有这个代码」（那是输入问题，换源也没用）。
+        if diag.get("failed_batches") and len(snaps) < len(codes) * 0.9:
+            _prog("腾讯快照不通，改用新浪备用源…", 0, 100)
+            fb = ds.fetch_snapshots_sina(codes)
+            if len(fb) > len(snaps):
+                snaps = fb
+                diag["fellback"] = "sina"
         if from_enum and snaps:
             # 当日首扫：把真实标的名单落盘，同日重扫少发 ~8 倍请求
             ds.save_valid_codes(sorted(snaps))
@@ -647,6 +661,12 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         _prog("结算信号档案…", 0, 100)
         journal_data = journal_mod.run(cfg, real_date, picks, kl)
 
+        # ---- E10 轻量回测（把 E4 的逐笔收益聚合成组合级净值曲线） ----
+        # 纯本地计算（读 signal_journal.json），无网络、无 K线拉取。
+        # 放在 E4 之后：要用刚结算完的档案，否则最新一批样本进不来。
+        _prog("回测组合表现…", 0, 100)
+        backtest_data = backtest_mod.run(cfg)
+
         # ---- 持仓体检（本地持仓/自选） ----
         _prog("持仓体检…", 0, 100)
         port_raw = portfolio_mod.load()
@@ -713,6 +733,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,
+            "backtest": backtest_data,
             "portfolio": port,
             "picks": picks,
             # 候选口径说明：哪些票因为"今日无买点/连板不接力"没进候选，如实告知

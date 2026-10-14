@@ -268,6 +268,116 @@ def main():
     ok(bd[0]["main"] >= bd[1]["main"], "按主力净额降序")
     ds._push2_json = _real_push2
 
+    print("[17] 腾讯不通时退新浪备用源（快照链路独立性）")
+    # 用户实测「行情快照经常不通」：腾讯偶发 RemoteDisconnected。
+    # 备用源必须能顶上，且字段口径要和腾讯对齐（否则下游量纲串台）。
+    _sina_line = ('var hq_str_sh600519="贵州茅台,1270.100,1274.890,1284.330,'
+                  '1286.750,1266.000,1284.320,1284.330,1196653,1529287044.000,'
+                  '100,1284.330,200,1284.320,300,1284.310,400,1284.300,'
+                  '500,1284.290,600,1284.280,700,1284.270,800,1284.260,'
+                  '900,1284.250,1000,1284.240,2026-10-14,11:03:20,00";')
+    rec = ds._parse_sina_line(_sina_line)
+    ok(rec and rec["code"] == "sh600519" and rec["name"] == "贵州茅台",
+       "新浪行解析出代码与名称")
+    ok(rec["price"] == 1284.33 and rec["prev_close"] == 1274.89, "现价/昨收正确")
+    ok(rec["pct"] == 0.74, "涨跌幅由 现价/昨收 现算（新浪不直接给）")
+    # ★ 量纲：新浪是股、腾讯是手。这里必须折成手，否则成交量会差 100 倍。
+    ok(abs(rec["volume"] - 11966.53) < 0.01,
+       "成交量从「股」折成「手」（÷100，与腾讯同量纲）")
+    ok(rec["source"] == "sina", "带 source 标记，便于界面如实标注")
+    ok(ds._parse_sina_line("garbage") is None
+       and ds._parse_sina_line('var hq_str_x="";') is None,
+       "畸形行/空行安全返回 None")
+    ok(ds._parse_sina_line(
+        'var hq_str_sz000001="平安银行,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,'
+        '0,0,0,0,0,0,0,0,0,0,2026-10-14,11:03:20,00";') is None,
+       "全 0（停牌/无数据）不当成有效快照")
+
+    # 字段数随市场不同（实测 SH=34 / SZ=33 / BJ=33），短字段不应越界抛异常
+    _sz = ('var hq_str_sz000001="平安银行,11.570,11.570,11.640,11.720,11.560,'
+           '11.630,11.640,40250927,453717873.490,27200,11.630,36100,11.620,'
+           '117400,11.610,497900,11.600,300000,11.590,500000,11.580,'
+           '600000,11.570,700000,11.560,800000,11.550,900000,11.540,'
+           '2026-10-14,11:03:20,00";')
+    r2 = ds._parse_sina_line(_sz)
+    ok(r2 and r2["price"] == 11.64 and abs(r2["volume"] - 402509.27) < 0.01,
+       "深市（33 字段）同样正确解析")
+
+    _orig_get = ds._get
+    ds._get = lambda url, timeout=12, referer="", plain=None: (
+        _sina_line + "\n" + _sz).encode("gb18030")
+    fs = ds.fetch_snapshots_sina(["sh600519", "sz000001"])
+    ok(set(fs) == {"sh600519", "sz000001"}, "备用源批量取回两只")
+    ok(fs["sh600519"]["source"] == "sina", "备用源结果带 source=sina")
+    ok(ds.fetch_snapshots_sina([]) == {}, "备用源空输入不打接口")
+
+    def _boom(url, timeout=12, referer="", plain=None):
+        raise OSError("network down")
+    ds._get = _boom
+    ok(ds.fetch_snapshots_sina(["sh600519"]) == {},
+       "备用源整链失败时返回空字典（不抛异常打断扫描）")
+    ds._get = _orig_get
+
+    print("[18] push2 冷却/超预算时跳过它，直接走免费备用口径")
+    # 实测被东财掐住时 fetch_breadth 要先烧 3.01 秒（4 台镜像轮一遍 + 5 个预算位）
+    # 才降级 —— 已知打不通就别打，把这几秒还给用户。
+    ds._push2_recover()
+    ok(ds._push2_cheap_skip() is False, "正常状态不跳过 push2")
+    ds._push2_trip(60)
+    ok(ds._push2_cheap_skip() is True, "家族冷却中 → 判定为注定白打")
+    # 缓存键就是裸的 "breadth"（不是 breadth+日期），清错键会读到上一组测试的缓存
+    ds._cache.pop("breadth", None)
+    ds._cache_ts.pop("breadth", None)
+    _before = ds.push2_status()["budget_used"]
+    _b = ds.fetch_breadth()
+    ok(ds.push2_status()["budget_used"] == _before,
+       "冷却中取涨跌家数 → 一个 push2 预算位都没花")
+    # 不断言返回值内容：备用口径（开盘红实时情绪）本身也要走网络，测试机
+    # 偶发取不到时会再退到「当日最后一份好数据」，两者都可能为空 —— 那是
+    # 网络波动，不是这条逻辑的事。这里要钉的是**行为**：冷却中绝不去打 push2
+    # （上面那条预算断言），以及**不再走 push2 的解析分支**。用一个假的
+    # push2 探针把它钉死：冷却期它一次都不该被调用。
+    _hit = []
+    _orig_p2 = ds._push2_json
+    ds._push2_json = lambda p, referer="x": (_hit.append(p) or {})
+    ds._cache.pop("breadth", None)
+    ds._cache_ts.pop("breadth", None)
+    ds.fetch_breadth()
+    ok(_hit == [], "★ 冷却中 fetch_breadth 完全没调用 push2（省下 3 秒空等）")
+    ds._push2_json = _orig_p2
+    ds._push2_recover()
+    ok(ds._push2_cheap_skip() is False, "恢复后重新优先走 push2")
+
+    print("[19] 回补去重状态落盘（每次重启不再重做一遍全量回补）")
+    # 实测冷启动 7.2 秒里，4.2s 花在反复拉 6 个永远不会回来的假期，
+    # 2.97s 花在重拉当天+前两天的收盘复盘 —— 而这些一天只可能变一次。
+    kph._state()["failed"] = []
+    kph._state()["repaired"] = []
+    kph._state_save()
+    ok(kph._gone("20261001") is False, "未记录的日期不算「已确认取不到」")
+    kph._mark_gone("20261001")
+    ok(kph._gone("20261001") is True, "标记后即视为取不到")
+    kph._state_save()
+    # 关键：跨进程也记得（重新从磁盘读，模拟看板重启）
+    kph._KPH_STATE = None
+    ok(kph._gone("20261001") is True, "★ 重启后仍然记得（落盘生效，不再重刷）")
+    ok(kph._repaired_on("20261014") is False, "未对账的日期返回 False")
+    kph._mark_repaired("20261014")
+    kph._KPH_STATE = None
+    ok(kph._repaired_on("20261014") is True, "对账记录同样跨进程生效")
+    # 兼容旧接口：测试与旧代码会写 kph._repaired.clear()
+    kph._repaired.clear()
+    ok(kph._repaired_on("20261014") is False, "_repaired.clear() 能清掉落盘记忆")
+    # 损坏的落盘文件不能让回补崩掉
+    _p = kph._state_path()
+    if _p:
+        with open(_p, "w", encoding="utf-8") as f:
+            f.write("{坏掉的 json")
+        kph._KPH_STATE = None
+        ok(kph._gone("20261001") is False, "状态文件损坏 → 当空处理（不抛异常）")
+        kph._state_save()
+        kph._KPH_STATE = None
+
     print()
     print(f"===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0

@@ -38,7 +38,116 @@ _UA = "Dalvik/2.1.0"
 
 _MIN_INTERVAL = 0.8          # 回补是低频动作，保持礼貌间隔
 _last_req = 0.0
-_failed: set[str] = set()    # 本会话已试过且无数据的日期，不再重试
+
+# ── 会话级 / 落盘级去重 ────────────────────────────────────────────────
+# ★ 为什么要落盘（实测 2026-10-14）：这两个集合原来只在进程内存里，于是
+#   **每次重启看板都要重做一遍全部回补请求**。实测冷启动那 7.2 秒里，
+#   4.2s 花在 autobackfill 反复去拉 6 个永远不会回来的日期
+#   （20261001–20261007 国庆、20260925），2.97s 花在 repair_pool_history
+#   重拉当天+前两天的收盘复盘 —— 而这些数据一天只可能变一次。
+#   看板每次启动都撞一次这个，用户感受就是"开得慢"。
+# 落盘后：失败日期记住就不再来；对账按「日期」而不是「进程」去重。
+_KPH_STATE_PATH = None       # 惰性求值（paths 模块可能还没就绪）
+_KPH_STATE: dict | None = None
+_SUSPECT_LIMIT = 400         # 失败日期表上限，防无限增长
+
+
+def _state_path() -> str:
+    global _KPH_STATE_PATH
+    if _KPH_STATE_PATH is None:
+        try:
+            from . import paths
+            _KPH_STATE_PATH = paths.data_path("kph_state.json")
+        except Exception:                                       # noqa: BLE001
+            _KPH_STATE_PATH = ""
+    return _KPH_STATE_PATH
+
+
+def _state() -> dict:
+    """读回补去重状态（失败日期 + 已对账日期）。损坏/缺失一律当空。"""
+    global _KPH_STATE
+    if _KPH_STATE is not None:
+        return _KPH_STATE
+    obj: dict = {"failed": [], "repaired": []}
+    p = _state_path()
+    if p:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                for k in ("failed", "repaired"):
+                    v = raw.get(k)
+                    if isinstance(v, list):
+                        obj[k] = [str(x) for x in v if x]
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+    _KPH_STATE = obj
+    return obj
+
+
+def _state_save() -> None:
+    p = _state_path()
+    if not p:
+        return
+    obj = _state()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _gone(d: str) -> bool:
+    """该日期是否已确认「取不到」（非交易日/假期）。"""
+    return d in _state()["failed"]
+
+
+def _mark_gone(d: str) -> None:
+    st = _state()
+    if d in st["failed"]:
+        return
+    st["failed"].append(d)
+    # 只留最近的（日期字符串可直接比大小）
+    if len(st["failed"]) > _SUSPECT_LIMIT:
+        st["failed"] = sorted(st["failed"])[-_SUSPECT_LIMIT:]
+    _state_save()
+
+
+def _repaired_on(d: str) -> bool:
+    return d in _state()["repaired"]
+
+
+def _mark_repaired(d: str) -> None:
+    st = _state()
+    if d not in st["repaired"]:
+        st["repaired"].append(d)
+        _state_save()
+
+
+# 兼容旧的进程内引用（tests/test_pool_archive.py 里会 `kph._repaired.clear()`）。
+# 给一个"看起来像 set、clear() 会清掉落盘记忆"的薄壳，避免调用方为了这件事改测试。
+class _RepairedView:
+    """只读视图 + clear() 语义的兼容壳。"""
+
+    def __contains__(self, d: str) -> bool:
+        return _repaired_on(str(d))
+
+    def clear(self) -> None:
+        st = _state()
+        st["repaired"] = []
+        _state_save()
+
+    def __len__(self) -> int:
+        return len(_state()["repaired"])
+
+    def __iter__(self):
+        return iter(list(_state()["repaired"]))
+
+
+_repaired = _RepairedView()
 
 
 def _int(v, d: int = 0) -> int:
@@ -229,13 +338,16 @@ def autobackfill(real_date: str, lookback: int = 20, max_try: int = 30,
     if not real_date:
         return {"checked": 0, "filled": [], "rest": 0}
     have = set(ds.pool_history_dates())
+    # 排除：已有归档的 / 已确认取不到的（落盘记忆，跨进程生效 —— 见文件头说明）
     cands = [d for d in _workdays_before(real_date, lookback)
-             if d not in have and d not in _failed]
+             if d not in have and not _gone(d)]
     filled: list[str] = []
     t0 = time.time()
     tried = 0
+    hit_budget = False
     for d in cands[:max_try]:
         if time.time() - t0 > budget_sec:
+            hit_budget = True
             break
         tried += 1
         pool = history_pool(d)
@@ -243,13 +355,16 @@ def autobackfill(real_date: str, lookback: int = 20, max_try: int = 30,
             ds.save_pool_history(d, pool)
             filled.append(d)
         else:
-            _failed.add(d)
-    rest = len([d for d in cands[tried:] if d not in _failed])
+            # 假期/非交易日：落盘记住，下次启动不再为它发请求
+            _mark_gone(d)
+    # rest 只统计"还值得再试"的：预算耗尽时后面那些都还没试过；
+    # 已确认取不到的不算（否则界面会永远提示"补历史中 N/M"，而 M 永不减少）。
+    rest = len([d for d in cands[tried:] if not _gone(d)]) if hit_budget else 0
     return {"checked": tried, "filled": filled, "rest": rest}
 
 
-# 每天只对账一次（进程内）。对账要发 3 个请求，不能每轮扫描都发。
-_repaired: set[str] = set()
+# 每天只对账一次。★ 判据是「这个日期对过账没有」而不是「这个进程对过没有」——
+# 原来是进程内 set，于是每次重启都要重拉当天+前 2 天的收盘复盘（实测 2.97s）。
 
 
 def _move_aside(d: str) -> bool:
@@ -286,9 +401,9 @@ def repair_pool_history(real_date: str, days: int = 3) -> dict:
 
     每天最多跑一次（进程内去重），返回 {repaired, moved, missing}。
     """
-    if not real_date or real_date in _repaired:
-        return {"repaired": [], "moved": [], "missing": []}
-    _repaired.add(real_date)
+    if not real_date or _repaired_on(real_date):
+        return {"repaired": [], "moved": [], "missing": [], "skipped": True}
+    _mark_repaired(real_date)
     repaired: list[str] = []
     moved: list[str] = []
     missing: list[str] = []

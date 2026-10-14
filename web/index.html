@@ -57,6 +57,15 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:12px 20px;
 .tag{background:var(--sk);color:var(--tx2);padding:4px 10px;border-radius:7px;
   font-size:12px;display:flex;align-items:center;gap:5px}
 .tag b{font-weight:700;color:var(--tx)}
+/* 顶栏指数：给上证指数一个专属位，数字比普通 tag 更大更重 —— 它是要一眼扫到的。
+   底色按涨跌上色（.up 红 / .dn 绿 / .fl 灰，沿用全站 A 股语义，红涨绿跌）。 */
+.tag.idx{gap:7px;padding:3px 11px}
+.tag.idx b{font-size:14px;font-weight:800;font-variant-numeric:tabular-nums}
+.tag.idx .pc{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
+.tag.idx.up{background:var(--red-bg)}
+.tag.idx.up b,.tag.idx.up .pc{color:var(--red)}
+.tag.idx.dn{background:var(--grn-bg)}
+.tag.idx.dn b,.tag.idx.dn .pc{color:var(--grn)}
 .tag.clk{cursor:pointer}
 .tag.clk:hover{background:var(--blu-bg);color:var(--blu)}
 .tag.srcwarn{background:var(--org-bg)}
@@ -664,6 +673,7 @@ td{padding:9px var(--s3)}
 <header>
   <div class="hd">
     <div class="logo"><span class="dot"></span>股票监控</div>
+    <div class="tag idx" id="hdIdx" title="上证指数（实时快照，随静默刷新更新）"><b>—</b><span class="pc">—</span></div>
     <div class="tag">策略 <b id="hdPreset">—</b></div>
     <div class="tag">日期 <b id="hdDate">—</b></div>
     <div class="tag">版本 <b id="hdVer">—</b></div>
@@ -834,6 +844,15 @@ td{padding:9px var(--s3)}
       </div>
     </div>
 
+    <!-- ══════════ 选股决策 ▸ 组合回测 ══════════ -->
+    <div class="page" data-page="pick-backtest">
+      <div class="sec">
+        <div class="sh"><h2>组合回测</h2>
+          <span class="hint">把逐笔信号聚合成资金曲线 · 等权 · T+1开盘 · 含成本</span></div>
+        <div id="btWrap"></div>
+      </div>
+    </div>
+
     <!-- ══════════ 我的持仓 ▸ 持仓体检 ══════════ -->
     <div class="page" data-page="mine-hold">
       <div class="sec">
@@ -975,6 +994,7 @@ const NAV=[
   {k:'pick',t:'选股决策',d:'买什么',subs:[
     {k:'pick-list',t:'候选股票',d:'打分清单 + 买卖点 + 详情'},
     {k:'pick-journal',t:'信号胜率',d:'历史信号 1/3/5 日复盘'},
+    {k:'pick-backtest',t:'组合回测',d:'净值曲线 · 回撤 · 分档诊断'},
   ]},
   {k:'mine',t:'我的持仓',d:'自己的票',subs:[
     {k:'mine-hold', t:'持仓体检',d:'卖出信号体检 + 盈亏'},
@@ -1356,22 +1376,59 @@ function render(){
   // 端的是上次结果就如实标出来（不是今天的数据要让人一眼看见，而不是当成今天的）
   $('hdDate').textContent=(m.date||'—')+(REPORT.stale?'（上次结果·正在后台刷新）':'');
   $('hdVer').textContent='v'+(m.version||'?');
+  // 上证指数 —— 放在顶栏最前面，涨跌用全站 A 股语义着色（红涨绿跌）。
+  // 取不到就整格显示「—」并标灰，不显示 0.00（0.00 会被误读成"平盘"，是假事实）。
+  const idx=(REPORT.index||{})['sh000001'];
+  const hdIdx=$('hdIdx');
+  if(idx&&idx.price!=null&&isFinite(Number(idx.price))){
+    const pv=Number(idx.pct);
+    hdIdx.className='tag idx '+pct(isFinite(pv)?pv:0);
+    hdIdx.innerHTML=`<b>${f2(idx.price)}</b><span class="pc">${isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'—'}</span>`;
+    hdIdx.title='上证指数 '+(isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'')+'（实时快照，随静默刷新更新）';
+  }else{
+    hdIdx.className='tag idx fl';
+    hdIdx.innerHTML='<b>—</b><span class="pc">—</span>';
+    hdIdx.title='上证指数：本次报告里没有指数快照（可能刚开盘或数据源抖动）';
+  }
   const ses=m.session;
   $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')
     +'扫描'+n0(m.scanned)+'只 · 耗时'+n0(m.elapsed)+'秒';
 
   /* ── ① 一句话结论 ── */
+  // ★ 措辞刻意不用「能买 / 不能买」这两种说法（v1.36.4，用户实测反馈）：
+  //   「一会能买，一会不能买」的物理原因是阈值 30% 恰好落在高频波动带里 ——
+  //   实测 2026-10-14：炸板 11 只时亏钱面积 26.8%，只要盘中多 3 只炸板（14 只）
+  //   面积就跳到 30.5%，直接翻成退潮；而炸板数在盘中本来就在 11~19 之间跳。
+  //   也就是说系统并不是在报一个"确定的开关"，而是在报一个"当下偏冷还是偏热"的状态。
+  //   所以：判定口径一个字没改（仍是 can_trade + 量能 + 稳定器），
+  //   但把标题换成「状态 + 该怎么做」，不再输出一个会被下一次刷新推翻的断言。
   const canTrade=sen.can_trade && vol.mode!=='dry';
   const frozen=sen.stage==='unknown';   // 没有涨停 = 冰点/无信号，别鼓励试水（野人：手痒=送钱）
   const cls=!canTrade?'stop':frozen?'stop':(sen.stage==='climax'||sen.stage==='follow')?'go':'hold';
-  const emoji=!canTrade?'🚫':frozen?'🧊':(cls==='go'?'✅':'⚠️');
-  const title=!canTrade?'今天不要买'
+  const emoji=!canTrade?'🧊':frozen?'🧊':(cls==='go'?'✅':'⚠️');
+  const title=!canTrade
+    ?(sen.can_trade?'钱不够 —— 先看戏':'偏冷，先看戏')
     :frozen?'暂无涨停信号 —— 空仓等启动，手痒=送钱'
-    :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水');
+    :(cls==='go'?'偏热，可以出手但要挑龙头':'不冷不热，小仓位试水');
   const reason=!canTrade
     ?(sen.can_trade? vol.advice : (sen.note||'情绪已进入退潮期'))
     : `${STAGE_CN[sen.stage]||sen.label}，${VOL_CN[vol.mode]||vol.label}。${
         (mt.checks||[])[0]?('纪律：'+(mt.checks||[])[0].action):''}`;
+  // 「什么条件下才重新考虑」—— 这是上一行「先看戏」的兑现条件。
+  // 为什么不写"面积回到 30% 以下就算好"：面积贴阈值时正是它来回翻的时候，
+  // 拿同一个敏感指标当解除条件等于把抖动又请回来。改用**不依赖那个阈值**的事实：
+  // 亏钱面明显收窄（到 20% 以下，即稳定器解除线）+ 涨停家数重新变多。
+  // 这两条都不到，就说明市场还没缓过来，看戏是对的。
+  const resumeTip = (()=>{
+    if(canTrade) return '';
+    const ha=Number(mm.hurt_area), zt=Number(mm.limit_up);
+    const parts=[];
+    if(isFinite(ha)) parts.push(`亏钱的股票占比回到 20% 以下（现在 ${p0(ha)}）`);
+    else parts.push('亏钱的股票占比回到 20% 以下');
+    if(isFinite(zt)) parts.push(`涨停回到 60 家以上（现在 ${n0(zt)} 家）`);
+    else parts.push('涨停回到 60 家以上');
+    return '重新考虑的条件：' + parts.join('，且') + '。';
+  })();
   // 结论卡下面只留「目标总仓位」这一格。
   // 候选股票 / 最高连板 / 封板率原本也在这儿，但下面「三问速览」里有口径完全相同的
   // 一张卡，上下相邻就是同一组数字报两遍 —— 删掉。
@@ -1386,6 +1443,7 @@ function render(){
     <div class="hd2"><div class="ic">${emoji}</div>
       <div><div class="ti">${title}</div></div></div>
     <div class="sub">${esc(reason)}</div>
+    ${resumeTip?`<div class="sub" style="color:var(--tx3);margin-top:6px">${esc(resumeTip)}</div>`:''}
     <div class="acts">${acts.map(a=>
       `<div class="act"><div class="k">${a.k}</div><div class="v">${a.v}</div>
        ${a.s?`<div class="k" style="margin-top:4px;font-weight:400;color:var(--tx3);font-size:11.5px">${esc(a.s)}</div>`:''}</div>`).join('')}</div>
@@ -1412,8 +1470,11 @@ function render(){
     {t:'① 今天能不能做',cards:[
       // sen.can_trade 缺失 → canTrade 会被算成 false 并**信心十足地**报「不能」，
       // 那是拿缺数据当成"退潮期"。缺字段时明确说"数据不足"，别替市场下结论。
-      {t:'今天能买吗',
-        v:sen.can_trade==null?'数据不足':(canTrade?'能':'不能'),
+      // 口径与结论卡保持一致：报「状态」而不是「能/不能」（理由见①那段长注释）。
+      // 标签从「今天能买吗」改成「今天的状态」—— 前者问的是一个开关，后者问的是冷热，
+      // 而系统实际能给的只有后者。变的是措辞，can_trade 的判定一个字没动。
+      {t:'今天的状态',
+        v:sen.can_trade==null?'数据不足':(canTrade?'可做':'先看戏'),
         s:sen.can_trade==null?'情绪数据未就绪':(!canTrade?'退潮期或极度缩量'
             :(pos.chain_stage==='probe'?'可以试错':'按计划操作')),
         c:sen.can_trade==null?'':(canTrade?'g':'r')},
@@ -1536,7 +1597,7 @@ function render(){
   const wc=$('warnCard');
   if(!canTrade){
     wc.classList.remove('hide');
-    wc.innerHTML=`<div class="t">⚠ 今天属于禁止开仓状态</div>
+    wc.innerHTML=`<div class="t">⚠ 偏冷状态，现在不适合开仓</div>
       <div class="d">${esc(sen.can_trade?vol.advice:(sen.note||'情绪退潮'))}<br>
       下面这些股票只是<b>观察名单</b>，不是买入建议。退潮期的规矩是：
       <b>无条件清仓、停止一切低吸和打板、管住手</b>。</div>`;
@@ -1592,7 +1653,7 @@ function render(){
       pc:vol.mode==='dry'?'var(--red)':(vol.short_only?'var(--org)':'var(--grn)')},
     {q:'大家现在是抢着买还是在跑？',
       a:`<b>${esc(STAGE_CN[sen.stage]||sen.label||'—')}</b>，最高 ${n0(sen.max_boards)} 连板，封板率 ${p0(mm.seal_rate)}，`
-        +`亏钱股票占 ${p0(mm.hurt_area)}。<br>${sen.can_trade?'<b>可以按节奏操作</b>':'<b>禁止开仓</b>'}`,
+        +`亏钱股票占 ${p0(mm.hurt_area)}。<br>${sen.can_trade?'<b>可以按节奏操作</b>':'<b>先看戏，别开仓</b>'}`,
       c:sen.can_trade?(sen.stage==='climax'?'ok':'wn'):'bd',
       pctv:mm.seal_rate==null?null:Math.max(0,Math.min(100,mm.seal_rate*100)),
       pc:sen.can_trade?(sen.stage==='climax'?'var(--grn)':'var(--org)'):'var(--red)'},
@@ -1637,6 +1698,7 @@ function render(){
   renderIndustry();
   renderSowing();
   renderJournal();
+  renderBacktest();
   renderPort();
 
   /* ── 涨停池 ── */
@@ -2915,6 +2977,165 @@ function renderJournal(){
 }
 function fmtD(d){ return d&&d.length===8? d.slice(4,6)+'-'+d.slice(6,8) : (d||''); }
 
+// ── E10 组合回测 ──
+// 净值曲线的 SVG：等权组合、按日再平衡。画成面积 + 折线，
+// 零轴（1.0）画一条虚线 —— 落在下面一眼就知道这段是亏的。
+function navSvg(curve){
+  const nav=curve&&curve.nav||[], ds=curve&&curve.dates||[];
+  if(nav.length<2) return '';
+  const W=1100,H=200,pl=52,pr=14,pt=16,pb=26;
+  const iw=W-pl-pr, ih=H-pt-pb;
+  const lo=Math.min(...nav,1), hi=Math.max(...nav,1);
+  // 上下各留 8% 余量，否则曲线贴顶/贴底看着像被裁
+  const pad=(hi-lo||0.01)*0.08;
+  const y0=lo-pad, y1=hi+pad;
+  const X=i=>pl+(nav.length<=1?0:i*iw/(nav.length-1));
+  const Y=v=>pt+ih-(v-y0)/(y1-y0)*ih;
+  const pts=nav.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const area=`${pl},${Y(1).toFixed(1)} ${pts} ${X(nav.length-1).toFixed(1)},${Y(1).toFixed(1)}`;
+  const up=nav[nav.length-1]>=1;
+  const col=up?'var(--red)':'var(--grn)';   // A股：红涨
+  // y 轴两个刻度（顶/底）+ 零轴
+  const ylab=(v)=>`<text x="${pl-8}" y="${(Y(v)+4).toFixed(1)}" text-anchor="end"
+      font-size="10.5" fill="var(--tx3)" font-family="var(--mono)">${(v*100-100).toFixed(1)}%</text>`;
+  // x 轴只标首尾 + 中间一个，太多会糊
+  const xi=[0,Math.floor((nav.length-1)/2),nav.length-1].filter((v,i,a)=>a.indexOf(v)===i);
+  const xlab=xi.map(i=>`<text x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle"
+      font-size="10.5" fill="var(--tx3)" font-family="var(--mono)">${fmtD(ds[i]||'')}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:200px;display:block" preserveAspectRatio="none">
+    <line x1="${pl}" y1="${Y(1).toFixed(1)}" x2="${W-pr}" y2="${Y(1).toFixed(1)}"
+      stroke="var(--line)" stroke-dasharray="4 4"/>
+    <polygon points="${area}" fill="${col}" opacity="0.10"/>
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    ${ylab(y1)}${ylab(y0)}${xlab}
+  </svg>`;
+}
+
+function renderBacktest(){
+  const el=$('btWrap'); if(!el) return;
+  const b=REPORT.backtest||{};
+  if(b.enabled===false){
+    el.innerHTML='<div class="card fl" style="font-size:13px">回测模块已关闭（可在「调策略 → 高级参数」重新开启）</div>';
+    return;
+  }
+  if(b.error){
+    el.innerHTML=`<div class="card" style="border-left:4px solid var(--red);font-size:13px">
+      回测出错：${esc(b.error)}</div>`;
+    return;
+  }
+  const s=b.summary||{}, cur=b.curve||{};
+  const pctA=v=>v==null?'—':(v>=0?'+':'')+(v*100).toFixed(2)+'%';
+  const pctS=v=>v==null?'—':(v*100).toFixed(1)+'%';
+  const num=v=>v==null?'—':v;
+  const hasCurve=(cur.nav||[]).length>=2;
+  // 样本极少时把「回撤 0%」写清楚不是稳健，是还没波动
+  const thinDays=(cur.span_days||0)<5;
+
+  const mc=(t,v,s2,c)=>`<div class="mc ${c||''}"><div class="t">${t}</div>
+    <div class="v">${v}</div><div class="s">${esc(s2||'')}</div></div>`;
+
+  // 结论行：先说人话，再给数字
+  const hd=b.hold_days||5;
+  const hdNote=b.hold_days_note?`<div class="fl" style="font-size:11.5px;margin-top:var(--s2)">
+    持有周期：按 ${hd} 个交易日结算${esc(b.hold_days_note)}</div>`:'';
+  let verdict;
+  if(!b.enough){
+    verdict=`<div class="verdict hold"><div class="ti">样本还不够，先别当结论</div>
+      <div class="ds">目前 ${b.n_uniq||0} 笔已结算样本（少于 ${b.min_samples||10} 笔），
+      组合表现**还不能说明系统有效或无效** —— 现在看到的数字随时会被新样本改写。</div></div>`;
+  }else{
+    const tot=s.total_ret||0;
+    const tone=tot>=0.02?'go':tot<=-0.02?'stop':'hold';
+    const word=tot>=0.02?'这套打法在这段样本里是赚钱的'
+              :tot<=-0.02?'这段样本里是亏的':'这段样本里基本打平';
+    verdict=`<div class="verdict ${tone}"><div class="ti">${word}</div>
+      <div class="ds">${b.n_uniq} 笔已结算样本合计 ${pctA(tot)}，
+      胜率 ${pctS(s.win_rate)}、盈亏比 ${num(s.profit_factor)}。
+      ${thinDays?'★ 但只有 '+(cur.span_days||0)+' 个交易日的数据点，回撤与夏普都还算不出来。':''}</div></div>`;
+  }
+
+  // 指标卡
+  const cards=[
+    mc('累计收益',pctA(s.total_ret),`${cur.span_days||0} 个交易日 · ${b.n_uniq||0} 笔`,
+       (s.total_ret||0)>=0?'b':'o'),
+    mc('最大回撤',pctA(s.mdd),
+       thinDays?'样本太短，还不构成回撤':'峰值→谷底的最深跌幅',''),
+    mc('胜率',pctS(s.win_rate),`平均每笔 ${pctA(s.avg_ret)}`,'g'),
+    mc('盈亏比',num(s.profit_factor),'总盈利 ÷ 总亏损',''),
+    mc('夏普比率',num(s.sharpe),
+       s.sharpe==null?`需 ${s.min_days_for_annual?Math.min(30,s.min_days_for_annual):30}+ 个交易日`:'年化口径',''),
+    mc('年化收益',s.annual==null?'样本不足':pctA(s.annual),
+       s.annual==null?`需 ${s.min_days_for_annual||60} 个交易日，不编数`:'',''),
+  ].join('');
+
+  // 按信号分组
+  const sigRows=(b.by_signal||[]).map(g=>`<tr>
+    <td><b>${esc(g.name||g.key||'')}</b></td>
+    <td class="num">${g.n}</td>
+    <td class="num ${(g.total_ret||0)>=0?'up':'dn'}">${pctA(g.total_ret)}</td>
+    <td class="num">${pctS(g.win_rate)}</td>
+    <td class="num ${(g.avg_ret||0)>=0?'up':'dn'}">${pctA(g.avg_ret)}</td>
+    <td class="num">${pctA(g.mdd)}</td>
+    <td class="num">${pctA(g.best)}</td>
+    <td class="num">${pctA(g.worst)}</td>
+  </tr>`).join('');
+
+  // 评分分档 —— 区分度诊断
+  let bandHtml='';
+  const bands=b.by_score||[];
+  if(bands.length){
+    const d=bands[0]._diag||{};
+    const tone=d.ok?'go':(d.conclusive?'stop':'hold');
+    const bandRows=bands.map(x=>`<tr>
+      <td>第 ${x.band} 档</td>
+      <td class="num fl">${f2(x.score_lo,1)} ~ ${f2(x.score_hi,1)}</td>
+      <td class="num">${x.n}</td>
+      <td class="num">${pctS(x.win_rate)}</td>
+      <td class="num ${x.avg_ret>=0?'up':'dn'}">${pctA(x.avg_ret)}</td>
+    </tr>`).join('');
+    const toneCn=d.ok?'评分与收益方向一致，有区分度'
+      :(d.conclusive?'评分越高收益越差 —— 方向是反的':'分档之间看不出方向，当前样本下没有区分度');
+    bandHtml=`<div class="sec">
+      <div class="sh"><h2>评分分档诊断</h2>
+        <span class="hint">评分到底有没有用 —— 分四档看收益，不看总分看梯度</span></div>
+      <div class="verdict ${tone}" style="margin-bottom:var(--s3)">
+        <div class="ti">${esc(toneCn)}</div>
+        <div class="ds">顶档占比 ${((d.top_share||0)*100).toFixed(0)}% ·
+          顶底极差 ${pctA(d.spread)} · 共 ${d.n||0} 笔
+          ${d.conclusive?'':'（样本太少，任何梯度都可能是噪声）'}</div>
+      </div>
+      <div class="tbl"><table><thead><tr><th>分档</th><th class="num">评分区间</th>
+        <th class="num">样本</th><th class="num">胜率</th><th class="num">平均收益</th>
+      </tr></thead><tbody>${bandRows}</tbody></table></div>
+      <div class="fl" style="font-size:11.5px;margin-top:var(--s2)">
+        为什么看这个：同类项目实测过「因子顶档占比 82.7%」的塌缩 ——
+        最高分打给八成股票，等于没区分。分档没梯度就说明评分当前不可靠。
+      </div>
+    </div>`;
+  }
+
+  el.innerHTML=`${verdict}${hdNote}
+    <div style="display:flex;gap:var(--s3);flex-wrap:wrap;margin:var(--s4) 0">${cards}</div>
+    ${hasCurve?`<div class="card" style="padding:var(--s3) var(--s3) var(--s1)">
+      <div style="font-size:12.5px;font-weight:800;color:var(--tx2);margin-bottom:var(--s2)">
+        组合净值曲线（起点 = 0%）</div>
+      ${navSvg(cur)}
+    </div>`:`<div class="card fl" style="font-size:13px">
+      还没有足够的已结算样本画曲线 —— 每笔信号要等 ${hd} 个交易日才有结果，
+      目前 0 笔到期。曲线会在样本到期后自动出现</div>`}
+    <div class="sec">
+      <div class="sh"><h2>按信号拆开看</h2>
+        <span class="hint">哪个信号真的在赚钱、哪个在拖后腿</span></div>
+      <div class="tbl"><table><thead><tr><th>信号</th><th class="num">样本</th>
+        <th class="num">累计</th><th class="num">胜率</th><th class="num">平均每笔</th>
+        <th class="num">回撤</th><th class="num">最好</th><th class="num">最差</th>
+      </tr></thead><tbody>${sigRows||'<tr><td colspan="8" class="fl" style="text-align:center;padding:16px">还没有已结算样本</td></tr>'}</tbody></table></div>
+    </div>
+    ${bandHtml}
+    <div class="fl" style="font-size:11.5px;margin-top:var(--s3)">${md(b.note||'')}</div>`;
+}
+
 // ── 筹码分布图（估算） ──
 function chipSvg(c){
   if(!c||!c.series||!c.series.length) return '';
@@ -3288,6 +3509,8 @@ function renderModules(){
     ['E6_substitute','E6 停牌·补位推演','龙头停牌核查/重组 → 同题材里谁在补位：零成交=停牌，题材与连板高度取本地涨停池归档，同题材今日涨停票按「接棒概率」排序'],
     ['E7_industry','E7 逆势连板·独立通道','退潮日照样连板的票（驱动大概率不在情绪周期里）—— 情绪闸门量的是"接力资金"，这类票靠的是独立产业逻辑，不该被一刀切掉。只回答"谁的连板不是情绪撑的"，不是买点'],
     ['E8_sowing','E8 题材播种·前置题材池','事件→受益→标的的前瞻映射：题材生命周期（新播种/加固/持平/减弱/熄火）+ 独苗首板 + 重复启动（含标签漂移）。打板要提前找题材，而不是看谁封板打谁。备选池，不是买入信号'],
+    ['E9_auction','E9 竞价早读','集合竞价时段（9:15-9:25）的全局快照：昨日涨停池今日开盘表现 + 全市场高开/低开分布 + 三张榜（一字封死/大幅高开/大幅低开）。腾讯快照竞价时段没有成交额，只有匹配价'],
+    ['E10_backtest','E10 组合回测','把 E4 的逐笔信号聚合成组合级净值曲线：累计收益 / 最大回撤 / 夏普 / 按信号拆解 / 评分分档诊断。回答「照这套做下去钱是多了还是少了」，而 E4 只回答「这个信号准不准」'],
   ];
   $('modules').innerHTML=M.map(([k,t,d])=>{
     const m=c[k]||{}; const on=m.enabled!==false;
@@ -3386,6 +3609,10 @@ function renderModules(){
     if(k==='E4_journal') body=sw(k,'enabled','启用')+
       pctf(k,'cost_pct','往返交易成本(%)','佣金+印花税+滑点，直接从回验收益扣除',(m.cost_pct||0.002)*100)+
       num(k,'max_settle_per_scan','每轮最多结算(只)','控制数据源压力的上限',m.max_settle_per_scan);
+    if(k==='E10_backtest') body=sw(k,'enabled','启用')+
+      fld(k,'hold_days','一笔持有几个交易日','select',[
+        [1,'1 个交易日（隔日超短）'],[3,'3 个交易日'],[5,'5 个交易日（默认）']],m.hold_days||5)+
+      num(k,'min_samples','少于此样本数不给结论','样本不足时只如实说"还不够"，不硬下判断',m.min_samples);
     if(k==='E5_rebound') body=sw(k,'enabled','启用')+
       num(k,'max_pct','「价没动」判定·涨幅上限(%)','涨幅≤此值算资金在低位吸筹，超了就是追涨',m.max_pct)+
       num(k,'min_main','主力净流入下限(亿)','低于此额视为噪音，不参与评分',m.min_main)+

@@ -68,6 +68,8 @@ data/sentiment_history.json
 data/signal_journal.json
 data/stage_state.json
 data/zt_history.json
+# 开盘红回补的对账记忆（哪天已确认取不到）—— 本机积累，换机重刷一遍即可
+data/kph_state.json
 _server_log.txt
 
 # 上次扫描结果的磁盘缓存（重启后秒开用，可再生成）
@@ -82,3 +84,7 @@ _srv.log
 _srv.err
 _v.log
 _v.err
+_v2.log
+_v2.err
+_v3.log
+_v3.err

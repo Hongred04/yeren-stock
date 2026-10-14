@@ -155,15 +155,25 @@ def em_reset_blocks() -> int:
     return n
 
 
-def _new_conn(host: str, timeout: int) -> http.client.HTTPSConnection:
-    """创建 HTTPS 连接。**优先走系统代理**，代理不可用时自动直连。
+def _new_conn(host: str, timeout: int, plain: bool = False):
+    """创建连接。**优先走系统代理**，代理不可用时自动直连。
 
     为什么东财请求要走代理（实测 2026-10-10）：系统以前从不吃系统代理，
     几十轮扫描全从家宽 IP 直连打出去，东财把这个 IP 标记了 —— 接口间歇
     RST、网页弹滑块。走用户本地代理（Clash 节点）相当于换干净 IP，实测
     6/6 成功 vs 直连 3/6。代理连不上（没开 Clash）时自动回直连，并在
     120 秒内不再尝试代理，避免每个请求都先撞一次死端口。
+
+    ★ plain=True 走明文 HTTP（80 端口、不套 TLS）。腾讯行情这么走快 10 倍：
+      实测同样 20 批 80 只并发，https 0.73s vs http 0.26s；子代理在 60 并发
+      下量到 12.0s vs 1.2s（5.0 → 51.5 req/s）。RemoteDisconnected 是
+      **握手层**被掐，走明文就把这一层整个绕开 —— 快照因此不再靠 TLS 赌运气。
+      只对腾讯行情这类公开只读接口开这个口子；东财/带鉴权的一律继续 HTTPS。
     """
+    if plain:
+        conn = http.client.HTTPConnection(host, 80, timeout=timeout)
+        conn._via_proxy = False
+        return conn
     px = _sys_proxy().get("https") or _sys_proxy().get("http")
     if px and time.time() < _PROXY_BAD_UNTIL:
         px = None                     # 刚刚连不上：这几分钟直连，别反复撞
@@ -209,14 +219,21 @@ def host_stat(host: str) -> dict:
         return dict(_HOST_STAT.get(host) or {})
 
 
-def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
+def _get(url: str, timeout: int = 12, referer: str = "", plain: bool = None) -> bytes:
     """HTTPS GET，keep-alive 连接池复用。
 
     服务端会掐掉闲置连接：第一次请求失败就丢弃旧连接重试一次，自愈。
+
+    plain：明文 HTTP。默认按 URL 的 scheme 自动判定（http:// 就是明文），
+    显式传 True/False 可覆盖。连接池按「scheme://host」分别缓存，避免
+    明文与 TLS 连接混在同一个池里。
     """
     p = urllib.parse.urlsplit(url)
     host = p.hostname or ""
     path = p.path + (("?" + p.query) if p.query else "")
+    if plain is None:
+        plain = (p.scheme == "http")
+    pool_key = ("http://" if plain else "https://") + host
     headers = {
         "User-Agent": UA,
         "Referer": referer or "https://gu.qq.com/",
@@ -224,7 +241,7 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
         "Accept-Encoding": "identity",
         "Host": p.netloc,
     }
-    q = _conn_pool.setdefault(host, queue.Queue())
+    q = _conn_pool.setdefault(pool_key, queue.Queue())
     last_err: Exception | None = None
     t0 = time.time()
     for attempt in range(3):
@@ -235,7 +252,7 @@ def _get(url: str, timeout: int = 12, referer: str = "") -> bytes:
                 conn = q.get_nowait()
                 reused = True
             except queue.Empty:
-                conn = _new_conn(host, timeout)
+                conn = _new_conn(host, timeout, plain=plain)
             if conn.sock is not None:
                 conn.sock.settimeout(timeout)
             conn.request("GET", path, headers=headers)
@@ -829,7 +846,12 @@ def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
 
     def work(chunk: list[str]):
         nonlocal failed, nomatch, attempts
-        url = "https://qt.gtimg.cn/q=" + ",".join(chunk)
+        # ★ 走明文 http（不是 https）：腾讯行情这套接口是公开只读的，
+        #   而 RemoteDisconnected 出在 **TLS 握手层** —— 换明文实测快 ~3 倍
+        #   （20 批并发 0.73s → 0.26s；子代理 60 并发测得 12.0s → 1.2s），
+        #   而且不再靠握手赌运气。全市场扫描是这一路的重头戏，收益直接落在
+        #   「启动时的全市场扫描」上。
+        url = "http://qt.gtimg.cn/q=" + ",".join(chunk)
         # 至多两次：_get 内部已重试 3 次，这里再兜一层，只治"刚好抖一下"
         for attempt in range(2):
             with _dlock:
@@ -874,6 +896,109 @@ def fetch_snapshots(codes: list[str], batch: int = 80, workers: int = 16,
     return result
 
 
+# ---------------------------------------------------------------- 新浪快照（备用）
+# 腾讯快照的**独立备用源**（2026-10-14 加）。腾讯偶发 RemoteDisconnected 时，
+# 整条快照链路不能就此断掉 —— 新浪给同一批字段，链路完全独立。
+#
+# 实测（本机，2026-10-14）：
+#   · 单请求可塞 **800 只**（1000 只会被 431 拒绝），全市场 6173 只 = 8 个请求，
+#     合计约 2.2 秒 —— 比腾讯慢，所以只做备用、不做主链路。
+#   · **必须带 Referer**（https://finance.sina.com.cn/），不带一律 403。
+#   · 编码是 GB18030（不是 GBK，虽然多数时候一样）。
+#   · 字段数**随市场不同**（实测 SH=34 / SZ=33 / BJ=33），不能按下标硬取尾部。
+#
+# 字段口径（新浪）：
+#   0=名称 1=今开 2=昨收 3=现价 4=最高 5=最低 6=买一 7=卖一
+#   8=成交量(股) 9=成交额(元) 30=日期 31=时间
+# 与腾讯的差异（下游要留意）：
+#   · 成交量单位：新浪是**股**，腾讯是**手** → 这里统一折成「手」（÷100）。
+#   · 新浪不给涨跌幅，用 (现价-昨收)/昨收 现算；昨收为 0 时留空。
+#   · 新浪不给涨停/跌停价、换手率、流通市值 —— 这些字段只能缺省，
+#     所以备用源的数据**不完整**，界面/下游必须能容忍缺字段。
+def _parse_sina_line(line: str) -> dict | None:
+    """一行 `var hq_str_sh600519="名称,今开,昨收,现价,...";` → 快照 dict。
+
+    返回结构与 _parse_tx_line 对齐（下游无感切换），但只有上面列的字段。
+    """
+    if "hq_str_" not in line or '="' not in line:
+        return None
+    try:
+        head, body = line.split('="', 1)
+        code = head.split("hq_str_")[-1].strip()
+        body = body.rstrip(';').rstrip('"')
+        if not code or not body:
+            return None
+        p = body.split(",")
+        if len(p) < 10:
+            return None
+        prev = _num(p[2])
+        price = _num(p[3])
+        # 全 0 = 停牌/未开盘/该票无数据，与腾讯的 none_match 类似，不算传输失败
+        if price <= 0 and prev <= 0:
+            return None
+        pct = round((price - prev) / prev * 100, 2) if prev > 0 else None
+        return {
+            "code": code,
+            "name": p[0],
+            "price": price,
+            "prev_close": prev,
+            "open": _num(p[1]),
+            "high": _num(p[4]),
+            "low": _num(p[5]),
+            "pct": pct,
+            # 新浪成交量单位是股，腾讯是手 —— 统一折成手，免得下游量纲串台
+            "volume": _num(p[8]) / 100.0,
+            "amount": _num(p[9]),
+            "time": (p[31] if len(p) > 31 else ""),
+            "source": "sina",
+        }
+    except (IndexError, ValueError, AttributeError):
+        return None
+
+
+SINA_SNAP_URL = "https://hq.sinajs.cn/list="
+SINA_SNAP_REFERER = "https://finance.sina.com.cn/"
+SINA_BATCH = 800            # 实测上限：1000 只被 431 拒
+
+
+def fetch_snapshots_sina(codes: list[str], batch: int = SINA_BATCH,
+                         workers: int = 4) -> dict[str, dict]:
+    """新浪快照（备用源）。返回 {code: snapshot}，失败返回 {}。
+
+    只在腾讯整条链路失败时调用 —— 它比腾讯慢（全市场约 2.2s vs 0.6s），
+    但链路独立，是「腾讯不通时至少还有数」的兜底。
+    """
+    if not codes:
+        return {}
+    batches = [codes[i:i + batch] for i in range(0, len(codes), batch)]
+    result: dict[str, dict] = {}
+    _lock = threading.Lock()
+
+    def work(chunk: list[str]):
+        url = SINA_SNAP_URL + ",".join(chunk)
+        try:
+            raw = _get(url, timeout=20, referer=SINA_SNAP_REFERER).decode(
+                "gb18030", errors="ignore")
+        except Exception:
+            return []
+        out = []
+        for line in raw.splitlines():
+            rec = _parse_sina_line(line)
+            if rec:
+                out.append(rec)
+        return out
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for recs in pool.map(work, batches):
+                with _lock:
+                    for r in recs:
+                        result[r["code"]] = r
+    except Exception:
+        return result
+    return result
+
+
 def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
     """指数快照 —— 用于测算全市场量能。
 
@@ -892,7 +1017,7 @@ def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
         "sh000852": "中证1000",
         "sz399303": "国证2000",
     }
-    url = "https://qt.gtimg.cn/q=" + ",".join(codes.keys())
+    url = "http://qt.gtimg.cn/q=" + ",".join(codes.keys())
 
     def producer():
         out = {}
@@ -2065,7 +2190,16 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
         except Exception as e:
             if not _is_hard_block(e):
                 soft = True          # 有超时类失败 → 可能只是网络抖动，别急着熔断
-            continue
+                continue
+            # ★ 硬失败（RemoteDisconnected / RST / SSLError）= 整个家族把我们掐了，
+            #   换镜像没意义 —— 4 台都在同一个族里。立即拉冷却并**跳出循环**，
+            #   不要接着把剩下 3 台也各撞一次。
+            #   实测（2026-10-14）：不 break 时 fetch_breadth 冷取要 2.5 秒、
+            #   烧掉 5 个预算位（实测 budget_used 0→5），而这一路本来就注定
+            #   失败、后面还有免费备用口径。break 之后同样情形降到 0.4 秒、
+            #   0 个预算位。全市场扫描每次都要经过这里，这 2 秒是白丢的。
+            _push2_trip(min(60 * (2 ** min(_em_fail.get(key, 0), 2)), PUSH2_COOLDOWN))
+            break
     with _em_lock:
         n = _em_fail.get(key, 0) + 1
         _em_fail[key] = n
@@ -2100,6 +2234,20 @@ def _breadth_fallback() -> dict:
             "source": "kph"}
 
 
+def _push2_cheap_skip() -> bool:
+    """现在打 push2 是否注定白打（家族冷却中 / 一分钟预算已用尽）。
+
+    只做判断、不发请求。给「有免费备用口径」的调用方用：明知打不通就走备用，
+    省下 4 台镜像各轮一遍的时间（实测 3 秒）与预算位。
+    """
+    if time.time() < _p2_down_until:
+        return True
+    now = time.time()
+    with _p2_lock:
+        _budget_log[:] = [t for t in _budget_log if now - t < 60.0]
+        return len(_budget_log) >= PUSH2_BUDGET
+
+
 def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
     """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。
 
@@ -2107,23 +2255,30 @@ def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
     涨跌家数，是独立于东财的一条路；结果带 source 字段供界面如实标注。
     两条路都不通时，回退**当日最后一份好数据**（涨跌家数偶尔丢失会让
     情绪温度的第 4 项退化，不该因此把整根温度计算歪）。
+
+    ★ 2026-10-14 提速：进 push2 之前先看家族是不是在冷却/预算用尽。
+      实测被东财掐住时这一路要 **3.01 秒**才降级（4 台镜像各轮一遍，烧掉
+      5 个预算位），而备用口径 _breadth_fallback 只要 0.24~0.8 秒、且完全
+      不碰 push2。冷却期明知打不通还去打，纯粹是拿扫描时间换白等 ——
+      所以冷却/超预算时**直接走备用**，把那个 3 秒省下来。
     """
     def producer():
-        js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
-                         "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
-        diff = (js.get("data") or {}).get("diff") or []
-        if diff:
-            up = down = flat = 0
-            for it in diff:
-                up += int(_num(it.get("f104")))
-                down += int(_num(it.get("f105")))
-                flat += int(_num(it.get("f106")))
-            total = up + down + flat
-            if total > 0:
-                return True, {"up": up, "down": down, "flat": flat, "total": total,
-                              "up_ratio": round(up / total, 3),
-                              "up_down_ratio": round(up / down, 2) if down else 0.0,
-                              "source": "em"}
+        if not _push2_cheap_skip():
+            js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
+                             "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
+            diff = (js.get("data") or {}).get("diff") or []
+            if diff:
+                up = down = flat = 0
+                for it in diff:
+                    up += int(_num(it.get("f104")))
+                    down += int(_num(it.get("f105")))
+                    flat += int(_num(it.get("f106")))
+                total = up + down + flat
+                if total > 0:
+                    return True, {"up": up, "down": down, "flat": flat, "total": total,
+                                  "up_ratio": round(up / total, 3),
+                                  "up_down_ratio": round(up / down, 2) if down else 0.0,
+                                  "source": "em"}
         fb = _breadth_fallback()
         if fb:
             return True, fb
