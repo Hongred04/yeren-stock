@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 
 from . import cls as cls_mod
+from . import auction as auction_mod
 from . import datasource as ds
 from . import engine
 from . import journal as journal_mod
@@ -24,6 +25,7 @@ from . import industry as industry_mod
 from . import substitute as substitute_mod
 from . import sowing as sowing_mod
 from . import sentiment_meter
+from . import sentiment_meter as meter_mod
 from . import strategy_config as sc
 from . import swing as swing_mod
 from . import ths as ths_mod
@@ -233,9 +235,10 @@ def stock_detail(code: str) -> dict:
         p["hot_rank"] = _h["rank"]
         if _h.get("tag"):
             p["hot_tag"] = _h["tag"]
-    p["swing"] = swing_mod.evaluate(bars, code, cfg)
+    _rg_one = regime.classify(sentiment, volume)
+    p["swing"] = swing_mod.evaluate(bars, code, cfg, p=p, rg=_rg_one)
     # 波段「能不能买」结论（节点 × 阶段）—— 与 trading 波段门禁同源，详情页照着渲染
-    p["swing"]["verdict"] = swing_mod.verdict(p["swing"], regime.classify(sentiment, volume))
+    p["swing"]["verdict"] = swing_mod.verdict(p["swing"], _rg_one)
     p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
     p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
     p["kline_tail"] = bars[-30:]
@@ -477,9 +480,11 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         for p in scored:
             bars = kl.get(p["code"], [])
             # 波段体系先算（买卖点要按打法排序，得先有 swing / style_fit）
-            p["swing"] = swing_mod.evaluate(bars, p["code"], cfg)
-            p["swing"]["verdict"] = swing_mod.verdict(
-                p["swing"], regime.classify(sentiment, volume))
+            # p / rg 传进去，顺带算出 playbook（该用波段还是短线）——
+            # p 里此时已有 zt_boards（engine.screen 写的），高位判定要用。
+            _rg_one = regime.classify(sentiment, volume)
+            p["swing"] = swing_mod.evaluate(bars, p["code"], cfg, p=p, rg=_rg_one)
+            p["swing"]["verdict"] = swing_mod.verdict(p["swing"], _rg_one)
             p["buy_signals"] = trading.buy_signals(p, bars, sentiment, volume, cfg)
             p["sell_signals"] = trading.sell_signals(p, bars, sentiment, volume, cfg)
             p["kline_tail"] = bars[-30:]
@@ -615,6 +620,22 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         sowing = sowing_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
                                      real_date=real_date)
 
+        # ---- E9 竞价早读（集合竞价 09:15–09:25 → 今天该盯什么）----
+        # 用户 10-14「做个当前集合竞价时的分析板块」。系统原先把竞价只当**时段
+        # 标签**（market_session 的 phase="auction"、pipeline 在此段把成交额清零），
+        # 竞价本身从没被当成数据读过 —— 用户在 09:20 打开界面看到的还是昨天的结论。
+        # 腾讯快照里竞价匹配价（price[3]）一直在拉，本模块把它读出来。
+        # 昨日涨停池从归档取（"昨涨停今天怎么开"是打板体系最该看的一栏）。
+        # 复用 sentiment_meter._prev_pool —— 它已经定义了"上一个归档日"的口径
+        # （池子归档只在收盘后落盘，盘中取的必然是更早的交易日），
+        # 不再另写一份，免得两处对"昨天"的定义漂移。
+        # 放在 sowing 之后：同样只依赖 snaps + 归档，零新增接口。
+        _prog("读集合竞价…", 0, 100)
+        prev_zt_date, prev_zt = meter_mod._prev_pool(real_date)
+        auction = auction_mod.evaluate(cfg, snaps=snaps, zt=zt, session=sess,
+                                       real_date=real_date, prev_zt=prev_zt)
+        auction["prev_zt_date"] = prev_zt_date
+
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
@@ -688,6 +709,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "substitute": substitute,
             "industry": industry,
             "sowing": sowing,
+            "auction": auction,
             "outlook": next_outlook,
             "flow": flow,
             "journal": journal_data,
