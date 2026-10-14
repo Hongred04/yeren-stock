@@ -163,5 +163,76 @@ ok(any(x["name"] == "B" for x in r["unusable"]),
    "不可用清单里点到了 B")
 
 print()
+print("=== [10] 检验出来的因子真的接进了打分（v1.37.0 落地回归） ===")
+# 这一组钉的不是 discrimination 本身，而是「检验结论有没有真进选股」。
+# 起因：封板时间 lift 3.73x 全系统最强，但原先只用在 _first_board_bonus
+# （仅今日首板、上限 +10 分），连板股与未涨停票完全拿不到 —— 等于把最强
+# 信号关在门外。下面钉住接线后的行为，防止以后被改回去。
+from core import engine as E                          # noqa: E402
+from core import strategy_config as scfg              # noqa: E402
+
+A = scfg.default_config()["M4_aesthetic"]
+
+print("  -- 封板质量：早封 > 晚封，厚封 > 薄封 --")
+_snap = {"float_mv": 30e8, "amount": 4e8}
+s_early, _ = E._seal_quality_score(
+    _snap, {"first_time": 93100, "fund": int(30e8 * 0.05)}, A)
+s_late, _ = E._seal_quality_score(
+    _snap, {"first_time": 100000, "fund": int(30e8 * 0.01)}, A)
+ok(s_early > s_late, f"早封({s_early:.2f}) 高于晚封({s_late:.2f})")
+s_thick, _ = E._seal_quality_score(
+    _snap, {"first_time": 100000, "fund": int(30e8 * 0.06)}, A)
+s_thin, _ = E._seal_quality_score(
+    _snap, {"first_time": 100000, "fund": int(30e8 * 0.01)}, A)
+ok(s_thick > s_thin, f"封单厚({s_thick:.2f}) 高于封单薄({s_thin:.2f})")
+eq(E._seal_quality_score(_snap, None, A), (0.0, []),
+   "没进涨停池 → 0 分（不给中性分，否则未涨停票会挤进候选）")
+ok(0.0 <= s_early <= 1.0, "封板质量分限幅在 0~1")
+
+print("  -- ★ 塌缩回归：不许大量并列满分 --")
+# 实测踩过：early_full=93000 / ratio_full=1.5% 时，09:25 竞价一字组
+# 与半数票并列 100 分，30 只里 9 只满分、最低仍有 75 —— 正是 G1 要抓的塌缩。
+_fts = [92500] * 9 + [93000] * 5 + [93100, 93200, 93500, 93700, 93900] + \
+       [94200, 94600, 95100, 95600, 100600]
+_scores = []
+for i, _ft in enumerate(_fts):
+    _ratio = 0.008 + i * 0.004          # 0.8% ~ 2.8% 渐变
+    _mv = 30e8
+    _s, _ = E._seal_quality_score(
+        {"float_mv": _mv, "amount": 4e8},
+        {"first_time": _ft, "fund": int(_mv * _ratio)}, A)
+    _scores.append(_s)
+_n_top = sum(1 for x in _scores if x >= 0.999)
+ok(_n_top / len(_scores) < dc.G1_OK,
+   f"顶档占比 {_n_top}/{len(_scores)} 低于 G1 的 {dc.G1_OK:.0%} 红线")
+ok(len(set(round(x, 3) for x in _scores)) > len(_scores) * 0.6,
+   f"分数足够分散（{len(set(round(x,3) for x in _scores))} 个唯一值 / {len(_scores)} 只）")
+
+print("  -- 小市值/小成交额：越小分越高（方向为负的因子反着用） --")
+s_small, _ = E._small_size_score({"float_mv": 15e8, "amount": 1e8}, A)
+s_big, _ = E._small_size_score({"float_mv": 400e8, "amount": 30e8}, A)
+ok(s_small > s_big, f"小盘({s_small:.2f}) 高于大盘({s_big:.2f})")
+ok(0.0 <= s_big <= s_small <= 1.0, "小市值分限幅在 0~1 且单调")
+
+print("  -- 换手率权重可关（检验结论：秩相关 +0.00，纯噪音） --")
+ok(A.get("drop_turnover_weight", True) is True,
+   "默认关掉「换手活跃」加分")
+_hi, _hi_r = E._imagination_score(
+    {"code": "sh600000", "name": "测试股", "turnover": 8.0}, [], {}, A)
+_lo, _lo_r = E._imagination_score(
+    {"code": "sh600000", "name": "测试股", "turnover": 0.2}, [], {}, A)
+eq(_hi, _lo, "换手高低不再影响想象力分")
+ok(not any("换手" in x for x in _hi_r),
+   "也不再说「换手X%资金活跃」（不该给不存在的信号贴理由）")
+
+print("  -- 开关关掉后回到旧口径 --")
+A_off = dict(A)
+A_off["use_seal_quality"] = False
+s_seal_off, _ = E._seal_quality_score(_snap, {"first_time": 93100, "fund": 1}, A_off)
+ok(s_seal_off > 0, "关掉开关不影响函数本身（接线层负责不调用它）")
+ok(A.get("weight_seal_quality", 0) > 0 and A.get("weight_small_size", 0) > 0,
+   "两个新权重默认都大于 0（默认启用）")
+
+print()
 print(f"===== {PASS} 通过 / {FAIL} 失败 =====")
 sys.exit(1 if FAIL else 0)

@@ -269,6 +269,31 @@ PRESETS: dict[str, dict] = {
             "first_board_early": 100000,      # 早封判定：首封时间 ≤ 10:00:00
             "first_board_fund_ratio": 0.005,  # 封单额 / 流通市值 ≥ 0.5% 算封得厚
             "weight_graph": 35, "weight_price_mv": 30, "weight_imagination": 35,
+            # ── 区分度检验落地（v1.37.0，见 core/discrimination.py / check_signals.py）──
+            # 用 243 天归档 × 当日涨停池 = 16542 条样本跑 G1–G4 四关，
+            # 结果 = 次日是否再涨停（基线 19.1%）。实测：
+            #   · 封板时间  lift 3.73x  秩相关 +1.00   10.0% → 37.3%   ← 全系统最强因子
+            #   · 封单额    lift 2.63x  秩相关 +1.00   12.2% → 32.2%
+            #   · 成交额    lift 0.49x  秩相关 −1.00   28.2% → 13.9%   方向反了
+            #   · 流通市值  lift 0.59x  秩相关 −1.00   23.9% → 14.0%   方向反了
+            #   · 换手率    秩相关 +0.00            ← 落在噪音区间，不该占权重
+            #   · 题材热度  秩相关 +0.80（未过 G4）
+            # 下面三个开关就是把这些结论接进打分。默认全开，关掉即回到旧口径。
+            "use_seal_quality": True,         # 封板质量（早封 + 封单厚）参与打分
+            "use_small_size_bias": True,      # 小市值/小成交额加分（方向为负，反着用）
+            "drop_turnover_weight": True,     # 想象力分里去掉"换手活跃"这一项
+            "weight_seal_quality": 15,        # 封板质量权重（仅对今日涨停的票生效）
+            "weight_small_size": 10,          # 小市值/小成交额权重
+            # 封板质量的标定端点（实测分位标定，改动前先看 engine._seal_quality_score 注释）
+            "seal_early_full": 92500,         # 09:25 竞价一字 = 满分
+            "seal_early_zero": 103000,        # 10:30 及更晚封板 = 0 分
+            "seal_ratio_full": 0.08,          # 封单/流通 8%（约 p90）= 满分
+            "seal_ratio_zero": 0.005,         # 封单/流通 0.5%（约 p00）= 0 分
+            # 小市值/小成交额的标定端点（越小越加分）
+            "small_mv_full": 20.0,            # 20 亿及以下 = 满分（p01 附近）
+            "small_mv_zero": 200.0,           # 200 亿以上 = 0 分
+            "small_amt_full": 200000000.0,    # 2 亿及以下 = 满分（p01 附近）
+            "small_amt_zero": 2000000000.0,   # 20 亿以上 = 0 分
         },
         "M5_position": {
             "enabled": True,

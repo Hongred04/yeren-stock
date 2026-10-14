@@ -1613,7 +1613,7 @@ function render(){
         <div class="fl" style="font-size:11px">${p.board}${p.sector?' · '+esc(p.sector):''}</div></td>
       <td class="num"><span class="sc" style="color:${!isFinite(Number(p.score))?'var(--tx3)':p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score==null||!isFinite(Number(p.score))?'—':p.score}</span></td>
       <td style="white-space:normal;max-width:290px;font-size:12.5px;color:var(--tx2)">
-        ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}</td>
+        ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}${scoreLine('封板',s.seal_quality)}${scoreLine('小盘',s.small_size)}</td>
       <td class="num">${f2(p.price)}</td>
       <td class="num ${pct(p.pct)}">${f2(p.pct)}%</td>
       <td class="num">${f2(p.turnover,1)}%${p.volume_ratio!=null

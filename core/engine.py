@@ -557,8 +557,21 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
 
 # ================================================================ M4 审美三要素
 
-def _imagination_score(snap: dict, bars: list[dict], zt_map: dict) -> tuple[float, list[str]]:
+def _num(v, fallback: float) -> float:
+    """把配置里读出来的值转成 float —— 配置是用户可改的 JSON，
+    里面什么都可能出现（字符串、null、中文）。转不动就用内置缺省，
+    绝不让一个错配置把整次扫描打断。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return fallback
+    return f if f == f else fallback      # NaN 也当转不动
+
+
+def _imagination_score(snap: dict, bars: list[dict], zt_map: dict,
+                       cfg_a: dict | None = None) -> tuple[float, list[str]]:
     """③ 想象力：名字好听 + 题材新 + 多重概念叠加 = 妖股有多条命。"""
+    cfg_a = cfg_a or {}
     score = 0.0
     reasons = []
     name = snap.get("name", "")
@@ -586,12 +599,16 @@ def _imagination_score(snap: dict, bars: list[dict], zt_map: dict) -> tuple[floa
             reasons.append(f"{zt['boards']}连板验证题材强度")
 
     # 换手活跃度 = 有资金关注
+    # ★ 已按区分度检验结果关闭（v1.37.0，见 _seal_quality_score 上方注释）：
+    #   换手率的秩相关实测 +0.00、各档忽高忽低（28.0/15.9/15.9/16.4/19.4），
+    #   是纯噪音。留着它占想象力分 15% 的权重，等于往排序里掺随机数。
     to = snap.get("turnover", 0)
-    if to >= 3:
-        score += 0.15
-        reasons.append(f"换手{to:.1f}%资金活跃")
-    elif to >= 1.5:
-        score += 0.08
+    if not cfg_a.get("drop_turnover_weight", True):
+        if to >= 3:
+            score += 0.15
+            reasons.append(f"换手{to:.1f}%资金活跃")
+        elif to >= 1.5:
+            score += 0.08
 
     # 多重概念叠加的代理指标：近期多次涨停（多轮炒作 = 多条命）
     if bars:
@@ -755,6 +772,109 @@ def _price_mv_score(snap: dict, cfg_a: dict) -> tuple[float, list[str], list[str
         warns.append(f"流通市值{mv:.1f}亿>={mv_mid:.0f}亿属中军/趋势票，不在短线审美范围")
 
     return min(score, 1.0), reasons, warns
+
+
+def _seal_quality_score(snap: dict, zt_row: dict | None,
+                        a: dict) -> tuple[float, list[str]]:
+    """封板质量打分 —— 全系统区分度最强的因子（v1.37.0）。
+
+    依据（core/discrimination.py 四关检验，243 天归档 × 当日涨停池 = 16542 条，
+    结果 = 次日是否再涨停，基线 19.1%）：
+      · 封板时间  lift 3.73x  秩相关 +1.00  10.0% → 37.3%
+      · 封单额    lift 2.63x  秩相关 +1.00  12.2% → 32.2%
+    两者都单调、方向一致、强度接近基线的两倍 —— 是全项目唯一过了四关的量价因子。
+    此前它们只用在 `_first_board_bonus`（仅今日首板、上限 +10 分），
+    连板股与未涨停票完全拿不到，等于把这个最强信号关在门外。
+
+    打分（0~1，由 M4_aesthetic.weight_seal_quality 决定最终权重）：
+      · 封板时间 60%：按首封时间线性给分，越早越高。
+      · 封单额 40%：封单额 / 流通市值，按分位标定，越厚越高。
+
+    ★ 标定取值来自实测分位（2026-10-14 涨停池 30 只），不是拍脑袋：
+      首封时间  09:25 竞价一字 9 只 / 09:30 5 只 / 09:31~10:06 逐只递增。
+      封单/流通 p10 1.51% · p50 2.71% · p90 8.33% · p100 15.37%。
+      最初把「09:30 满分、14:00 归零」「1.5% 满分」直接写死，实测导致
+      **30 只里 9 只并列满分、最低仍有 75 分** —— 正是 discrimination G1
+      要抓的「塌缩」。所以这里改用两端标定：
+        时间：09:25(竞价一字) 满分 → 10:30 之后归零，覆盖真实的 09:25~10:06 区间；
+        封单：0.5%(p00 附近) 起分 → 8%(p90) 满分，让中位 2.71% 落在中间而不是顶部。
+      两者都是「越高越好」的单调映射，不会改变检验出的单调性。
+    """
+    if not zt_row:
+        return 0.0, []
+    try:
+        early_full = int(a.get("seal_early_full", 92500) or 92500)
+        early_zero = int(a.get("seal_early_zero", 103000) or 103000)
+        ratio_full = float(a.get("seal_ratio_full", 0.08) or 0)
+        ratio_zero = float(a.get("seal_ratio_zero", 0.005) or 0)
+    except (TypeError, ValueError):
+        early_full, early_zero, ratio_full, ratio_zero = 92500, 103000, 0.08, 0.005
+
+    score = 0.0
+    why: list[str] = []
+
+    ft = int(zt_row.get("first_time") or 0)
+    if ft and early_zero > early_full:
+        # 越早封分越高；early_full 及更早封顶、early_zero 及更晚归零
+        r = (early_zero - ft) / (early_zero - early_full)
+        r = max(0.0, min(1.0, r))
+        score += 0.6 * r
+        why.append(f"{ft // 10000:02d}:{ft // 100 % 100:02d} 封板")
+
+    if ratio_full > ratio_zero:
+        mv = float(snap.get("float_mv") or 0)
+        fund = float(zt_row.get("fund") or 0)
+        if mv > 0 and fund > 0:
+            ratio = fund / mv
+            r = (ratio - ratio_zero) / (ratio_full - ratio_zero)
+            r = max(0.0, min(1.0, r))
+            score += 0.4 * r
+            why.append(f"封单 {ratio * 100:.2f}% 流通")
+
+    return min(score, 1.0), why
+
+
+def _small_size_score(snap: dict, a: dict) -> tuple[float, list[str]]:
+    """小市值 / 小成交额加分 —— 方向为负的因子要反着用（v1.37.0）。
+
+    依据（同一份四关检验）：
+      · 流通市值  lift 0.59x  秩相关 −1.00  6.8~22.3亿 23.9% → 1087亿以上 14.0%
+      · 当日成交额 lift 0.49x 秩相关 −1.00  144万~2.2亿 28.2% → 15.9亿以上 13.9%
+    ★ 这两条**不是"没用"**：秩相关完美 −1.00 说明关系稳定单调，
+      只是方向和小盘直觉一致、和"越大越强"相反 —— 小盘好拉。
+      所以这里给**小**的加分，而不是给大的扣分（不引入惩罚，避免双重计数：
+      `_price_mv_score` 已经在按 mv_max / mv_mid_threshold 扣大票的分了）。
+
+    打分：市值与成交额各占一半，各自在"样本最小区间"给满分、到上限归零。
+    """
+    score = 0.0
+    why: list[str] = []
+
+    try:
+        mv_full = float(a.get("small_mv_full", 20.0) or 20.0)
+        mv_zero = float(a.get("small_mv_zero", 200.0) or 200.0)
+        amt_full = float(a.get("small_amt_full", 2e8) or 2e8)
+        amt_zero = float(a.get("small_amt_zero", 2e9) or 2e9)
+    except (TypeError, ValueError):
+        mv_full, mv_zero, amt_full, amt_zero = 20.0, 200.0, 2e8, 2e9
+
+    mv = float(snap.get("float_mv") or 0) / 1e8
+    if mv > 0 and mv_zero > mv_full:
+        r = (mv_zero - mv) / (mv_zero - mv_full)
+        r = max(0.0, min(1.0, r))
+        score += 0.5 * r
+        if r > 0:
+            why.append(f"小盘 {mv:.1f}亿")
+
+    amt = float(snap.get("amount") or 0)
+    if amt > 0 and amt_zero > amt_full:
+        r = (amt_zero - amt) / (amt_zero - amt_full)
+        r = max(0.0, min(1.0, r))
+        score += 0.5 * r
+        if r > 0:
+            why.append(f"成交 {amt / 1e8:.1f}亿")
+
+    return min(score, 1.0), why
 
 
 def _vr_tags(snap: dict) -> tuple[list[str], list[str]]:
@@ -1049,7 +1169,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
 
         g, gdetail, greasons, gwarns = _graph_score(bars, code, a)
         p, preasons, pwarns = _price_mv_score(snap, a)
-        i, ireasons = _imagination_score(snap, bars, zt_map)
+        i, ireasons = _imagination_score(snap, bars, zt_map, a)
 
         if need_bull and not gdetail.get("ma_aligned"):
             continue
@@ -1060,6 +1180,35 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
         fb_bonus, fb_why = _first_board_bonus(snap, zt_map.get(code), a)
         if fb_bonus:
             total = min(1.0, total + fb_bonus)   # 封顶 100 分，不给溢出分数
+
+        # ★ 区分度检验落地（v1.37.0）：把四关检验证明有效的因子接进打分。
+        #   两个加权都走「原始分 × 权重 / 归一化分母」，与审美三要素同构，
+        #   这样调权重（包括关成 0）不会改变分数的量纲。
+        #   实测依据见 core/discrimination.py 与 check_signals.py。
+        extra_num = 0.0
+        extra_den = 0.0
+        sq = 0.0
+        ss = 0.0
+        if a.get("use_seal_quality", True):
+            sq, sq_why = _seal_quality_score(snap, zt_map.get(code), a)
+            w_sq = _num(a.get("weight_seal_quality", 15), 15.0)
+            if w_sq > 0:
+                extra_num += sq * w_sq
+                extra_den += w_sq
+                if sq_why:
+                    greasons = [f"封板质量 {sq * 100:.0f} 分"
+                                f"（{'、'.join(sq_why)}）"] + greasons
+        if a.get("use_small_size_bias", True):
+            ss, ss_why = _small_size_score(snap, a)
+            w_ss = _num(a.get("weight_small_size", 10), 10.0)
+            if w_ss > 0:
+                extra_num += ss * w_ss
+                extra_den += w_ss
+                if ss_why:
+                    greasons = [f"小盘弹性（{'、'.join(ss_why)}）"] + greasons
+        if extra_den > 0:
+            total = (total * wsum + extra_num) / (wsum + extra_den)
+
         reasons = greasons + preasons + ireasons
         if fb_why:
             reasons = [f"首板可打加权 +{fb_bonus * 100:.0f}"
@@ -1088,6 +1237,13 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
                 "graph": round(g * 100, 1),
                 "price_mv": round(p * 100, 1),
                 "imagination": round(i * 100, 1),
+                # 区分度检验落地的新增两项（v1.37.0）：前两项是检验证明有效的因子，
+                # 详情页「为什么选它」会展示；没参与打分时这里给 None 而不是 0，
+                # 免得前端把"没启用"画成"得了 0 分"。
+                "seal_quality": (round(sq * 100, 1)
+                                 if a.get("use_seal_quality", True) else None),
+                "small_size": (round(ss * 100, 1)
+                               if a.get("use_small_size_bias", True) else None),
             },
             "graph_detail": gdetail,
             "reasons": reasons,
