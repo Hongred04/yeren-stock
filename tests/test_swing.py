@@ -212,6 +212,73 @@ def main():
     ok("WS1" in t_sell, f"高位放量滞涨 → 卖点含 WS1：{t_sell}")
     ok(t_sell[0] == "WS1", f"波段票的卖点里 WS1 排前面（{t_sell}）")
 
+    # ------------------------------------------------------------------
+    # [10] 打法分工 playbook：「会做的做补涨，不会做的做波段」
+    #      背景：用户 10-14 提出野哥的补涨逻辑（龙头高位震荡 → 低位补涨助攻）。
+    #      用 18 个交易日归档回测后**证伪**（同题材新面孔次日涨停率比市场基线
+    #      低 5~17 个百分点；原本看起来的 +8.7pp 超额控制住连板惯性后就消失）。
+    #      所以不新增补涨模块，只做「该用哪一路打法」的分工提示。
+    #      这里钉死：高位票必须被拦下、节点不允许做长时降级为短线、老调法不变。
+    # ------------------------------------------------------------------
+    print("\n[10] 打法分工 playbook（波段 / 短线 / 不做）")
+
+    base_sw = {"ok": True, "stage": "hold", "gain20": 0.05, "note": "测试"}
+    _rg_ok = {"allow_swing": True, "node_label": "扩散", "mode_name": "波段持股"}
+    _rg_no = {"allow_swing": False, "node_label": "退潮期", "mode_name": "防守空仓"}
+
+    # 高位 —— 连板数够高（"主力在高位做出货准备"的那个高位）
+    r = swing.playbook(dict(base_sw), {"zt_boards": 6}, _rg_ok)
+    ok(r["play"] == "avoid" and r["high"], f"6 连板高位 → 拦下不做：{r['label']}")
+    ok("同题材" in r["reason"] and "回测" in r["reason"],
+       "高位提醒里点明了别做同题材补涨、且注明是回测结论")
+
+    # 高位 —— 或者近 20 日涨幅够大（两个条件任一成立都算高位）
+    r = swing.playbook(dict(base_sw, gain20=0.60), {}, _rg_ok)
+    ok(r["play"] == "avoid", f"近20日涨 60% → 同样算高位：{r['label']}")
+    # 边界：3 板 / 涨 49% 都还没到高位，不该误伤
+    r = swing.playbook(dict(base_sw, gain20=0.49), {"zt_boards": 3}, _rg_ok)
+    ok(r["play"] != "avoid", f"3板·涨49% 未到高位 → 不误伤：{r['label']}")
+
+    # 滞涨 / 破位 —— 离场信号，也是 avoid，但理由不同
+    ok(swing.playbook(dict(base_sw, stage="stall"), {}, _rg_ok)["play"] == "avoid",
+       "高位滞涨 → 不做")
+    ok(swing.playbook(dict(base_sw, stage="break"), {}, _rg_ok)["play"] == "avoid",
+       "放量破位 → 不做")
+
+    # 入场点 + 节点允许 → 波段
+    r = swing.playbook(dict(base_sw, stage="first", entry={"name": "波段第一入场点"}),
+                       {}, _rg_ok)
+    ok(r["play"] == "swing", f"入场点·节点允许 → 按波段做：{r['label']}")
+    # 入场点 + 节点不允许 → 降级为短线（双账户：大账户歇着，小账户试水温）
+    r = swing.playbook(dict(base_sw, stage="first", entry={"name": "波段第一入场点"}),
+                       {}, _rg_no)
+    ok(r["play"] == "short", f"入场点·节点不允许 → 只做短线：{r['label']}")
+    ok("退潮期" in r["reason"], "短线降级理由里带了节点名")
+
+    # 洗盘 / 无入场点 / 数据不足
+    ok(swing.playbook(dict(base_sw, stage="wash"), {}, _rg_ok)["play"] == "swing",
+       "洗盘中 → 波段·等企稳")
+    ok(swing.playbook(dict(base_sw), {}, _rg_ok)["play"] == "watch",
+       "无入场点 → 观察")
+    ok(swing.playbook({"ok": False}, {}, _rg_ok)["play"] == "avoid",
+       "数据不足 → 不做")
+
+    # ★ 兼容性契约：不传 p/rg 的老调法，返回结构里不能凭空多出 playbook 键
+    #   （tests/ 与探针里有大量 swing.evaluate(bars, code, cfg) 的老写法）
+    ok("playbook" not in swing.evaluate(w1b, "sh600000", cfg_full),
+       "老调法 evaluate(bars, code, cfg) → 不带 playbook 键")
+    r = swing.evaluate(w1b, "sh600000", cfg_full, p={"zt_boards": 2}, rg=_rg_ok)
+    ok(isinstance(r.get("playbook"), dict), "传了 p/rg → playbook 随结果一起出来")
+
+    # ★ 高位判定必须能在"没有 p 只有 rg"或"两者都空"时不炸
+    ok(swing.playbook(dict(base_sw), None, None)["play"] == "watch",
+       "p/rg 都为 None → 不抛异常，退回观察")
+    # zt_boards 是脏数据（None / 字符串）时也不能把高位判定带崩
+    ok(swing.playbook(dict(base_sw), {"zt_boards": None}, _rg_ok)["play"] != "avoid",
+       "zt_boards=None → 不误判为高位")
+    ok(swing.playbook(dict(base_sw), {"zt_boards": "6"}, _rg_ok)["play"] == "avoid",
+       "zt_boards 是字符串 '6' → 仍能识别为高位")
+
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
 

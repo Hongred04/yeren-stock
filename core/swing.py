@@ -345,6 +345,41 @@ STAGE_CN = {
 }
 
 
+# ---------------------------------------------------------------- 打法的分工
+
+# 「会做的做补涨，不会做的做波段」—— 这句话本身没错，但**补涨不是一个可以
+# 事先判定的买点**。2026-10 用 18 个交易日归档做过回测（结论已写入下面
+# playbook 的理由里），口径如下：
+#
+#   假设：龙头高位滞涨后，同题材低位票会补涨。
+#   测法：龙头（≥N 板且当日不再涨停）→ 次日同题材的新面孔（昨日未涨停）→
+#         再次日是否涨停；对照是「同日全体涨停票」的市场基线。
+#
+#   结果（三个测法方向一致，效应为负）：
+#     · ≥2板门槛  同题材新面孔 11.4%  vs 基线 21.6%  → −10.2pp
+#     · ≥3板门槛  同题材新面孔  0.0%  vs 基线 21.6%  → −21.6pp
+#     · 放宽到题材家族（1166 个样本）15.4% vs 21.6% → −6.2pp
+#     · 直接对照（同题材 vs 非题材，都只看新面孔）    → −5.5pp / −16.6pp
+#   原本看起来有的 +8.7pp 超额，控制住"连板惯性"后就消失了 —— 那 30 个百分点
+#   全部来自"昨天涨停今天还涨停"的票（命中率 51.6%），不是补涨。
+#
+#   附带证伪两个细节：①「名字共字」−1.9pp / −3.0pp，无正效应；
+#   ② 用户举的案例（九阳股份 sz002242 断板 + 阳光乳业 sz001318）经查
+#      ——阳光乳业 09-30 就已经涨停过，10-13 是**复燃**不是补位；两者题材
+#      （家电/电子商务 vs 饮料乳品）毫无关系；且九阳 10-13 是**断板**不是
+#      "高位震荡"。名字同字纯属巧合（当日涨停池 67 只里含"阳"字的 3 只，
+#      全市场含"阳"字 47 只）。
+#
+# 所以：**不新增补涨模块**（加了会给出比随机还低 5~17 个百分点的假信号），
+# 也不放宽 E6 停牌补位的触发条件。这里只做一件不引入假信号的事 —— 把
+# 「这只票该用哪一路打法」讲清楚，让用户知道自己在做的是哪一路。
+PLAY_CN = {"swing": "波段", "short": "短线", "avoid": "不做"}
+
+# 高位股的定义（"主力在高位做出货准备"的那个"高位"）
+_HIGH_BOARDS = 4          # 连板达到这个数，位置已经在高位
+_HIGH_GAIN20 = 0.50       # 或近 20 日涨幅达到这个数
+
+
 def verdict(sw: dict, rg: dict | None = None) -> dict:
     """波段「能不能买」结论 —— 把「节点 × 波段阶段」翻译成一句人话。
 
@@ -398,8 +433,91 @@ def verdict(sw: dict, rg: dict | None = None) -> dict:
             "why": "已持有则沿 5 日线持有；小阳线爬坡不动手，突然加速=派发"}
 
 
-def evaluate(bars: list[dict], code: str = "", cfg: dict | None = None) -> dict:
-    """波段体系综合判定。返回可直接给前端渲染的结构。"""
+def playbook(sw: dict, p: dict | None = None, rg: dict | None = None) -> dict:
+    """「这只票该用哪一路打法」—— 把双账户的分工讲清楚。
+
+    野哥的心法是**双账户**：大账户做波段（锁仓、可重仓），小账户做短线
+    （感受水温）。用户问的「会做的做补涨，不会做的做波段」说的是同一件事的
+    另一面 —— 知道自己做的是哪一路。但**补涨这一路经过回测不成立**（见上方
+    注释），所以这里给出的三路是：波段 / 短线 / 不做。
+
+    与 verdict() 的分工：verdict 回答「能不能买」（can ∈ yes/watch/no），
+    playbook 回答「用哪一路做」。两者都读同一个 sw，不另起口径。
+    """
+    rg = rg or {}
+    p = p or {}
+    if not sw or not sw.get("ok"):
+        return {"play": "avoid", "play_cn": PLAY_CN["avoid"],
+                "label": "数据不足", "reason": (sw or {}).get("note") or "波段判定做不了",
+                "high": False, "boards": None}
+
+    stage = sw.get("stage")
+    boards = p.get("zt_boards")
+    try:
+        boards = int(boards) if boards is not None else None
+    except (TypeError, ValueError):
+        boards = None
+    gain20 = _num(sw.get("gain20"))
+    # 高位 = 连板够高 或 近 20 日涨幅够大。注意 gain20 来自 K 线，
+    # 连板数来自当日快照 —— 两者任一成立即算高位（宁可早提醒）。
+    high = bool((boards is not None and boards >= _HIGH_BOARDS)
+                or gain20 >= _HIGH_GAIN20)
+
+    # 已在高位 —— 这里是「别做补涨」提醒的落点：高位股自己就该考虑离场，
+    # 更不该去接它的同题材低位票（回测里这一类胜率最低）。
+    if high or stage in ("stall", "break"):
+        if stage in ("stall", "break"):
+            tail = "（高位放量滞涨=有人出货，先落袋）" if stage == "stall" \
+                else "（放量破位=逻辑坏了，先离场）"
+        else:
+            tail = "（位置已经很高，随时可能派发）"
+        return {"play": "avoid", "play_cn": PLAY_CN["avoid"],
+                "label": "高位·不做补涨",
+                "reason": f"已{'连板 ' + str(boards) + ' 板' if boards is not None and boards >= _HIGH_BOARDS else '处高位'}"
+                          f"{tail}。别在这只票的同题材里找低位票接 —— "
+                          "回测过：同题材新面孔次日涨停率比市场基线低 5~17 个百分点，"
+                          "龙头一断，题材的关注度和承接资金一起退，低位票多是补跌前的最后挣扎",
+                "high": True, "boards": boards}
+
+    # 节点不允许做长 —— 但短线仍可做（这是双账户的意义：大账户歇着，小账户试水温）
+    if not rg.get("allow_swing", True):
+        return {"play": "short", "play_cn": PLAY_CN["short"],
+                "label": "只做短线",
+                "reason": f"{rg.get('node_label', '当前节点')}（{rg.get('mode_name', '')}）"
+                          "不允许做长 —— 波段这一路今天不成立，要做只按短线纪律做"
+                          "（不接力、不重仓、亏了就走）",
+                "high": False, "boards": boards}
+
+    # 入场点 + 节点允许 → 波段（这是"会做的做波段"那一半，也正是当前系统已有的能力）
+    if stage in ("first", "second", "wave2") and sw.get("entry"):
+        e = sw["entry"]
+        return {"play": "swing", "play_cn": PLAY_CN["swing"],
+                "label": f"按波段做（{e.get('name', '入场点')}）",
+                "reason": "在波段入场点上、节点也允许做长 —— "
+                          "买在相对低点、扛住洗盘震仓，是迎接主升的途径",
+                "high": False, "boards": boards}
+
+    if stage == "wash":
+        return {"play": "swing", "play_cn": PLAY_CN["swing"],
+                "label": "波段·等企稳",
+                "reason": "缩量回踩是洗盘、放量破位才走 —— 已持有不动手，空仓等企稳信号",
+                "high": False, "boards": boards}
+
+    # 其余（无入场点的持有段）—— 不主动开新仓，也不劝退
+    return {"play": "watch", "play_cn": "观察",
+            "label": "无入场点·先看",
+            "reason": "当前不在波段入场点上 —— 已持有沿 5 日线持有，"
+                      "新仓等回踩到位再说",
+            "high": False, "boards": boards}
+
+
+def evaluate(bars: list[dict], code: str = "", cfg: dict | None = None,
+             p: dict | None = None, rg: dict | None = None) -> dict:
+    """波段体系综合判定。返回可直接给前端渲染的结构。
+
+    p / rg 是可选入参：给了就算一份 playbook（打法分工），没给就不算。
+    刻意不做成必需参数 —— 老的调用方（测试、探针）传两个参数仍然能跑。
+    """
     c = _cfg(cfg)
     if not c.get("enabled", True) or not bars or len(bars) < 25:
         return {"ok": False, "stage": "idle", "note": "K线不足 25 根，波段判定做不了"}
@@ -454,7 +572,7 @@ def evaluate(bars: list[dict], code: str = "", cfg: dict | None = None) -> dict:
     if wb.get("note"):
         note_bits.append(wb["note"])
 
-    return {
+    out = {
         "ok": True,
         "stage": stage,
         "stage_cn": STAGE_CN.get(stage, stage),
@@ -469,3 +587,8 @@ def evaluate(bars: list[dict], code: str = "", cfg: dict | None = None) -> dict:
         "note": "；".join(note_bits) or "波段条件未形成",
         "creed": "波段短则3个月、长则半年 —— 买的是信仰、逻辑、题材",
     }
+    # 打法分工（波段/短线/不做）—— 只在调用方给了 p / rg 时才算，
+    # 保证 evaluate(bars, code, cfg) 这种老调法行为不变。
+    if p is not None or rg is not None:
+        out["playbook"] = playbook(out, p, rg)
+    return out
