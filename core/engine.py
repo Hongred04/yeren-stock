@@ -12,6 +12,7 @@ from datetime import datetime
 
 from . import chips as chips_mod
 from . import fundstyle
+from . import gene as gene_mod
 from . import indicators as ind
 from . import stage_stabilizer as stab
 from . import trading
@@ -1094,11 +1095,14 @@ def _first_board_bonus(snap: dict, zt_row: dict | None,
 
 def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
            zt: list[dict], macro: dict, volume: dict, sentiment: dict,
-           top_n: int = 20, progress=None, preopen: bool = False) -> list[dict]:
+           top_n: int = 20, progress=None, preopen: bool = False,
+           gene_table: dict | None = None) -> list[dict]:
     """M4+M5 选股主流程：审美三要素打分 + 仓位建议。
 
     preopen：盘前/竞价/休市时段全市场换手、成交额均为 0（当日数据
     未形成），放开流动性门槛，名单按昨收状态作观察名单。
+    gene_table：涨停基因表（core/gene.py 产出）。不传则不启用股性加分 ——
+    保持老调法 screen(cfg, snaps, kl, zt, macro, volume, sentiment) 行为不变。
     """
     a = cfg.get("M4_aesthetic", {})
     if not a.get("enabled", True):
@@ -1189,6 +1193,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
         extra_den = 0.0
         sq = 0.0
         ss = 0.0
+        gscore = 0.0
         if a.get("use_seal_quality", True):
             sq, sq_why = _seal_quality_score(snap, zt_map.get(code), a)
             w_sq = _num(a.get("weight_seal_quality", 15), 15.0)
@@ -1206,6 +1211,27 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
                 extra_den += w_ss
                 if ss_why:
                     greasons = [f"小盘弹性（{'、'.join(ss_why)}）"] + greasons
+        # ★ 涨停基因（v1.38.0，E11）：门槛式，见 core/gene.seal_score 上方注释。
+        #   只在传了 gene_table 时启用；够到顶档才给分（不是线性——实测该因子
+        #   在首板上的形状是门槛不是斜坡，G4 判"方向不一致"是对的）。
+        if gene_table and a.get("use_gene_seal", True):
+            w_g = _num(a.get("weight_gene_seal", 8), 8.0)
+            # ★ 门槛与最小样本从配置读（M4_aesthetic.gene_top_seal / gene_min_first），
+            #   不传即用 core/gene.py 的标定常量 —— 以前这两个键写了但没人读，
+            #   改了也不生效（等于给用户一个假的旋钮）。
+            gscore, gwhy = gene_mod.seal_score(
+                gene_mod.of(code, gene_table),
+                int(zt_map.get(code, {}).get("boards", 0) or 0),
+                top_seal=_num(a.get("gene_top_seal", gene_mod.TOP_SEAL),
+                              gene_mod.TOP_SEAL),
+                min_first=int(_num(a.get("gene_min_first", gene_mod.MIN_FIRST),
+                                   gene_mod.MIN_FIRST)),
+                weight=w_g)
+            if w_g > 0:
+                extra_num += gscore * w_g
+                extra_den += w_g
+                if gwhy and gscore > 0:
+                    greasons = [f"股性加成 +{gscore:.0f}（{gwhy}）"] + greasons
         if extra_den > 0:
             total = (total * wsum + extra_num) / (wsum + extra_den)
 
@@ -1244,6 +1270,12 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
                                  if a.get("use_seal_quality", True) else None),
                 "small_size": (round(ss * 100, 1)
                                if a.get("use_small_size_bias", True) else None),
+                # 涨停基因（E11）：只在启用且该票真的吃到分时给数值。
+                # 没吃到给 0（而不是 None）—— 与上面两项不同，这里"没吃到"
+                # 本身就是结论（它没够到门槛），不是"没启用"。
+                "gene_seal": (round(gscore, 1)
+                              if (gene_table and a.get("use_gene_seal", True))
+                              else None),
             },
             "graph_detail": gdetail,
             "reasons": reasons,

@@ -1613,7 +1613,7 @@ function render(){
         <div class="fl" style="font-size:11px">${p.board}${p.sector?' · '+esc(p.sector):''}</div></td>
       <td class="num"><span class="sc" style="color:${!isFinite(Number(p.score))?'var(--tx3)':p.score>=78?'var(--red)':p.score>=70?'var(--org)':'var(--tx)'}">${p.score==null||!isFinite(Number(p.score))?'—':p.score}</span></td>
       <td style="white-space:normal;max-width:290px;font-size:12.5px;color:var(--tx2)">
-        ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}${scoreLine('封板',s.seal_quality)}${scoreLine('小盘',s.small_size)}</td>
+        ${scoreLine('图形',s.graph)}${scoreLine('价市值',s.price_mv)}${scoreLine('想象力',s.imagination)}${scoreLine('封板',s.seal_quality)}${scoreLine('小盘',s.small_size)}${geneLine(s.gene_seal)}</td>
       <td class="num">${f2(p.price)}</td>
       <td class="num ${pct(p.pct)}">${f2(p.pct)}%</td>
       <td class="num">${f2(p.turnover,1)}%${p.volume_ratio!=null
@@ -1727,6 +1727,17 @@ function scoreLine(lb,v){
     <span class="fl" style="font-size:11.5px;min-width:46px">${lb}</span>
     <div class="bar2" style="width:56px;flex-shrink:0"><i style="width:${ok?Math.min(n,100):0}%;background:${c}"></i></div>
     <span style="font-size:12px;color:${c};font-weight:700">${ok?n.toFixed(0):'—'}</span></div>`;
+}
+function geneLine(v){
+  // 股性（E11）单独做徽章，**不能复用 scoreLine 的进度条** ——
+  // 这个因子是门槛式的：够档给 8 分、不够给 0，画成 100 分制的条
+  // 会显示成 8% 长的一小截，看起来像"几乎没分"，与事实相反（它是满分）。
+  // 没启用（v==null）时整行不出现 —— 不占位置也不误导。
+  if(v==null||!isFinite(Number(v))) return '';
+  const n=Number(v), hit=n>0;
+  return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0">
+    <span class="fl" style="font-size:11.5px;min-width:46px">股性</span>
+    <span class="pill ${hit?'org':'gry'}" style="font-size:11px;font-weight:700">${hit?'+'+n.toFixed(0)+' 涨停基因':'未达门槛'}</span></div>`;
 }
 function fbt(v){
   if(!v||v<93000) return '—';

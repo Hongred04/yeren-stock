@@ -80,14 +80,10 @@ logs/
 _server_log.txt
 
 # 本机服务器运行日志（我起服务时产生的 stdout/stderr）
+# 用通配收口：以前一个个列 _v.log/_v2.log/_v3.log，每次换端口号就要再加一行
 _srv.log
 _srv.err
-_v.log
-_v.err
-_v2.log
-_v2.err
-_v3.log
-_v3.err
+_v*.log
+_v*.err
 _msg.txt
 _backfill.log
-_msg.txt

@@ -111,17 +111,52 @@ def evaluate(rows: list[dict], bins: int = 5, name: str = "",
 
     pairs.sort(key=lambda x: x[0])
     scores = [p[0] for p in pairs]
-    # 分位数切档（并列值不影响，切点按下标算）
-    edges = []
-    for i in range(1, bins):
-        edges.append(scores[min(int(n * i / bins), n - 1)])
-    groups: list[list[tuple[float, float]]] = [[] for _ in range(bins)]
-    for s, v in pairs:
-        k = 0
-        for e in edges:
-            if s >= e:
-                k += 1
-        groups[min(k, bins - 1)].append((s, v))
+
+    # ★ 零点质量（v1.37.0）：很多因子天然有大量样本落在同一个值上 —— 最典型的是
+    #   「该票历史样本数」类因子，冷启动期一片 0（实测封板率 54.7% 是 0、
+    #   连板惯性 73.5% 是 0）。纯分位数切档会把下面几档全部切空，
+    #   G2 判「档位太少」→ 判成"切不开"，**把一批 lift 1.7x 的因子误杀**。
+    #   这正是评测工具自身的假阳性：它分不清「因子没区分度」和「分箱方式不合适」。
+    # 处理：当存在占据 ≥25% 样本的单一数值时，把它单独作一档，其余样本再分位数切档。
+    #   这样 0 组（"没有历史"）与「有历史但高低不同」被分开评价，两条信息都保留。
+    domin = None
+    if n >= MIN_TOTAL:
+        from collections import Counter as _C
+        val, cnt = _C(scores).most_common(1)[0]
+        if cnt / n >= 0.25 and cnt < n:
+            domin = val
+    if domin is not None:
+        rest = [p for p in pairs if p[0] != domin]
+        zero_grp = [p for p in pairs if p[0] == domin]
+        k = max(2, bins - 1)
+        edges = []
+        m = len(rest)
+        for i in range(1, k):
+            if m:
+                edges.append(rest[min(int(m * i / k), m - 1)][0])
+        groups = [[] for _ in range(k)]
+        for s, v in rest:
+            j = 0
+            for e in edges:
+                if s >= e:
+                    j += 1
+            groups[min(j, k - 1)].append((s, v))
+        # 0 档放在最前（其值最小），保持"档位序号越大分越高"的方向语义
+        groups = [zero_grp] + groups
+    else:
+        # 分位数切档（并列值不影响，切点按下标算）
+        edges = []
+        for i in range(1, bins):
+            edges.append(scores[min(int(n * i / bins), n - 1)])
+        groups: list[list[tuple[float, float]]] = [[] for _ in range(bins)]
+        for s, v in pairs:
+            k = 0
+            for e in edges:
+                if s >= e:
+                    k += 1
+            groups[min(k, bins - 1)].append((s, v))
+    out["zero_mass"] = (round(cnt / n, 3) if domin is not None else None)
+    out["zero_value"] = (domin if domin is not None else None)
 
     bill = []
     for i, g in enumerate(groups):
@@ -137,11 +172,20 @@ def evaluate(rows: list[dict], bins: int = 5, name: str = "",
     out["bins"] = bill
 
     # ── G1 顶档占比 ──────────────────────────────────────────────
-    top = groups[-1]
-    g1 = len(top) / n
+    # ★ 判「最大档」而不是「最高档」（v1.37.0 修）：
+    #   塌缩的本质是**样本挤在同一个值上**，至于那个值在分档序列里排最前
+    #   还是最后，纯属该因子方向问题，与塌缩无关。
+    #   实测教训：零点感知分箱（见上）会把 248 个 99.0 单独切成最高档，
+    #   而剩余低分样本又被分成 3 档 —— 于是"最高档"只占 4%，一个真实塌缩
+    #   的因子（82.7% 挤在一个值）被判成"通过"。改成取最大档后，
+    #   无论这个众数落在哪一端都能被抓出来。
+    biggest_grp = max(groups, key=len) if groups else []
+    g1 = len(biggest_grp) / n if n else 0.0
     out["g1_top_share"] = round(g1, 3)
     out["g1_pass"] = g1 < G1_COLLAPSE
     out["g1_collapsed"] = g1 > G1_COLLAPSE
+    # 众数所在档的位置：给使用者一个线索（挤在低端=门槛型/冷启动，挤在高端=塌缩）
+    out["g1_at_top"] = bool(groups and biggest_grp is groups[-1])
 
     # ── G2 档数 / 最大档占比 ─────────────────────────────────────
     nonempty = [g for g in groups if len(g) >= MIN_BIN]

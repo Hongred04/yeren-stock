@@ -12,6 +12,7 @@ from . import cls as cls_mod
 from . import auction as auction_mod
 from . import datasource as ds
 from . import engine
+from . import gene as gene_mod
 from . import journal as journal_mod
 from . import backtest as backtest_mod
 from . import kph as kph_mod
@@ -486,9 +487,54 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         _prog("打分选股…", 0, 100)
         # 多取一截备筛：下面还要按"有没有可执行买点"过一遍，才能取满 top_n 只
         _want = max(int(top_n or 0), 1)
+        # ★ 涨停基因表（E11，v1.38.0）：从归档算个股股性，接进打分。
+        #   全表用「截至最后一个归档日」的累积 —— 实盘选股就该用截至昨天的全部历史。
+        #   失败一律不拖垮主扫描（读归档是本地 IO，但仍防目录缺失/文件损坏）。
+        gene_table = {}
+        _gdates = []
+        try:
+            _gdates = sorted(ds.pool_history_dates())
+            if _gdates:
+                _gpools = {d: (ds.load_pool_history(d) or []) for d in _gdates}
+                gene_table = gene_mod.build({}, _gdates, _gpools)
+                _prog(f"股性表 {len(gene_table)} 只…", 0, 100)
+        except Exception:                                  # noqa: BLE001
+            gene_table = {}
+        # ★ 股性表摘要（E11）：进报告供前端展示与自查。
+        #   只放汇总数字，不放整张表（3441 只 × 10 字段会把报告撑爆）。
+        #   口径：eligible = 首板历史够 MIN_FIRST 次的票（能参与判定的池子）；
+        #        scored = 其中 seal 够到 TOP_SEAL、真会拿到加分的票。
+        #   这两个数字之差是"有历史但股性一般"，不是错误 —— 大多数票都在这里。
+        _a_gene = cfg.get("M4_aesthetic", {}) or {}
+        _top_seal = float(_a_gene.get("gene_top_seal", gene_mod.TOP_SEAL)
+                          or gene_mod.TOP_SEAL)
+        _min_first = int(_a_gene.get("gene_min_first", gene_mod.MIN_FIRST)
+                         or gene_mod.MIN_FIRST)
+        try:
+            _elig = [v for v in gene_table.values()
+                     if (v.get("n_first") or 0) >= _min_first]
+            _scored = [v for v in _elig
+                       if (v.get("seal") or 0) >= _top_seal]
+            gene_report = {
+                "enabled": bool(_a_gene.get("use_gene_seal", True)),
+                "weight": _a_gene.get("weight_gene_seal", 8),
+                "days": len(_gdates),
+                "tracked": len(gene_table),
+                "eligible": len(_elig),
+                "scored": len(_scored),
+                "top_seal": _top_seal,
+                "min_first": _min_first,
+                "summary": (
+                    f"按 {len(_gdates)} 个归档日建了 {len(gene_table)} 只票的股性；"
+                    f"其中 {len(_elig)} 只有足够首板历史参与判定，"
+                    f"{len(_scored)} 只股性够好（会拿到 +{_a_gene.get('weight_gene_seal', 8)} 分）"
+                ),
+            }
+        except Exception:                                  # noqa: BLE001
+            gene_report = {"enabled": False, "summary": "股性表本轮不可用"}
         scored = engine.screen(cfg, {c: snaps[c] for c in kl if c in snaps}, kl,
                                zt, macro, volume, sentiment, top_n=_want * 2,
-                               preopen=preopen)
+                               preopen=preopen, gene_table=gene_table)
 
         # ---- 买卖点 ----
         for p in scored:
@@ -724,6 +770,7 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "intraday": intraday,
             "history": hist_info,
             "mainline": ml,
+            "gene": gene_report,
             "sectors": sectors,
             "rebound": rebound,
             "substitute": substitute,

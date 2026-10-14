@@ -234,5 +234,39 @@ ok(A.get("weight_seal_quality", 0) > 0 and A.get("weight_small_size", 0) > 0,
    "两个新权重默认都大于 0（默认启用）")
 
 print()
+print("=== [11] 零点感知分箱与 G1 的相互作用（v1.37.0 修的真 bug）===")
+# ★ 这组测试钉住一个真实发生的冲突：
+#   零点感知分箱会把"大量样本挤在同一值"的那一群单独切一档。
+#   若 G1 仍然只看"最高档"占比，一个 82.7% 挤在高分上的塌缩因子
+#   （众数那档=最高档）反而会被判成通过 —— 因为剩下的低分样本
+#   又被切成了 3 档，于是最高档只占一点点。
+#   修法：G1 看最大档（塌缩 = 质量集中，与那端是高分还是低分无关）。
+_hi_collapse = [{"score": 99.0, "ret": random.gauss(0.01, 0.03)}
+                for _ in range(248)]
+_hi_collapse += [{"score": random.uniform(0, 60),
+                  "ret": random.gauss(0.01, 0.03)} for _ in range(52)]
+_r1 = dc.evaluate(_hi_collapse, name="高端塌缩")
+ok(_r1["g1_collapsed"] is True,
+   f"★ 248/300 挤在 99 分（最高端）→ 仍判塌缩（实得 top_share={_r1['g1_top_share']}）")
+ok(_r1["g1_pass"] is False, "高端塌缩 → G1 不过关")
+
+_lo_collapse = [{"score": 0.0, "ret": random.gauss(0.01, 0.03)}
+                for _ in range(248)]
+_lo_collapse += [{"score": random.uniform(40, 100),
+                  "ret": random.gauss(0.01, 0.03)} for _ in range(52)]
+_r2 = dc.evaluate(_lo_collapse, name="低端塌缩")
+ok(_r2["g1_collapsed"] is True,
+   f"★ 248/300 挤在 0 分（最低端）→ 也判塌缩（实得 top_share={_r2['g1_top_share']}）")
+ok(_r2["g1_at_top"] is False, "低端塌缩时 at_top 为 False（能分辨挤在哪一端）")
+
+# 正常因子不该被误判成塌缩
+_spread = [{"score": float(i % 100), "ret": random.gauss(0.01, 0.03)}
+           for i in range(300)]
+_r3 = dc.evaluate(_spread, name="正常分散")
+ok(_r3["g1_collapsed"] is False, "★ 分散因子不被误判成塌缩（没有过度收紧）")
+ok(_r3["zero_mass"] is None or _r3["zero_mass"] < 0.25,
+   "分散因子不触发零点感知分箱（zero_mass 不虚高）")
+
+print()
 print(f"===== {PASS} 通过 / {FAIL} 失败 =====")
 sys.exit(1 if FAIL else 0)
