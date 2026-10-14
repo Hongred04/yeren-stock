@@ -76,3 +76,9 @@ data/last_report.json
 # 服务运行日志
 logs/
 _server_log.txt
+
+# 本机服务器运行日志（我起服务时产生的 stdout/stderr）
+_srv.log
+_srv.err
+_v.log
+_v.err
