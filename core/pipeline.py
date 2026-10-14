@@ -10,6 +10,7 @@ from datetime import datetime
 
 from . import cls as cls_mod
 from . import auction as auction_mod
+from . import amount as amount_mod
 from . import datasource as ds
 from . import engine
 from . import gene as gene_mod
@@ -425,6 +426,15 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
         #   · cum      实测「过去几天在同一时刻已成交多少钱」——节奏对比用它（钱对钱）
         #   · frac     实测「截至当前时刻的累计占比」——模式折算用它（≥3 天才给）
         #   · 两者都排除当日自身样本（今天的分子分母是同一个高水位值，比值恒≈1）
+        # 两市成交额长序列（core/amount.py）：给界面显示「现在多少钱、处于
+        # 最近多少分位、距峰值多远」。★ 它只用于**展示**，不参与 volume 的
+        # 档位判定 —— 绝对档位是「钱够不够撬动大票」的物理约束，不该随市场
+        # 整体下移而漂移；相对冷热已由 _relative_volume 的降档层表达。
+        # 失败一律不拖垮主扫描（返回 ok:False，界面自己降级）。
+        try:
+            amt_series = amount_mod.summary()
+        except Exception as e:      # noqa: BLE001
+            amt_series = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
         ibase = ds.intraday_baseline(sess.get("tmin", 240), exclude_date=real_date)
         volume = engine.evaluate_volume(cfg, amount, hist, session=sess,
                                         fallback_amount=fb["amount"],
@@ -764,7 +774,17 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "macro": macro,
             "macro_events": engine.MACRO_EVENTS,
             "volume": volume,
-            "volume_history": [{"date": b["date"], "volume": b["volume"]} for b in hist[-20:]],
+            "market_amount": amt_series,
+            # ★ 这里原来写的是 market_amount_history() 的 **volume** 字段 ——
+            #   那是**上证指数自己的成交量（手）**，实测 20261014 为 445962554，
+            #   而同日真实两市成交额是 14144 亿。既不含深证那一半、也不是成交额，
+            #   字段名与含义不符。改为直接透传 core/amount.py 的真实两市额，
+            #   同时保留 volume 字段（上证成交量）不删 —— 老调用方仍能读到。
+            "volume_history": hist[-20:],
+            "amount_history": (
+                [{"date": r["date"], "yi": round(r["yi"], 1)} for r in
+                 (amount_mod.two_market_series(20) or [])]
+                if amt_series.get("ok") else []),
             "sentiment": sentiment,
             "meter": meter,
             "intraday": intraday,

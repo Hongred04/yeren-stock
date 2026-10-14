@@ -1522,6 +1522,15 @@ function render(){
       + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '')
       // 相对量能读数（分位 / 相对中位数倍数）—— 让"为什么这么判"可见
       + (vol.rel_txt ? ' · '+vol.rel_txt : '');
+  // 两市成交额的**跨月位置**：只报"缩量存量"没有体感，得让人看见现在处于
+  // 最近 N 天的什么水平、离峰值多远。数据来自 core/amount.py（同花顺真实
+  // 两市额），与上面 vol.amount 是**两个口径**：vol.amount 是当日快照，
+  // 这里给的是它在长序列里的位置。取不到就整句不显示，不编数字。
+  const ma = REPORT.market_amount || {};
+  const maTxt = (ma.ok && ma.latest!=null)
+      ? ('近'+n0(ma.days)+'日 '+n0(ma.pct_rank)+'% 分位'
+         + (ma.from_peak_pct!=null ? ' · 距峰值 '+f2(ma.from_peak_pct)+'%' : ''))
+      : '';
   // 7 张指标卡原来是平铺成 4 列网格，谁轻谁重看不出来。按用户真正的问题顺序
   // 分三档：① 能不能做 → ② 市场多热 → ③ 挑什么票。每档一行，读起来有先后。
   const cardGroups=[
@@ -1545,7 +1554,7 @@ function render(){
     ]},
     {t:'② 市场有多热',cards:[
       {t:vol.amount!=null?'两市成交额':'两市已成交',v:volAmtTxt,
-        s:volSub,
+        s:volSub + (maTxt ? ' · '+maTxt : ''),
         c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
       // 这一组原来全是不设防的直接拼接：`mm.limit_up+' / '+mm.limit_down` 缺字段时
       // 显示「undefined / undefined」，`mt.checks.length` 缺 checks 时**直接抛异常**
