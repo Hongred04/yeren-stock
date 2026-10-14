@@ -2136,8 +2136,48 @@ def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
 # 参考 GitHub 项目 a-stock-data / slingshot 的「资金面」口径：
 # 东财 push2 的资金流字段（f62 主力净额、f184 主力净占比、f66/72/78/84 四档）
 # 免鉴权、可批量 —— 给候选股与行业板块各补一条「钱往哪走」的线。
+#
+# ★★ 2026-10-14 实测纠错（v1.35.2）：本段原先写着「clist 被按 URL 路径风控、
+#    而同一个 push2 服务的 ulist.np 完全可用」，据此把资金流整体改走 ulist.np。
+#    这个前提**已经反了**，且据它做的绕行方案全是白做的功夫：
+#      · clist        —— 通。实测拿到板块 496 个、个股 5562 只，四档齐全。
+#      · ulist.np     —— 4 台镜像全灭，一次都没成功过
+#                        （push2 / 1.push2 / 2.push2 / push2delay 全是
+#                         RemoteDisconnected）。
+#    后果是实打实的：`fetch_stock_moneyflow()` 对 100 只票返回 **0 条**，
+#    `fetch_board_moneyflow()` 一路降级到财联社 —— 而财联社那份只有主力净额，
+#    没有四档、没有主力净占比（main_pct 恒为 None）。
+#    所以现在把主链路改回 clist，ulist.np 降为备用（不删，万一哪天又反过来）。
+#
+#    还有一条必须一起记的教训：这一轮为了摸清接口，用**裸 urllib 绕过
+#    `_push2_gate`** 连打了十几次，直接把本机 IP 打进 push2 家族封禁
+#    （clist / ulist.np / push2his 全 RST，等 4 分钟 + 90 秒都没恢复；
+#    同期 datacenter-web 与 webpage 域仍正常，说明封的是 push2 这个族）。
+#    → 排查东财接口时**不要绕闸门**，PUSH2_BUDGET 那个滑动窗口预算就是防这个的。
 
 _FLOW_FIELDS = "f2,f3,f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
+
+# clist 的市场筛选表达式：沪深主板 + 创业板 + 科创板 + 北交所。
+# 与 ulist.np 按 secid 点名不同，clist 用 fs= 描述「要哪个市场段」，
+# 一次返回一整段并支持分页 —— 这是它比 ulist.np 强的地方。
+_FS_ALL_STOCK = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+_FS_ALL_BOARD = "m:90+t:2,m:90+t:3"      # t:2=行业板块、t:3=概念板块
+
+
+def _mk_code(code: str) -> str:
+    """纯 6 位代码 → 带市场前缀（sh/sz/bj）。clist 只给 f12 裸代码。"""
+    if code.startswith(("43", "83", "87", "88", "92")):
+        return "bj" + code
+    if code.startswith(("6", "9", "5")):
+        return "sh" + code
+    return "sz" + code
+
+
+def _flow_row(it: dict) -> dict:
+    """clist/ulist 的一行 → 资金流字段。两个接口字段名完全一致。"""
+    return {"main": _num(it.get("f62")), "main_pct": _num(it.get("f184")),
+            "super": _num(it.get("f66")), "big": _num(it.get("f72")),
+            "mid": _num(it.get("f78")), "small": _num(it.get("f84"))}
 
 
 def _meta_of(code: str) -> str:
@@ -2152,10 +2192,64 @@ def _meta_of(code: str) -> str:
 
 
 def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
-    """批量个股主力资金流 {code: {main,main_pct,super,big,mid,small}}，单位元。"""
+    """批量个股主力资金流 {code: {main,main_pct,super,big,mid,small}}，单位元。
+
+    走 clist 的**全市场排行**接口按页取，而不是 ulist.np 按 secid 点名取 ——
+    实测 ulist.np 已全灭，clist 反而通（见本段顶部 2026-10-14 的纠错记录）。
+
+    取法：按主力净额降序翻页拉全市场，再按调用方给的 code 集合筛。
+    这样一次请求 500 只，全市场 ~6000 只只要 12 页，比按 50 只一组点名
+    （120 个请求）省一个数量级 —— 而 push2 的预算是 60 秒 15 次。
+    代价是拿到了用不上的票，但网络开销远小于请求数的开销。
+
+    只想要很少几只时（< 一页）反而点名更划算，所以保留 ulist.np 作备用：
+    小集合先试 clist，拿不到再退回 ulist.np。
+    """
     if not codes:
         return {}
+    want = set(codes)
+
+    # ① 主链路：clist 分页拉全市场，按 want 筛
+    #
+    # ★ 判断「clist 到底通没通」必须靠 saw_data，不能靠 out 是否为空（v1.35.2 修）：
+    #   曾经写成 `if out: return out` —— 一旦 want 里的票一只都没匹配上
+    #   （代码写错、或那几只票当天没进排行），out 就是空的，于是白白翻满
+    #   20 页之后、还要再往下降级打一轮 ulist.np。实测 20 次请求全废。
+    #   接口返回了数据 = 链路是好的，没匹配上是用输入的问题，不该降级。
     out: dict[str, dict] = {}
+    saw_data = False
+    page_size = 500
+    max_pages = 20                      # 20 × 500 = 10000 只，覆盖全市场有余
+    total = None                        # 接口报的全市场总数，用来判断是否翻到底
+    for pn in range(1, max_pages + 1):
+        js = _push2_json(
+            f"/api/qt/clist/get?pn={pn}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
+            f"&fid=f62&fs={_FS_ALL_STOCK}&fields={_FLOW_FIELDS}")
+        data = js.get("data") or {}
+        diff = data.get("diff") or []
+        if not diff:
+            break
+        saw_data = True
+        if total is None:
+            total = data.get("total")
+        for it in diff:
+            code = str(it.get("f12", ""))
+            if not code:
+                continue
+            key = _mk_code(code)
+            if key not in want:
+                continue
+            out[key] = _flow_row(it)
+        if len(out) >= len(want):
+            break                       # 要的票都齐了，不必再翻
+        # 已翻到最后一页就停 —— 不看 total 的话，某些镜像会把同一页
+        # 反复吐回来（或被 mock/缓存劫持），白翻满 max_pages 次。
+        if total and pn * page_size >= int(total):
+            break
+    if saw_data:
+        return out                      # 链路通 —— 就算一只没匹配上也不降级
+
+    # ② 备用：ulist.np 按 secid 点名（2026-10-14 实测不可用，留着以防反转）
     batch = 50
     chunks = [codes[i:i + batch] for i in range(0, len(codes), batch)]
 
@@ -2163,20 +2257,9 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
         secids = ",".join(_meta_of(c) for c in chunk)
         js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
                          f"&secids={secids}&fields={_FLOW_FIELDS}")
-        diff = (js.get("data") or {}).get("diff") or []
-        rows = []
-        for it in diff:
-            code = str(it.get("f12", ""))
-            if not code:
-                continue
-            mkt = "bj" if code.startswith(("43", "83", "87", "88", "92")) else \
-                  ("sh" if code.startswith(("6", "9")) else "sz")
-            rows.append((mkt + code, {
-                "main": _num(it.get("f62")), "main_pct": _num(it.get("f184")),
-                "super": _num(it.get("f66")), "big": _num(it.get("f72")),
-                "mid": _num(it.get("f78")), "small": _num(it.get("f84")),
-            }))
-        return rows
+        return [(_mk_code(str(it.get("f12", ""))), _flow_row(it))
+                for it in ((js.get("data") or {}).get("diff") or [])
+                if it.get("f12")]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         for rows in pool.map(work, chunks):
@@ -2394,7 +2477,43 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
 
 
 def _board_flow_em(limit: int) -> list[dict]:
-    """东财口径：带主力净额。一次拿全部板块，受 push2 限速闸门约束。"""
+    """东财口径：带主力净额。走 clist 一次拿全部板块，受 push2 限速闸门约束。
+
+    ★ 2026-10-14 改：原先这里是把 `fetch_board_codes()` 枚举出来的 BK 号段
+      拼成 secids 交给 ulist.np 打分。现在 ulist.np 全灭，而 clist 的
+      `fs=m:90+t:2,m:90+t:3` 直接就能返回**全部**行业+概念板块（实测 496 个），
+      还自带领涨股 f204/f205 —— 一次请求顶原来十几个，也不再依赖那份
+      自建的 board_list.json（枚举 1400 个号段扫出来的）。
+
+    保留 fetch_board_codes 作为降级：clist 拿不到时，退回按号段点名。
+    """
+    out = []
+    saw_data = False                    # 同 fetch_stock_moneyflow：靠这个判通断
+    for pn in (1, 2, 3):                # 500 × 3 = 1500，覆盖 496 个板块有余
+        js = _push2_json(
+            f"/api/qt/clist/get?pn={pn}&pz=500&po=1&np=1&fltt=2&invt=2&fid=f62"
+            f"&fs={_FS_ALL_BOARD}&fields=f12,f14,f3,f62,f184,f204,f205")
+        diff = (js.get("data") or {}).get("diff") or []
+        if not diff:
+            break
+        saw_data = True
+        for it in diff:
+            out.append({"code": str(it.get("f12", "")),
+                        "name": it.get("f14", ""),
+                        "pct": _num(it.get("f3")),
+                        "main": _num(it.get("f62")),
+                        "main_pct": _num(it.get("f184")),
+                        "lead": it.get("f204", ""),
+                        "lead_code": it.get("f205", ""),
+                        "source": "em"})
+    if not saw_data:
+        out = _board_flow_em_ulist(limit)
+    out.sort(key=lambda r: -(r["main"] or 0))
+    return out[:limit]
+
+
+def _board_flow_em_ulist(limit: int) -> list[dict]:
+    """降级：按自建板块清单逐个点名（原实现，clist 不可用时才走）。"""
     codes = fetch_board_codes()
     if not codes:
         return []
@@ -2411,8 +2530,7 @@ def _board_flow_em(limit: int) -> list[dict]:
                     "lead": it.get("f204", ""),
                     "lead_code": it.get("f205", ""),
                     "source": "em"})
-    out.sort(key=lambda r: -(r["main"] or 0))
-    return out[:limit]
+    return out
 
 
 def _board_flow_cls(limit: int) -> list[dict]:

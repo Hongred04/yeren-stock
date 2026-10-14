@@ -188,6 +188,86 @@ def main():
     ok(flow and flow[0]["source"] == "cls"
        and flow[0]["name"] == "影视院线", "板块资金退到财联社（仍有主力净额）")
 
+    print("[13] 资金流主链路走 clist（2026-10-14 改：clist 主 / ulist.np 备）")
+    # 为什么钉这一条：本段原来断言「clist 被路径风控、ulist.np 可用」，
+    # 实测完全反了 —— ulist.np 四台镜像全灭，个股资金流整个空转。
+    # 这里用假的 _push2_json 断言「确实是走 clist 拿到的」，防止再被改回去。
+    _real_push2 = ds._push2_json
+    _stocks = [{"f12": "600519", "f14": "贵州茅台", "f62": 1.0e8, "f184": 3.5,
+                "f66": 6.0e7, "f72": 4.0e7, "f78": -1.0e7, "f84": -2.0e7},
+               {"f12": "000001", "f14": "平安银行", "f62": -5.0e7, "f184": -2.1,
+                "f66": -3.0e7, "f72": -2.0e7, "f78": 1.0e7, "f84": 2.0e7}]
+    _seen = []
+
+    def _fake(path, referer="https://quote.eastmoney.com/"):
+        _seen.append(path)
+        if "/api/qt/clist/get" in path:
+            return {"data": {"total": len(_stocks), "diff": _stocks}}
+        return {"data": None}                 # ulist.np 全灭
+    ds._push2_json = _fake
+    mf = ds.fetch_stock_moneyflow(["sh600519", "sz000001"])
+    ok(set(mf) == {"sh600519", "sz000001"}, "两只票都取到（clist 主链路）")
+    ok(all("clist" in p for p in _seen), "确实走的 clist，没回退到 ulist.np")
+    ok(mf["sh600519"]["main"] == 1.0e8 and mf["sh600519"]["main_pct"] == 3.5,
+       "主力净额/净占比字段映射正确")
+    ok(mf["sh600519"]["super"] == 6.0e7 and mf["sh600519"]["small"] == -2.0e7,
+       "四档（超大/大/中/小）字段映射正确")
+    ok(mf["sz000001"]["main"] == -5.0e7, "负值（净流出）不被当成缺失")
+
+    print("[14] clist 拿不到时降级到 ulist.np")
+    _seen.clear()
+
+    def _fake_clist_dead(path, referer="https://quote.eastmoney.com/"):
+        _seen.append(path)
+        if "/api/qt/clist/get" in path:
+            return {"data": None}
+        return {"data": {"diff": [_stocks[0]]}}
+    ds._push2_json = _fake_clist_dead
+    mf2 = ds.fetch_stock_moneyflow(["sh600519"])
+    ok(mf2.get("sh600519", {}).get("main") == 1.0e8, "clist 死时 ulist.np 顶上")
+
+    print("[15] 代码归一与空输入边界")
+    # §14 把 _push2_json 换成了 _fake_clist_dead，这里必须换回「clist 正常」的
+    # 假实现，否则 §15 实际测的是降级分支（踩过：断言全 XX，查半天是测试自己的锅）。
+    ds._push2_json = _fake
+    ok(ds._mk_code("600519") == "sh600519" and ds._mk_code("000001") == "sz000001",
+       "沪深代码加前缀")
+    ok(ds._mk_code("300750") == "sz300750" and ds._mk_code("688981") == "sh688981",
+       "创业板/科创板前缀正确")
+    ok(ds._mk_code("430017") == "bj430017" and ds._mk_code("920001") == "bj920001",
+       "北交所前缀正确（43/92 号段）")
+    ok(ds.fetch_stock_moneyflow([]) == {}, "空输入返回空字典（不打接口）")
+    _seen.clear()
+    ok(ds.fetch_stock_moneyflow(["sh999999"]) == {}, "全不匹配返回空字典")
+    # ★ 钉住一个真踩过的坑：clist 通了但一只都没匹配上时，不能当成「链路失败」
+    #   去降级，更不能白翻满 20 页（total 已经说明翻到底了）。
+    #   原来写成 `if out:` 判断，实测 20 次请求全废且还多打一轮 ulist.np。
+    ok(sum(1 for p in _seen if "clist" in p) == 1,
+       "clist 通但没匹配上 → 按 total 判断翻到底，只打 1 次")
+    ok(not any("ulist" in p for p in _seen),
+       "clist 通但没匹配上 → 不降级打 ulist.np（区分「接口失败」与「没匹配」）")
+    ds._push2_json = _real_push2
+
+    print("[16] 板块资金流走 clist 拿全集（含领涨股）")
+    _boards = [{"f12": "BK1340", "f14": "印制电路板", "f3": 1.98, "f62": 1.0e9,
+                "f184": 4.15, "f204": "兴森科技", "f205": "002436"},
+               {"f12": "BK0459", "f14": "元件", "f3": 1.69, "f62": 9.8e8,
+                "f184": 3.61, "f204": "兴森科技", "f205": "002436"}]
+    ds._push2_json = lambda p, referer="x": ({"data": {"diff": _boards}}
+                                             if "/api/qt/clist/get" in p
+                                             else {"data": None})
+    for k in [k for k in ds._cache if str(k).startswith("board_flow")]:
+        ds._cache.pop(k, None)
+        ds._cache_ts.pop(k, None)
+    bd = ds.fetch_board_moneyflow(5)
+    ok(bd and bd[0]["name"] == "印制电路板" and bd[0]["source"] == "em",
+       "板块资金流走 clist（source=em）")
+    ok(bd[0]["main"] == 1.0e9 and bd[0]["main_pct"] == 4.15, "板块主力净额/净占比正确")
+    ok(bd[0]["lead"] == "兴森科技" and bd[0]["lead_code"] == "002436",
+       "领涨股 f204/f205 正确")
+    ok(bd[0]["main"] >= bd[1]["main"], "按主力净额降序")
+    ds._push2_json = _real_push2
+
     print()
     print(f"===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
