@@ -3919,6 +3919,30 @@ def _ago(sec: int) -> str:
     return f"{sec // 3600} 小时前"
 
 
+def _backup_serving_now(now: float) -> str:
+    """push2 熔断时，看备用源这一轮**实际有没有出数**，返回它的名字。
+
+    判定依据是各备用主机的最近一次真实请求（host_stat）：谁最近成功过就算谁
+    在顶上。这比"我们配置了备用源"诚实 —— 配了不等于用上了。
+
+    返回 "" 表示没有任何备用源近期成功（那资金流确实是缺的，该报 blocked）。
+    """
+    cands = []
+    for spec in SOURCE_REGISTRY:
+        if spec.get("key") not in ("em_bkzj", "ths_board"):
+            continue
+        for h in spec.get("hosts") or []:
+            st = host_stat(h)
+            if st and st.get("ok") and (now - st["ts"]) < 600:
+                # 用 host 而不是 vendor —— 备用域与 push2 都是"东财"，
+                # 只说厂商用户分不清是哪条路顶上来的。
+                cands.append((st["ts"], h))
+    if not cands:
+        return ""
+    cands.sort(reverse=True)
+    return cands[0][1]
+
+
 def _source_state(spec: dict, now: float, blocked: list[dict], p2: dict,
                   tdx: dict, bad_health: dict) -> tuple[str, str]:
     """算一个源的 (状态, 说明)。优先级：熔断 > 数据降级 > 主机最近一次请求。"""
@@ -3928,8 +3952,17 @@ def _source_state(spec: dict, now: float, blocked: list[dict], p2: dict,
         if hit:
             left = max(int(b.get("seconds_left") or 0) for b in hit)
             fails = max(int(b.get("fails") or 0) for b in hit)
-            return "blocked", (f"熔断中 · 冷却约 {max(1, -(-left // 60))} 分钟"
-                               f"（连续失败 {fails} 轮，每 60 秒半开探测）")
+            cool = (f"熔断中 · 冷却约 {max(1, -(-left // 60))} 分钟"
+                    f"（连续失败 {fails} 轮，每 60 秒半开探测）")
+            # ★ 2026-10-15 修：push2 熔断 ≠ 这项数据没有。
+            #   降级链上还有备用域（bkzj）、同花顺、财联社、新浪 —— 实测
+            #   push2 全灭时后台照常由 bkzj 出数，但卡片只认 push2 的熔断状态，
+            #   于是用户看到「受限」以为整个资金流坏了（10-15 反馈「不是已经换
+            #   数据源了吗」）。这里改成：熔断时如实说明**谁在顶上**。
+            backup = _backup_serving_now(now)
+            if backup:
+                return "degraded", (f"{cool} · 已切到 {backup} 接管，数据正常")
+            return "blocked", (f"{cool} · 备用源本轮也没取到，资金流暂缺")
     # ② 通达信（TCP，没有 _get 记录）
     if spec.get("tdx"):
         if not tdx.get("available"):
