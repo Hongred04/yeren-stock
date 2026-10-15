@@ -13,6 +13,7 @@ from . import auction as auction_mod
 from . import amount as amount_mod
 from . import datasource as ds
 from . import engine
+from . import events
 from . import gene as gene_mod
 from . import journal as journal_mod
 from . import backtest as backtest_mod
@@ -903,10 +904,18 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
 
         # ---- 明日判断（情绪/量能/题材/资金/板块 → 次日预案） ----
         _prog("推演明日判断…", 0, 100)
+        # 财经事件时间轴（解禁/新股/交割/议息）—— 建议 3（v1.40.0）。
+        # 在这里取一次、传进 outlook：outlook 内部也会自己取（为单独调用的
+        # 测试），但走 pipeline 时不希望两处各拉一遍接口（有 1h 缓存兜底，
+        # 这里是显式只取一次，语义更清楚）。
+        try:
+            events_data = events.build(real_date)
+        except Exception:
+            events_data = {}
         next_outlook = outlook.build(cfg, real_date, sentiment, volume,
                                      meter=meter, ml=ml, flow=flow,
                                      sectors=sectors, macro=macro, plan=plan,
-                                     sowing=sowing)
+                                     sowing=sowing, events=events_data)
 
         # ---- E4 信号复盘档案（胜率闭环；t+1/涨停不可买/停牌/成本约束） ----
         _prog("结算信号档案…", 0, 100)

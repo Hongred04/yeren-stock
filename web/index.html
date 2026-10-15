@@ -3271,6 +3271,27 @@ function renderOutlook(){
     ${modeLines.length>1
       ? `<ul class="ls" style="margin-top:4px">${modeLines.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`
       : `<span style="color:var(--tx2)"> —— ${esc(mode.note||'')}</span>`}</div>`:'';
+  // 财经事件时间轴（解禁/新股/交割/议息）—— 「明日判断」原本五个维度**全是回看**，
+  // 这里补的是唯一**前瞻且确定**的一条线：今天就已经写在日历上的明日风险。
+  // 与五个维度不同，事件是跨天的，所以用时间轴而不是塞进要点网格。
+  const ev=o.events||{}; const evDays=ev.days||[];
+  const evHtml=evDays.length?`<div style="margin-top:var(--s4);padding:11px 13px;border-radius:9px;
+    background:#f7fbff;border-left:4px solid var(--blu,#2f6fed)">
+    <b style="color:var(--blu,#2f6fed);font-size:12.5px">财经事件时间轴</b>
+    <div style="margin-top:7px">${evDays.map(d=>`<div style="display:flex;gap:9px;
+      align-items:baseline;padding:4px 0;border-top:1px solid rgba(47,111,237,.12)">
+      <b style="min-width:42px;font-size:12px;color:${d.tone==='risk'?'#d92d3f':'var(--tx3)'}">${esc(d.mmdd)}</b>
+      <div style="flex:1">${(d.items||[]).map(it=>`<div style="font-size:12px;line-height:1.6">
+        ${d.tone==='risk'&&(it.weight||0)>=2?'⚠️ ':'· '}<b>${esc(it.k)}</b>
+        <span style="color:var(--tx2)">${esc(it.v)}</span>
+        ${it.note?`<div class="k" style="font-size:11px;font-weight:400;
+          line-height:1.6;color:var(--tx3)">${esc(it.note)}</div>`:''}
+      </div>`).join('')}</div>
+    </div>`).join('')}</div>
+    ${(ev.notes||[]).length?`<div class="k" style="margin-top:6px;font-size:11px;
+      font-weight:400">※ ${ev.notes.map(esc).join('；')}</div>`:''}
+    <div class="k" style="margin-top:6px;font-size:10.5px;font-weight:400">来源：${esc(ev.source||'')}</div>
+  </div>`:'';
   el.innerHTML=`<div class="verdict ${cls}">
     <div class="hd2"><div class="ic">${emoji}</div>
       <div><div class="ti" style="font-size:18.5px">明日（${esc(o.date||'')}${o.date_exact===false?' 估算':''}）· ${esc(o.headline)}</div></div></div>
@@ -3282,6 +3303,7 @@ function renderOutlook(){
         ${x.note?`<div class="k" style="margin-top:var(--s1);font-size:11px;font-weight:400;line-height:1.65">${esc(x.note)}</div>`:''}
       </div>`).join('')}
     </div>
+    ${evHtml}
     <div style="margin-top:var(--s4);display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)" class="flow2">
       <div class="act" style="display:block">
         <div class="k">开盘先盯这几件事</div>

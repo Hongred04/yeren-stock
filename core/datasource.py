@@ -119,6 +119,47 @@ EM_BLOCK_BASE = 120      # 首次冷却 2 分钟
 EM_BLOCK_MAX = 300       # 封顶 5 分钟
 EM_BLOCK_MIN_FAILS = 2   # 软失败（超时等）连续几轮才熔断；硬失败（被 RST）立即熔断
 
+# ★ 接口级半开探测（v1.40.0）—— 家族级早就有（见 _push2_gate 的 PUSH2_PROBE_AFTER），
+#   接口级一直缺：冷却期内 _push2_json 在 line 2435 直接 return {}，**一次机会都不给**，
+#   于是"接口级 5 分钟"是硬等满 5 分钟。而东财的掐其实是**间歇性**的 —— 实测同一
+#   接口隔几十秒重试就可能恢复，硬等满冷却纯属浪费时间。
+#   做法与家族级完全对齐：冷却过半后，每隔 EM_PROBE_AFTER 秒放**一个**请求过去探，
+#   成功即立刻清零（_push2_json 里已有 _em_fail.pop/_em_down_until.pop 的恢复分支），
+#   失败则把冷却重算 —— 探测不会把冷却撞得更长（见 _em_probe_note 的说明）。
+EM_PROBE_AFTER = 45      # 冷却中每隔多久放行一次半开探测（秒），与家族级 60 同量级
+_em_probe: dict[str, float] = {}       # 接口 -> 上次探测时刻（epoch 秒）
+
+
+def _em_probe_allow(key: str) -> bool:
+    """接口级半开探测闸门。冷却中返回 False，但每隔 EM_PROBE_AFTER 秒放行一次。
+
+    与家族级 _push2_gate 的区别：家族级用单个全局 _p2_probe，接口级按 key 分别记 ——
+    clist 和 ulist.np 是两个独立接口，被掐与恢复的节奏不同，共用一个探测计时会让
+    "A 探测刚放行" 把 "B 的探测" 也一并吃掉。
+    """
+    now = time.time()
+    with _em_lock:
+        if now >= _em_down_until.get(key, 0):
+            _em_probe.pop(key, None)
+            return True                      # 已过冷却，正常放行
+        if now - _em_probe.get(key, 0) >= EM_PROBE_AFTER:
+            _em_probe[key] = now
+            return True                      # 冷却中，但到了探测窗口
+        return False
+
+
+def _em_probe_note(key: str) -> None:
+    """一次**探测**失败后重算冷却（不是把冷却越撞越长）。
+
+    为什么单独记：探测是"冷却期内主动放出去的一次尝试"，失败说明还没恢复 ——
+    这时应当**重置冷却计时**（让下一个探测窗口 EM_PROBE_AFTER 秒后再来），
+    而不是走 _push2_json 末尾那段"失败轮数 +1、退避翻倍"的逻辑：那段是给
+    "正式请求失败"用的，若用在探测上，每探一次就把封顶冷却往上顶一档，等于
+    "越探越久" —— 与半开探测的目的正相反。
+    """
+    with _em_lock:
+        _em_down_until[key] = time.time() + EM_BLOCK_MAX
+
 
 def _api_key(path: str) -> str:
     return path.split("?", 1)[0]
@@ -131,18 +172,26 @@ def _is_hard_block(err: Exception) -> bool:
 
 
 def em_blocked() -> list[dict]:
-    """当前处于冷却中的东财接口（过期的顺手清掉）。"""
+    """当前处于冷却中的东财接口（过期的顺手清掉）。
+
+    next_probe_in：距离下一次半开探测还有几秒（0 = 随时可探）。
+    面板据此能说清"还要等多久"，而不是干显示一个倒计时让用户以为只能等满。
+    """
     now = time.time()
     out = []
     with _em_lock:
         for k in list(_em_down_until):
             until = _em_down_until[k]
             if until > now:
+                last = _em_probe.get(k, 0)
                 out.append({"api": k, "fails": _em_fail.get(k, 0),
-                            "seconds_left": int(until - now)})
+                            "seconds_left": int(until - now),
+                            "next_probe_in": max(0, int(EM_PROBE_AFTER - (now - last)))
+                                             if last else 0})
             else:
                 _em_down_until.pop(k, None)
                 _em_fail.pop(k, None)
+                _em_probe.pop(k, None)
     return sorted(out, key=lambda x: -x["seconds_left"])
 
 
@@ -152,6 +201,7 @@ def em_reset_blocks() -> int:
         n = len(_em_down_until)
         _em_down_until.clear()
         _em_fail.clear()
+        _em_probe.clear()
     return n
 
 
@@ -2430,10 +2480,18 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
     """东财 push2 接口（clist / ulist.np）：镜像轮换 + 限速 + 接口级熔断。
 
     熔断命中时直接返回 {}，由调用方走自己的降级链路 —— 不再空等 3 台镜像各自超时。
+
+    v1.40.0：冷却中不再是"一律拒绝"，而是经 _em_probe_allow 每 EM_PROBE_AFTER 秒
+    放行一次半开探测。探测成功走下面的成功分支 → pop 掉 _em_down_until，接口提前
+    恢复；探测失败由 _em_probe_note 重算冷却，不会让退避越顶越长。
     """
     key = _api_key(path)
-    if time.time() < _em_down_until.get(key, 0):
+    # 冷却中：不直接 return，先问接口级半开探测闸门放不放行（v1.40.0）。
+    # 探测放行的那一次如果成功，下面的成功分支会 pop 掉 _em_down_until →
+    # 接口提前恢复；失败则 _em_probe_note 重算冷却，不把冷却越撞越长。
+    if time.time() < _em_down_until.get(key, 0) and not _em_probe_allow(key):
         return {}
+    _probing = time.time() < _em_down_until.get(key, 0)
     if not _push2_gate():          # 家族级冷却中，别浪费请求
         return {}
     soft = False
@@ -2471,6 +2529,10 @@ def _push2_json(path: str, referer: str = "https://quote.eastmoney.com/") -> dic
     # 家族级冷却：行情列表接口被掐时，整个 push2 一起歇一会儿
     # 60 / 120 / 240 秒三档封顶（原来 180→900 秒，太狠）
     _push2_trip(min(60 * (2 ** min(_em_fail.get(key, 1) - 1, 2)), PUSH2_COOLDOWN))
+    if _probing:
+        # 这次是半开探测放行的请求、而且失败了 → 用探测专属的冷却重算，
+        # 而不是让上面这段（为"正式请求失败"设计的）退避把冷却越顶越长。
+        _em_probe_note(key)
     return {}
 
 
@@ -4319,7 +4381,7 @@ def search_stocks(keyword: str, limit: int = 8) -> dict:
 # 面板里再打一轮探测既慢、又会消耗东财的每分钟额度（甚至把熔断撞出来），
 # 得不偿失。数据来源：
 #   · _HOST_STAT      —— _get 每次请求的结果（成功/失败/耗时/连续失败次数）
-#   · em_blocked()    —— 东财 push2 接口级熔断（冷却剩余、连续失败轮数）
+#   · em_blocked()    —— 东财 push2 接口级熔断（冷却剩余、连续失败轮数、下次探测倒计时）
 #   · push2_status()  —— push2 每分钟预算、代理出口
 #   · tdx_status()    —— 通达信（TCP，不走 _get）
 #   · data_health()   —— 关键数据是否降级（回退到当日旧快照）
@@ -4444,8 +4506,16 @@ def _source_state(spec: dict, now: float, blocked: list[dict], p2: dict,
         if hit:
             left = max(int(b.get("seconds_left") or 0) for b in hit)
             fails = max(int(b.get("fails") or 0) for b in hit)
+            # v1.40.0：接口级也有了半开探测（EM_PROBE_AFTER），文案不能再写死
+            # "每 60 秒" —— 那是家族级的 PUSH2_PROBE_AFTER。这里按实际情况说，
+            # 并给出**下一次探测还有几秒**，用户才知道不必干等满冷却。
+            probe_in = min(int(b.get("next_probe_in") or 0) for b in hit)
+            if probe_in <= 0:
+                probe_txt = "马上会半开探测一次"
+            else:
+                probe_txt = f"{probe_in} 秒后半开探测一次"
             cool = (f"熔断中 · 冷却约 {max(1, -(-left // 60))} 分钟"
-                    f"（连续失败 {fails} 轮，每 60 秒半开探测）")
+                    f"（连续失败 {fails} 轮，{probe_txt}）")
             # ★ 2026-10-15 修：push2 熔断 ≠ 这项数据没有。
             #   降级链上还有备用域（bkzj）、同花顺、财联社、新浪 —— 实测
             #   push2 全灭时后台照常由 bkzj 出数，但卡片只认 push2 的熔断状态，

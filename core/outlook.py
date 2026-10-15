@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from . import datasource as ds
+from . import events as events_mod
 from . import regime
 from . import trading
 
@@ -85,8 +86,14 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
           meter: dict | None = None, ml: dict | None = None,
           flow: dict | None = None, sectors: dict | None = None,
           macro: dict | None = None, plan: dict | None = None,
-          sowing: dict | None = None) -> dict:
-    """构建明日判断。所有入参都是本轮分析已算出的结果，不再打接口。"""
+          sowing: dict | None = None, events: dict | None = None) -> dict:
+    """构建明日判断。所有入参都是本轮分析已算出的结果，不再打接口。
+
+    events（v1.40.0，建议 3）：财经事件时间轴（解禁/新股/交割/议息）。
+    为 None 时本函数**自己调** core.events.build —— 这样单独调用 outlook
+    的测试/调用方不必显式传，行为与 pipeline 传进来时一致（有 1h 缓存，
+    重复调用不会多打接口）。
+    """
     sentiment = sentiment or {}
     volume = volume or {}
     meter = meter or {}
@@ -95,6 +102,12 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     sectors = sectors or {}
     plan = plan or {}
     sowing = sowing or {}
+    if events is None:
+        try:
+            events = events_mod.build(real_date)
+        except Exception:
+            events = {}
+    events = events or {}
 
     stage = sentiment.get("stage", "unknown")
     mm = sentiment.get("metrics") or {}
@@ -230,6 +243,39 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
     else:
         points.append({"k": "最强板块", "v": "无合力方向", "note": "板块合力不足，明日只做个股不做板块"})
 
+    # ---- 财经事件时间轴（v1.40.0，建议 3）· 已知事实线 ----
+    # 前面五个维度全是**回看**（已发生的量能/情绪/题材/资金/板块），
+    # 这一段是唯一**前瞻且确定**的：解禁、新股、期指交割、海外议息 ——
+    # 不是推演，是今天就已经写在日历上的明日风险。
+    ev_days = events.get("days") or []
+    ev_next = events.get("next") or {}
+    ev_notes = events.get("notes") or []
+    if ev_next.get("items"):
+        ev_bits = "；".join(
+            f"{it.get('k')}（{it.get('v')}）" for it in ev_next["items"][:3])
+        ev_note = "　".join(str(it.get("note") or "") for it in ev_next["items"][:2])
+        if len(ev_days) > 1:
+            later = "、".join(f"{d.get('mmdd')}（" +
+                             "、".join(str(i.get('k')) for i in d.get("items") or []) +
+                             "）" for d in ev_days[1:4])
+            ev_note = (ev_note + f"　之后：{later}") if ev_note else f"之后：{later}"
+        points.append({"k": "明日事件", "v": ev_bits, "note": ev_note,
+                       "tone": ev_next.get("tone") or "info"})
+    elif ev_days:
+        bits = "；".join(f"{d.get('mmdd')} " +
+                        "、".join(str(i.get("k")) for i in d.get("items") or [])
+                        for d in ev_days[:3])
+        points.append({"k": "明日事件", "v": "明日无重大事件",
+                       "note": f"未来几天有：{bits}"})
+    else:
+        points.append({"k": "明日事件", "v": "明日无重大事件",
+                       "note": "解禁/新股/交割/议息四个口径都没查到明日事件 —— "
+                               "可以更纯粹地按盘面本身来判"})
+    # 议息日程未维护时如实说明（events 模块宁可不说也不猜）
+    if ev_notes:
+        points[-1]["note"] = (points[-1]["note"] + "　※ " + "；".join(ev_notes)
+                              if points[-1].get("note") else "；".join(ev_notes))
+
     # ---- 盯什么（带阈值）----
     watch: list[str] = []
     if vol_mode in ("shrink_short", "shrink_red", "dry"):
@@ -253,6 +299,20 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         watch.append(f"标签漂移的「{'、'.join(str(n) for n in sow_drift[:3])}」—— "
                      f"明天续强 = 逻辑接力成立，断板 = 逻辑证伪")
 
+    # 事件线：明日有交割/议息/大额解禁时，盯盘要额外看的东西
+    if ev_next.get("items"):
+        for it in ev_next["items"]:
+            k = str(it.get("k") or "")
+            if k == "期指交割":
+                watch.append("交割日尾盘 14:30 后的异动 —— 交割日容易假突破，"
+                             "别追、也别被一根急拉骗进去")
+            elif k == "海外议息":
+                watch.append("隔夜议息结果 —— 尾盘决定留多少仓过夜，"
+                             "满仓过夜等于赌方向")
+            elif k == "解禁" and int(it.get("weight") or 0) >= 2:
+                watch.append(f"大额解禁的抛压承接（{it.get('v')}）—— "
+                             f"开盘半小时若高开低走，说明筹码在跑")
+
     # ---- 情景预案 ----
     scenarios: list[dict] = []
     if stage == "ebb" or vol_mode == "dry":
@@ -273,6 +333,21 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         scenarios.append({"cond": f"若新播种题材「{'、'.join(str(t) for t in sow_new[:2])}」"
                                   f"出现第二只、独苗晋级二板",
                           "then": "按新周期题材对待：优先进首板（试错仓），确认后再加仓"})
+    # 事件情景：交割日 / 议息 / 大额解禁各自对应一套预案
+    _ev_kinds = {str(it.get("k")) for it in (ev_next.get("items") or [])}
+    if "期指交割" in _ev_kinds:
+        scenarios.append({"cond": "若明日是交割日、盘中出现无量的急拉急杀",
+                          "then": "当噪音处理 —— 交割日的波动不改变趋势，"
+                                  "按原计划做，别跟着盘面改主意"})
+    if "海外议息" in _ev_kinds:
+        scenarios.append({"cond": "若明日隔夜有议息结果、开盘大幅跳空",
+                          "then": "跳空后别第一时间追 —— 等 9:45 后看能否站稳，"
+                                  "跳空缺口当天被回补说明是情绪不是共识"})
+    for it in (ev_next.get("items") or []):
+        if str(it.get("k")) == "解禁" and int(it.get("weight") or 0) >= 2:
+            scenarios.append({"cond": f"若大额解禁股（{it.get('v')}）开盘承压、拖累相关板块",
+                              "then": "避开该板块的跟风票 —— 解禁抛压是计划内的，"
+                                      "不是情绪波动，等它释放完再看"})
 
     # 下一交易日：能确认就用准确措辞，不能确认就保留"估算 + 免责"（v1.39.0）
     next_date, next_exact = _next_trade_date(real_date)
@@ -305,5 +380,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         "headline": head, "tone": tone,
         "mode": {"name": mode_name, "note": mode_note},
         "points": points, "watch": watch, "scenarios": scenarios,
+        "events": events,          # 事件时间轴（原始块，界面可展开看全部）
+        "events_brief": events_mod.brief(events),
         "note": tail,
     }
