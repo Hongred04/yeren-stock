@@ -2248,21 +2248,73 @@ def _push2_cheap_skip() -> bool:
         return len(_budget_log) >= PUSH2_BUDGET
 
 
-def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
+def breadth_of_snapshots(snaps: dict) -> dict:
+    """从**已有的全市场快照**里数出涨跌家数 —— 不花任何网络请求。
+
+    ★ 为什么要有这个（2026-10-14 实测）：涨跌家数原先是打 push2 的
+      `ulist.np?secids=1.000001,0.399001` 拿 f104/f105/f106。但本系统的
+      每一轮扫描**本来就把全市场 6173 只的快照全拉下来了**（实测 0.5~0.9 秒，
+      是扫描的必经步骤），涨跌家数不过是这份快照的一个计数而已。
+
+      实测一致性：自算与备用源（开盘红）连读三次完全相同 ——
+      自算 978/4496/699，备用源 up=978 down=4496 flat=699。两者本来就是
+      同一份行情的两种读法，所以自算不是"近似"，是同一个数。
+
+      换来的收益是实打实的：push2 被封时 `fetch_breadth` 要 **3.01 秒**
+      才降级（4 台镜像各轮一遍、烧掉 5 个预算位），而自算耗时 **0**，
+      且完全不碰那条被封的链路。
+
+    口径：涨跌幅 >+0.5‰ 记涨、<−0.5‰ 记跌、其余记平。用千分之五而不是
+    严格 >0，是因为行情快照的涨跌幅本身就带两位小数舍入，把 0.00 附近的
+    抖动算成"涨"会让平盘家数虚低（实测差异在几十只量级）。
+    没有 pct 字段的票跳过不计 —— 宁可少算也不猜。
+    """
+    up = down = flat = 0
+    for _code, s in (snaps or {}).items():
+        p = _num(s.get("pct")) if isinstance(s, dict) else None
+        if p is None:
+            continue
+        if p > 0.005:
+            up += 1
+        elif p < -0.005:
+            down += 1
+        else:
+            flat += 1
+    total = up + down + flat
+    if total <= 0:
+        return {}
+    return {"up": up, "down": down, "flat": flat, "total": total,
+            "up_ratio": round(up / total, 3),
+            "up_down_ratio": round(up / down, 2) if down else 0.0,
+            "source": "snaps"}
+
+
+def fetch_breadth(date: str = "", ttl: int = 60, snaps: dict | None = None) -> dict:
     """全市场涨跌家数 {up, down, flat, ...}。取不到返回空 dict。
 
-    push2 拿不到时（被限流 / 预算用尽）退**开盘红实时情绪**——它直接给
-    涨跌家数，是独立于东财的一条路；结果带 source 字段供界面如实标注。
-    两条路都不通时，回退**当日最后一份好数据**（涨跌家数偶尔丢失会让
-    情绪温度的第 4 项退化，不该因此把整根温度计算歪）。
+    降级链（按代价从低到高）：
+      ① **自算**（传了 snaps 时）—— 零网络、零耗时，且与备用源实测同值
+      ② 东财 push2 ulist.np（f104/f105/f106）
+      ③ **开盘红实时情绪**（独立于东财的一条路）
+      ④ 当日最后一份好数据（涨跌家数偶尔丢失会让情绪温度的第 4 项退化，
+         不该因此把整根温度计算歪）
 
     ★ 2026-10-14 提速：进 push2 之前先看家族是不是在冷却/预算用尽。
       实测被东财掐住时这一路要 **3.01 秒**才降级（4 台镜像各轮一遍，烧掉
       5 个预算位），而备用口径 _breadth_fallback 只要 0.24~0.8 秒、且完全
       不碰 push2。冷却期明知打不通还去打，纯粹是拿扫描时间换白等 ——
       所以冷却/超预算时**直接走备用**，把那个 3 秒省下来。
+
+    ★ 调用方如果能拿到全市场快照（sentiment_meter.build 就有 snaps），
+      **优先传 snaps**：那样整条降级链一次都不会走，省下的正是上面那 3 秒。
     """
     def producer():
+        # ① 自算：数据已在手，不打任何请求
+        if snaps:
+            got = breadth_of_snapshots(snaps)
+            if got:
+                return True, got
+        # ② 东财
         if not _push2_cheap_skip():
             js = _push2_json("/api/qt/ulist.np/get?fltt=2&invt=2"
                              "&secids=1.000001,0.399001&fields=f12,f14,f104,f105,f106")
@@ -2279,6 +2331,7 @@ def fetch_breadth(date: str = "", ttl: int = 60) -> dict:
                                   "up_ratio": round(up / total, 3),
                                   "up_down_ratio": round(up / down, 2) if down else 0.0,
                                   "source": "em"}
+        # ③ 开盘红
         fb = _breadth_fallback()
         if fb:
             return True, fb
@@ -2420,11 +2473,87 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
         for rows in pool.map(work, chunks):
             for code, d in rows:
                 out[code] = d
+    if out:
+        return out
+
+    # ③ 同花顺页面降级（2026-10-14 新增）：data.10jqka.com.cn/funds/ggzjl/
+    #    的「流入资金/流出资金/净额」表，105 页 × 50 行覆盖全市场。
+    #    THS 反爬是**抖动式** 401/403（同一页重试几次就过，实测 20/20 成功），
+    #    带退避重试即可。口径：THS 净额 ≈ 东财 f62 主力净额（同为超大+大单），
+    #    但不是同一个数 —— source=ths 如实标注，调用方按"主力净额"使用。
+    return _ths_stock_moneyflow(want)
+
+
+_THS_GGZJL = ("http://data.10jqka.com.cn/funds/ggzjl/"
+              "field/zdf/order/desc/page/{pg}/ajax/1/free/1/")
+
+
+def _ths_get_retry(url: str, tries: int = 5) -> str:
+    """同花顺数据中心 GET —— 401/403 是**抖动式**反爬（同一 URL 重试就过，
+    实测 20 页连打 0 失败），退避重试即可；仍失败抛给调用方。"""
+    last: Exception | None = None
+    for k in range(tries):
+        try:
+            return _get(url, timeout=12,
+                        referer="http://data.10jqka.com.cn/funds/ggzjl/").decode(
+                "gbk", "ignore")
+        except Exception as e:            # noqa: PERF203 —— 抖动重试正是目的
+            last = e
+            time.sleep(0.5 * (k + 1))
+    raise last  # type: ignore[misc]
+
+
+def _ths_moneyflow_cell(v: str) -> float | None:
+    """THS 资金文本（'5.81亿' / '-3293.86万' / '1.09亿'）→ 元。"""
+    v = (v or "").strip().replace(",", "")
+    if not v or v == "--":
+        return None
+    try:
+        if v.endswith("亿"):
+            return float(v[:-1]) * 1e8
+        if v.endswith("万"):
+            return float(v[:-1]) * 1e4
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def _ths_stock_moneyflow(want: set[str]) -> dict[str, dict]:
+    """同花顺 ggzjl 页全市场翻页 → {code: {main, main_pct, ...}}。
+
+    每页 50 行 × 105 页；want 通常只有几十~几百只，按涨跌幅序翻页要碰运气，
+    所以**翻满前 20 页**（1000 只，活跃票基本都在）就停 —— 覆盖调用方
+    绝大多数候选；没匹配上的返回空、由上游按"无数据"处理（不猜）。
+    """
+    out: dict[str, dict] = {}
+    for pg in range(1, 21):
+        try:
+            html = _ths_get_retry(_THS_GGZJL.format(pg=pg))
+        except Exception:
+            if out:
+                break                     # 拿到一部分就够，别硬撞
+            return {}                     # 一页都没拿到 = 这条路不通
+        hit_pg = False
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+            cells = [re.sub(r"<[^>]+>", "", c).strip()
+                     for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+            if len(cells) < 10 or not cells[1].isdigit():
+                continue
+            key = _mk_code(cells[1])
+            if key not in want:
+                continue
+            hit_pg = True
+            net = _ths_moneyflow_cell(cells[8])
+            out[key] = {"main": net, "main_pct": None,
+                        "super": None, "big": None,
+                        "mid": None, "small": None, "source": "ths"}
+        if len(out) >= len(want):
+            break
+        del hit_pg
     return out
 
 
-# ---------------------------------------------------------------- 板块数据
-# 东财 clist 接口被**按 URL 路径**风控（三台镜像全部 RemoteDisconnected，实测
+# ---------------------------------------------------------------- 板块数据# 东财 clist 接口被**按 URL 路径**风控（三台镜像全部 RemoteDisconnected，实测
 # 2026-10-09 复现），但同一个 push2 服务的 ulist.np 完全可用、且字段一模一样。
 # 所以板块这块整体改走 ulist.np：
 #   ① 板块清单 —— 枚举 90.BKxxxx 号段自己发现（17 个请求扫出 731 个板块，1 秒）
@@ -2541,6 +2670,17 @@ def fetch_board_codes(force: bool = False) -> dict[str, str]:
         _write_json(BOARD_LIST_PATH, {"_ts": now, "boards": fresh})
         return fresh
 
+    # ★ 2026-10-14 补：东财号段枚举也失败时，退同花顺清单（140 行业 + 361 概念，
+    #   独立主机）。注意 THS 代码体系与 BK 不通用 —— 只在**拿不到任何东财清单**
+    #   时垫底，且键是板块名（fetch_board_list 按名查就仍然可用）。
+    ths = fetch_ths_board_codes()
+    if ths:
+        _write_json(BOARD_LIST_PATH,
+                    {"_ts": now - _BOARD_LIST_TTL + _BOARD_RETRY_AFTER,
+                     "boards": {v: k for k, v in ths.items()},
+                     "note": "ths_degraded"})
+        return {v: k for k, v in ths.items()}
+
     fallback = boards or _seed_boards()
     if fallback:
         # 刷新失败：把时间戳往前推，让下次重试落在 1 小时后，
@@ -2554,6 +2694,120 @@ def fetch_board_codes(force: bool = False) -> dict[str, str]:
 def fetch_board_list() -> dict[str, str]:
     """{板块名: BK代码} —— 题材名 → 板块代码的映射表（mainline 用）。"""
     return {name: bk for bk, name in fetch_board_codes().items() if name}
+
+
+# ── 同花顺板块（独立主机、独立风控，push2 被掐时的第二条路）──────────────
+# q.10jqka.com.cn 是普通 HTML 页面（gbk 编码），401 只拦 ajax 翻页，
+# 清单页与首页表格直接 GET 就有 —— 实测 2026-10-14：
+#   · /thshy/            行业板块页：cate_items 清单 140 个 + 行情表 50 行
+#                        （板块/涨跌幅/成交额/净流入(亿)/领涨股，净流入排序）
+#   · /thshy/index/2/    行情表翻页（page_info 共 2 页，行业 140 全覆盖）
+#   · /gn/               概念板块页：cate_items 清单 361 个（行情表是资讯视图，
+#                        没有概念级资金流 —— 概念资金流不接 THS，仍走东财链）
+# 价值：东财 push2 家族被封时，板块**清单**与**行业资金流**仍有一条完全
+# 独立的路（新浪兜底没有净流入；财联社只有部分口径），且零鉴权、零 JS。
+_THS_REF = "http://q.10jqka.com.cn/"
+_THS_HY_URL = "http://q.10jqka.com.cn/thshy/"
+_THS_GN_URL = "http://q.10jqka.com.cn/gn/"
+
+
+def _ths_html(url: str) -> str:
+    """同花顺页面 → gbk 解码文本。失败抛异常由调用方决定降级。"""
+    return _get(url, timeout=12, referer=_THS_REF).decode("gbk", "ignore")
+
+
+def _ths_code_name(html: str, kind: str) -> dict[str, str]:
+    """清单页 cate_items 里的 {板块名: 代码}。
+
+    行业链接形如 /thshy/detail/code/881121/，概念是 /gn/detail/code/301558/。
+    kind = 'thshy' | 'gn'。
+    """
+    pairs = re.findall(
+        r'href="http://q\.10jqka\.com\.cn/' + kind +
+        r'/detail/code/(\d+)/"[^>]*>([^<]+)</a>', html)
+    return {name.strip(): code for code, name in pairs if name.strip()}
+
+
+def fetch_ths_board_codes() -> dict[str, str]:
+    """同花顺板块清单 → {名称: THS代码}（行业 140 + 概念 361）。
+
+    与东财 BK 号段是完全独立的命名体系，键是**板块名**——调用方按名
+    对齐。任一清单失败就整体返回 {}，调用方退回东财链（宁缺不猜）。
+    """
+    def producer():
+        out: dict[str, str] = {}
+        html = _ths_html(_THS_HY_URL)
+        out.update(_ths_code_name(html, "thshy"))
+        html2 = _ths_html(_THS_GN_URL)
+        out.update(_ths_code_name(html2, "gn"))
+        return out
+    try:
+        got = cached("ths:board_codes", 86400, producer)   # 清单一天足够新
+        return got or {}
+    except Exception:
+        return {}
+
+
+def _ths_flow_row(cells: list[str]) -> dict | None:
+    """行情表一行（12 列文本）→ 板块资金流行。列序（实测）：
+    序号/板块/涨跌幅/总成交量(万手)/总成交额(亿)/净流入(亿)/上涨/下跌/
+    均价/领涨股/最新价/领涨股涨跌幅。"""
+    if len(cells) < 10 or not cells[1]:
+        return None
+    try:
+        pct = round(float(cells[2]), 2)
+    except (ValueError, TypeError):
+        return None
+    try:
+        net = float(cells[5])          # 亿元
+    except (ValueError, TypeError):
+        net = None
+    try:
+        amount = float(cells[4]) * 1e8  # 亿元 → 元
+    except (ValueError, TypeError):
+        amount = None
+    return {"code": "",              # THS 代码与 BK 不通用，留空如实标注
+            "name": cells[1].strip(),
+            "pct": pct,
+            "main": round(net * 1e8) if net is not None else None,  # 元
+            "main_pct": None,
+            "lead": cells[9].strip() if len(cells) > 9 else "",
+            "lead_code": "",
+            "amount": amount,
+            "source": "ths"}
+
+
+def fetch_ths_board_moneyflow(limit: int = 30) -> list[dict]:
+    """同花顺**行业**板块资金流（净流入排序，页 1+2 共 100 行 → 前 limit）。
+
+    只有行业没有概念（THS 概念页是资讯视图）；main 单位元、口径是 THS 的
+    「净流入」，与东财 f62 主力净额**相近但不是同一个数** —— source=ths
+    让界面如实标注。两页都失败返回 []，由调用方继续往新浪降。
+    """
+    rows: list[dict] = []
+    for url in (_THS_HY_URL, _THS_HY_URL + "index/2/"):
+        try:
+            html = _ths_html(url)
+        except Exception:
+            continue
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+            cells = [re.sub(r"<[^>]+>", "", c).strip()
+                     for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+            row = _ths_flow_row(cells)
+            if row:
+                rows.append(row)
+        if len(rows) >= limit:
+            break
+    # 同名板块两页不会重复（按净流入降序），但保险起见按名去重
+    seen: set[str] = set()
+    out = []
+    for r in rows:
+        if r["name"] in seen:
+            continue
+        seen.add(r["name"])
+        out.append(r)
+    out.sort(key=lambda r: -(r["main"] if r["main"] is not None else -1e18))
+    return out[:limit]
 
 
 # ── 新浪板块（独立主机，push2 被掐时的兜底）──────────────────────────────
@@ -2613,9 +2867,10 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
     短线真正驱动行情的是概念板块，原来只排行业板块反而漏掉了主线；
     现在同一批请求把两类都拿回来，主升题材能直接冲到榜首。
 
-    东财被风控时**先退财联社**（同样有主力净额），再退新浪：那条链路
-    没有主力净额（main=None），但涨跌幅/成交额/领涨股都有，面板至少
-    能告诉你钱在往哪个方向走。三条路都带 source 供界面如实标注。
+    东财被风控时**先退同花顺**（行业资金流，净流入口径，独立主机），
+    再退财联社（同样有主力净额），最后退新浪：那条链路没有主力净额
+    （main=None），但涨跌幅/成交额/领涨股都有，面板至少能告诉你钱在往
+    哪个方向走。四条路都带 source 供界面如实标注。
     """
     key = f"board_flow:{limit}"
     now = time.time()
@@ -2623,8 +2878,8 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
     if hit and now - _cache_ts.get(key, 0) < 600:      # 10 分钟：少打接口
         return hit
 
-    rows = (_board_flow_em(limit) or _board_flow_cls(limit)
-            or _board_flow_sina(limit))
+    rows = (_board_flow_em(limit) or fetch_ths_board_moneyflow(limit)
+            or _board_flow_cls(limit) or _board_flow_sina(limit))
     if rows:
         _cache[key] = rows
         _cache_ts[key] = now
@@ -3334,6 +3589,10 @@ SOURCE_REGISTRY: list[dict] = [
     {"key": "ths_hot", "group": "消息", "name": "同花顺人气榜", "vendor": "同花顺",
      "hosts": ["dq.10jqka.com.cn", "www.10jqka.com.cn"], "health": ["hot_rank"],
      "use": "散户关注度"},
+    {"key": "ths_board", "group": "资金", "name": "板块 / 个股资金流（备用）", "vendor": "同花顺",
+     "hosts": ["q.10jqka.com.cn", "data.10jqka.com.cn"],
+     "health": ["board_flow", "stock_flow"],
+     "use": "板块清单 · 行业资金流 · 个股主力净额（东财受限时）"},
 ]
 
 # 排序权重：**有问题的排最前**，然后是"确认正常"，最后才是中性档

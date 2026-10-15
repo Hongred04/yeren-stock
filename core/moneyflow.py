@@ -323,7 +323,8 @@ def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,
     board_n = int(_f(a.get("board_top_n"), 10)) or 10
     boards = ds.fetch_board_moneyflow(200)
     board_src = (boards[0].get("source") if boards else "") or ""
-    has_main = board_src == "em"          # 新浪兜底没有主力净额
+    # ths 口径有净流入（近似主力净额），sina 才完全没有 —— 都能进"板块吸金"
+    has_main = board_src in ("em", "ths")
 
     boards_all = [_bk(b) for b in boards]
     # 板块资金记忆：归档今日快照 + 标注每个板块「连续钱在进的天数」
@@ -368,6 +369,8 @@ def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,
         source_note = "板块数据暂不可用（东财限速中，新浪兜底也没取到）"
     elif board_src == "sina":
         source_note = "板块数据来自新浪（东财被限速）：没有主力净额，只有涨幅/成交额/领涨股"
+    elif board_src == "ths":
+        source_note = "板块数据来自同花顺（东财被限速）：净流入为同花顺口径，与东财主力净额相近但非同一数"
     else:
         source_note = "板块数据来自东财"
 

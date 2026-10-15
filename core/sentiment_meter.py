@@ -280,7 +280,11 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
             height_premium = round(h_sum / h_cnt, 2)
         premium_src = "local" if prem_cnt else ""
 
-    breadth = ds.fetch_breadth()
+    # ★ 优先用**已经在手的全市场快照**自算涨跌家数（零网络、零耗时）。
+    #   以前这里是无条件 fetch_breadth()：push2 被封时要 3.01 秒才降级到
+    #   开盘红，而那个数与本函数手上的 snaps 数出来**完全一样**（实测连读
+    #   三次都是 978/4496/699）。快照为空（冷启动/盘前）时才走网络降级链。
+    breadth = ds.fetch_breadth(snaps=snaps) if snaps else ds.fetch_breadth()
     up_ratio = breadth.get("up_ratio") if breadth else None
 
     temp = _temperature(n_zt, max_boards, broken_ratio, promote_rate, up_ratio)

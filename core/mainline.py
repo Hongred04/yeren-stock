@@ -1109,6 +1109,8 @@ def sector_view(ml: dict, flow: dict | None = None,
     src = flow.get("board_source") or ""
     if src == "sina":
         data_note = "东财板块接口受限，板块涨幅/资金为新浪口径（无主力净额）"
+    elif src == "ths":
+        data_note = "东财板块接口受限，板块涨幅/资金为同花顺口径（净流入近似主力净额）"
     elif src == "em":
         data_note = "板块数据来自东财 ulist.np（含主力净额）"
     else:
