@@ -323,6 +323,11 @@ MEM_PATH = paths.data_path("fetch_memory.json")
 _mem: dict[str, dict] = {}          # key -> {date, ts, value}
 _mem_lock = threading.Lock()
 _health: dict[str, dict] = {}       # key -> {ok, ts, note, stale_seconds?}
+# 上一轮 reset_health() 之前的降级项 + 那一轮的自然日。见 health_fallback()：
+# 就绪闸门在"本轮还没调过接口"的空窗里要拿它当保守兜底。
+_health_last_round_bad: list[dict] = []
+_health_last_round_date = ""
+_health_last_round_seen = 0
 
 # 界面上给这些 key 一个中文名（数据源面板/健康提示要用）
 HEALTH_LABELS = {
@@ -387,6 +392,14 @@ def data_health() -> dict:
     """数据健康度自查：哪些关键数据这一轮没取到 / 用的是旧快照。
 
     前端据此如实标注（而不是把降级当正常）。ok=False 的项按 label 列出。
+
+    has_data：**这一轮记账里至少有一条"取到了"** —— "有数据流"的硬证据。
+    ★ 它补的是"降级记账为空"的一处歧义：空既可能是"接口都正常"（真）也可能是
+      "本轮根本没调过接口"（冷启动首屏、命中 TTL 缓存后重算）。就绪判据只认
+      ok/degraded，两者分不出来；has_data 能分 —— 本轮一条记账都没有时它是
+      False，于是引擎可以据此认定"这一帧没有可用的数据流"（见 engine 就绪闸门）。
+      一个含数据的真帧会说谎成"没数据流"吗？不会：三池只要有一个池真的装到东西，
+      它的键必然出现在本轮记账里。所以这个判据只会保守，不会误伤真行情。
     """
     items = sorted(_health.values(), key=lambda x: (x["ok"], -(x.get("stale_seconds") or 0)))
     bad = [x for x in items if not x["ok"]]
@@ -394,13 +407,76 @@ def data_health() -> dict:
         "ok": not bad,
         "degraded": bad,
         "checked": len(items),
+        "has_data": bool(items),
         "summary": ("关键数据全部正常" if not bad else
                     "；".join(f"{x['label']}降级" for x in bad)),
     }
 
 
+def health_fallback() -> dict:
+    """最后一轮真实的健康度记账（跨 reset 存活，只覆盖同一天的）。
+
+    ★ 为什么不能只靠 data_health()：它是**轮内**状态，pipeline 每轮 scan 开头
+      就 reset_health() 清空、再由各接口在成功/降级时回填。于是两个时刻必然
+      处于"记账是空的"：
+        · 刚开进程、本轮三池接口还没调过（用户在首屏按刷新就走这条路）；
+        · 三池命中 TTL 内存缓存（120 秒内没有重新请求，自然不会重新记账）。
+      这两种时刻 data_health() 会返回 ok=True/checked=0，而引擎的就绪闸门
+      只看它就会判成「数据齐了」—— 冷启动「还没取到数据就说可以出手」的
+      顽固 bug 正是从这个空窗里钻出来的。本函数把**上一个真实结论**留一份，
+      让闸门在最坏情况下按"上一轮说过没取到"处理（保守侧 → 不放行）。
+      没记过账（新进程第一轮）返回 {}，闸门认空 = 没有已知降级。
+    """
+    if _health_last_round_date and _health_last_round_date != last_trade_date():
+        return {}
+    return {"ok": not _health_last_round_bad,
+            "degraded": list(_health_last_round_bad),
+            "checked": -1,          # <0 = 来自上一轮，不是本轮实测（见上）
+            "has_data": bool(_health_last_round_seen),
+            "summary": ("；".join(f"{x.get('label') or x.get('key')}降级"
+                                  for x in _health_last_round_bad)
+                        if _health_last_round_bad else "关键数据全部正常")}
+
+
+def health_best() -> dict:
+    """本轮记账与上一轮结论合成的一份（就绪闸门的标准入参）。
+
+    两条合成规则，方向都是"别把没数据说成有数据"：
+      · degraded：本轮与上一轮的降级项**取并集**（更保守）。本轮记账为空
+        （没调过接口 / 命中 TTL 缓存）而上一轮记着三池降级时，必须按降级处理
+        —— 见 health_fallback 里写的空窗。
+      · has_data：**只看本轮**（不看上一轮）。上一轮取到过数据，不代表这一帧
+        有；本轮记账全空就是"这一帧没有数据流"，正是冷启动首屏那一帧。
+      · 数据到手后不会一直被挂着：TTL 120 秒一过必然重新请求并重新记账，
+        届时 degraded 归空、has_data 归 True，闸门自动放行。
+    """
+    cur = data_health()
+    prev = health_fallback()
+    if not cur.get("degraded"):
+        if not prev.get("degraded"):
+            return cur
+        return {**prev, "has_data": cur.get("has_data", False)}
+    if not prev.get("degraded"):
+        return cur
+    keys = {d.get("key") for d in prev["degraded"]}
+    merged = list(prev["degraded"]) + [d for d in cur["degraded"]
+                                       if d.get("key") not in keys]
+    return {"ok": False, "degraded": merged,
+            "checked": cur.get("checked", 0),
+            "has_data": cur.get("has_data", False),
+            "summary": "；".join(f"{x.get('label') or x.get('key')}降级"
+                                 for x in merged)}
+
+
 def reset_health() -> None:
     """每轮扫描开始时清一次，避免上一轮的降级一直挂着。"""
+    global _health_last_round_date, _health_last_round_bad, _health_last_round_seen
+    # 清之前把这一轮的结论留底（health_fallback 要用）——"清空"和"忘记"
+    # 不是一回事：本轮没调过接口时的 data_health() 是空的，那不代表上一轮
+    # 说过的数据缺口已经补上了。
+    _health_last_round_date = last_trade_date()
+    _health_last_round_bad = [dict(v) for v in _health.values() if not v.get("ok")]
+    _health_last_round_seen = len(_health)          # 本轮有没有真正取了数（见 data_health）
     _health.clear()
 
 

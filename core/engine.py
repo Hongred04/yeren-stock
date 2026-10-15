@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from . import chips as chips_mod
+from . import datasource as ds
 from . import fundstyle
 from . import gene as gene_mod
 from . import indicators as ind
@@ -476,9 +477,58 @@ SENTIMENT_STAGES = {
 }
 
 
+def _is_live_health(health: dict | None) -> bool:
+    """这份健康度是不是**实测**出来的（而不是"调用方没声明数据状态"时的空壳）。
+
+    调用方连 health 都不传时，data_note 里的"指数/涨跌家数降级"根本无从谈起 ——
+    那是显式喂数据、自己另做记账的调用点（如 selfcheck），引擎不该替它编一句
+    降级提示。判据取 health_best 的 checked=-1 或 data_health 的 has_data。
+    """
+    h = health or {}
+    if "has_data" in h:
+        return bool(h.get("has_data"))
+    return "has_data" not in h and "degraded" in h
+
+
+def _resolve_health(n_zt: int, n_dt: int, n_zb: int) -> dict:
+    """调用方没声明数据状态时，引擎自己去问数据源要一份（见 evaluate_sentiment）。
+
+    判据**只认本轮** data_health()，绝不吃上一轮的结论：
+      ① datasource.data_health()：本轮记账。返回体本身就是权威就绪判据
+         （含 has_data，供 evaluate_sentiment 判"这一帧没有数据流"）。
+         **不能**改回 health_best()/health_fallback()：那是"本轮记账 ∪ 上一轮
+         降级"的保守合成，`checked: -1` 标记的就是"这条降级来自上一轮、不是
+         本轮实测"。把它当实测证据用，等于让**上一轮**的降级永久污染此后每一帧
+         —— 而消费点 pipeline.py:339 每轮开头都 reset_health()，reset 又会把
+         刚跑完那轮的降级快照进 _health_last_round_bad（datasource.py:478），
+         于是"上一轮降级"几乎永远非空、闸门几乎永远不放行，正是用户报的
+         「过一会获得数据了就说不能出手」。判据只认本轮，那一轮没实测到降级
+         就是没降级。
+      ② 本轮记账为空（新进程第一轮 / 三池命中 TTL 没重新请求）→ 看三池是不是
+         一个都没喂进来：全空就按"这次没取到"处理 —— 宁可让界面等一下，也不能
+         在零数据上宣布"可以出手"。三池里有任意一个有货（哪怕另外两个是合法的
+         空池）就不拦，避免把真行情误判成缺数据。
+      ③ 数据源模块导入失败（极端环境）→ 只退回同一条"全空才算未就绪"，绝不放行。
+    """
+    try:
+        from core import datasource as _ds
+        return _ds.data_health()
+    except Exception:
+        pass
+    if not (n_zt or n_dt or n_zb):
+        return {"ok": False, "checked": 0,
+                "degraded": [{"key": f"pool:{k}", "label": lbl, "ok": False,
+                              "note": "本轮三池都没取到数据"}
+                             for k, lbl in (("ZT", "涨停池"), ("DT", "跌停池"),
+                                            ("ZB", "炸板池"))],
+                "summary": "涨停池降级；跌停池降级；炸板池降级"}
+    return {"ok": True, "degraded": [], "checked": 0, "summary": "关键数据全部正常"}
+
+
 def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
                        broken: list[dict], zt_hist: list[dict],
-                       real_date: str = "", tmin: int | None = None) -> dict:
+                       real_date: str = "", tmin: int | None = None,
+                       health: dict | None = None) -> dict:
     """M3 情绪周期定进退时点 —— 决定「能不能出手」。
 
     退潮期判定严格按「全能的野人」9月28日视频原话口径，四个现象
@@ -488,15 +538,118 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
       ③ A字杀不反包：炸板/涨停 ≥ 0.50
       ④ 高度标的被闷杀：跌停 ≥ 5 只
     判定成立 → 无条件清仓，停止一切低吸和打板，管住手。
+
+    ★ 数据就绪闸门（v1.38.6，用户实测的顽固 bug 第三次复发后补的引擎层堵漏）
+      症状：「每次首次启动就数据还未获得齐全就说可以出手，过一会获得数据了
+      就说不能出手」。措辞上补过两次补丁（web/index.html 结论卡那段注释），
+      病根一直没堵 —— 它根本不在措辞层，在**这一层**。
+
+      根因链（三池接口全挂时）：
+        · core/datasource.py 的三池取数失败 → 回退当日旧快照、失败则返回空表；
+          降级只记进了 `data_health()`（_health_set），引擎层从来不消费它。
+        · 空表喂进这里 → total=0 → 亏钱面积 = 0.0 → 四个退潮现象**一个都不成立**
+          （判据全挂在 n_zt/n_dt 上）→ stage="unknown"。
+        · 而 can_trade = stage != "ebb" → True，文案「可按周期节奏操作」。
+      也就是说：**「接口没取到」与「今天真的没有涨停」在这一层长得一模一样，
+      而两者被当成了同一件事——"没有退潮信号"。** 没有数据 ≠ 数据好。
+
+      闸门口径（与用户敲定）：
+        · 判据只认 `datasource.data_health()`，不自己看列表长度 —— 空池可能
+          是真的没有跌停股（合法空值），也可能是接口没给（不合法空值），
+          列表长度分不出这两者，降级记账分得出（见 _fetch_pool 的注释）。
+        · 三池 pool:ZT/DT/ZB 任意一个 ok=False → 数据未就绪：data_ready=False、
+          can_trade=False、not_ready_reason 写明缺什么。**没数据永远不等于
+          可以出手** —— 这是安全侧的不对称：多等一下只损失一次机会，
+          误放行是拿本金去赌一个没验证过的市场状态。
+        · 指数/涨跌家数降级只降可信度（data_note），不阻断结论。
+        · 退潮判定的阈值与信号口径一个字没动：数据齐了该怎么判还怎么判。
+
+    health: 数据健康度（core/datasource.data_health()）或它 subsets 出的子集
+            {ok, degraded:[{key,label,note}], summary}。**必须是本轮口径**。
+            **为 None 表示"调用方不声明数据状态"**，此时引擎**自己去问数据源**
+            （datasource.data_health()，仍是本轮）；只有连数据源都问不出结论
+            （从没记过账、且三池一个都没喂进来）时才退化成"空池即未就绪"。
+            ★ 就绪判据**只认本轮**：data_health() 的 degraded 就是唯一依据，
+              跨轮提示一律不进闸门（详见 _resolve_health 的注释）。
     """
     s = cfg.get("M3_sentiment", {})
     n_zt = len(limit_up)
     n_dt = len(limit_down)
     n_zb = len(broken)
 
+    # ── 数据就绪闸门：先判"能不能看"，再判"看到的是冷是热" ──
+    # 就绪判据**必须由数据源说了算，不能自己看列表长度**：清单为空既可能是
+    # 今天真没有跌停股（合法空值），也可能是接口没给（不合法空值），长度分不出
+    # 这两者，降级记账分得出（见 datasource._fetch_pool 与 _fetch_memo）。
+    #
+    # health 为 None 时**不能**直接放行（那正是冷启动 bug 的入口：第一个调用点
+    # 忘了传 health，闸门就等于不存在）。改为自己去问数据源：health_best()
+    # 把本轮记账与上一轮结论取更保守的一份 —— 覆盖"本轮还没调过三池接口"
+    # 与"三池命中 TTL 缓存没重新请求"这两个空窗；再问不出结论时，用"三池
+    # 一个都没喂进来"当最后一道兜底（总比静默放行强，且不误伤任何有数据的调用）。
+    if health is None:
+        health = _resolve_health(n_zt, n_dt, n_zb)
+    # _deg 只从**本轮实测**的 degradation 里筛 pool:*。health 为 None 时
+    # _resolve_health 给的就是本轮 data_health()；调用方显式传进来的那份也
+    # 必须是本轮口径（pipeline/server 传的都是 ds.data_health()）。绝不能
+    # 让 health_fallback() 的上一轮条目参与这里 —— 它只能进 not_ready_reason
+    # / data_note 的说明文字（见下方 elif not _deg 那段）。
+    _deg = [d for d in list((health or {}).get("degraded") or [])
+            if str(d.get("key") or "").startswith("pool:")]
+    # 第三态：三池没有一个降级、可是这一帧**根本没取到任何数据流**（本轮记账
+    # 一条都没有）。冷启动首屏正是这样：接口还没调、清单是空的，降级记账也是
+    # 空的 —— 于是既没有报错可看，也拿不到涨停家数，四类退潮信号全不成立，
+    # stage 落到 unknown、can_trade 落到 True。这就是用户反复看到的那一幕。
+    # _no_data_flow 只在"有数据流证据、但证据不足以说明关键池可用"时才为真：
+    # 空池真帧会带 has_data=True（见 datasource.data_health），不会被误伤。
+    _no_data_flow = (health is not None and "has_data" in health
+                     and not health.get("has_data")
+                     and not (n_zt or n_dt or n_zb))
+    data_ready = not _deg and not _no_data_flow
+    not_ready_reason = ""
+    data_note = ""
+    if not data_ready:
+        _labs = [str(d.get("label") or d.get("key") or "") for d in _deg]
+        _why = "; ".join(str(d.get("note") or "").strip()
+                         for d in _deg if str(d.get("note") or "").strip())
+        if not _labs:
+            _labs = ["涨停池", "跌停池", "炸板池"]
+            _why = "本轮还没有取到任何池子数据"
+        not_ready_reason = (f"{'、'.join(_labs)}接口本次未取到"
+                            + (f"（{_why}）" if _why else "")
+                            + "；没有这三个池子就算不出亏钱面积，"
+                              "情绪状态无从判断 —— 数据没到手前一律按不能出手处理")
+    elif _is_live_health(health):
+        # 只有真降级过、且已经记过账（checked>0）时才提示。checked==0 说明
+        # 本轮还没碰过任何接口（比如直接喂数据的调用点），不是"一切正常"。
+        _h = health or {}
+        if _h.get("checked") and not _h.get("ok"):
+            data_note = (str(_h.get("summary") or "")
+                         + "（只影响可信度，不影响结论）")
+        elif not _deg:
+            # 本轮完全干净 —— 就绪判据到此为止，结论照常给。
+            # 这里只**补一句说明**：上一轮记过降级、本轮又没重新请求（TTL 命中）
+            # 时提一句，免得界面看起来"数据一直是好的"。它只是文案，**不参与
+            # data_ready、不参与 can_trade** —— 见 datasource.health_fallback。
+            try:
+                from core import datasource as _ds
+                _prev = _ds.health_fallback()
+                _pdeg = [d for d in (_prev.get("degraded") or [])
+                         if str(d.get("key") or "").startswith("pool:")]
+                if _pdeg:
+                    data_note = ("（另："
+                                 + "、".join(str(d.get("label") or d.get("key") or "")
+                                             for d in _pdeg)
+                                 + "本轮尚未重新取到，按上一轮口径仅供参考）")
+            except Exception:                                # noqa: BLE001
+                pass
+
     if not s.get("enabled", True):
         return {"stage": "disabled", "label": "情绪模块已关闭", "can_trade": True,
-                "note": "不参与情绪判断", "metrics": {}}
+                "note": "不参与情绪判断", "metrics": {},
+                "data_ready": data_ready,
+                "not_ready_reason": not_ready_reason,
+                "data_note": data_note}
 
     hurt_ratio = s.get("ebb_hurt_ratio", 0.30)
     dt_ratio_th = s.get("ebb_limit_down_ratio", 0.15)
@@ -519,9 +672,11 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
 
     # 原始信号只是"这一瞬间"的读数，盘中会来回跳。交给滞回稳定器过一遍，
     # 确认后的结论才是能照着执行的那个（见 core/stage_stabilizer.py）。
+    # ★ 未就绪时不喂样本：空池算出来的 hurt_area 是 0.0，那是"没数据"不是
+    #   "没风险"，喂进去等于往稳定器里灌假样本（还会拖慢真退潮的确认）。
     st = stab.stabilize(real_date, is_ebb, hurt_area, hurt_ratio,
-                        tmin=tmin, cfg=cfg)
-    ebb_confirmed = st["confirmed"]
+                        tmin=tmin, cfg=cfg) if data_ready else None
+    ebb_confirmed = bool(st and st["confirmed"])
 
     # 最高连板（龙头高度）
     max_boards = max((r.get("boards", 1) for r in limit_up), default=0)
@@ -538,7 +693,11 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
     else:
         stage = "follow"
 
-    can_trade = stage != "ebb" or not s.get("clear_on_ebb", True)
+    # ★ 安全侧不对称：没数据 → 一定不能出手。can_trade 是"要不要动钱"的闸门，
+    #   它的默认值必须是"不动"—— 多等一次刷新只损失一次机会，误放行是拿本金
+    #   去赌一个还没验证过的市场状态。
+    can_trade = (data_ready
+                 and (stage != "ebb" or not s.get("clear_on_ebb", True)))
 
     # 退潮期不是一刀切禁止出手：野哥的规矩是允许 **0.5 成试错仓**，
     # 但只做首板、且亏了就走。这里把"能不能开、能开多大"讲清楚，
@@ -554,7 +713,11 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
     seal = n_zt / (n_zt + n_zb) if (n_zt + n_zb) else 0
 
     # 文案按"稳定后"的状态给，别让页面自相矛盾
-    if stage == "ebb":
+    if not data_ready:
+        # 未就绪时 note 只讲"数据没到手"，不讲任何行情判断 ——
+        # 这里给的话术会被前端直接显示在结论卡上，说错方向等于又骗用户一次。
+        note = not_ready_reason
+    elif stage == "ebb":
         if trial_only:
             note = (f"退潮期：不接力、不重仓；最多 {trading.pos_cn(trial_w)} 试错仓，"
                     f"只做首板，亏了就走")
@@ -588,7 +751,16 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
         "warn": "",
         "trend": "",
         "note": note,
+        # 数据就绪闸门的三个字段（前端据此打叉 / 说明"为什么先别动"）：
+        #   data_ready        关键池数据是否可用（三池任一降级即 False）
+        #   not_ready_reason  未就绪时"缺什么"的中文说明（就绪时为空串）
+        #   data_note         降级但**不阻断结论**时的提示（无则空串）
+        "data_ready": data_ready,
+        "not_ready_reason": not_ready_reason,
+        "data_note": data_note,
         # 稳定器的完整状态：前端据此显示"预警/确认"和已持续多久
+        # （未就绪时为 None —— 这一帧根本没喂样本，没有"稳定状态"可言；
+        #   前端已用 `st||{}` 兜底，不会炸）
         "stability": st,
         "raw_ebb": is_ebb,
         "metrics": {

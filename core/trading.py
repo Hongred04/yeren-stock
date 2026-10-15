@@ -637,6 +637,26 @@ def position_plan(cfg: dict, picks: list[dict], sentiment: dict,
     max_single = p.get("max_single_weight", 0.60)
     hold_before = p.get("hold_before_boards", 5)
 
+    # ★ 数据未就绪闸门（v1.38.6）：没数据时**给不出任何仓位**。
+    #   必须读 data_ready 而不是只看 stage —— stage="unknown" 分不出
+    #   「接口没取到」和「今天真的没有涨停」这两件事（前者是暂态、后者是市场
+    #   事实），只看 stage 就会在冷启动时按"无信号"给出 Day1 平铺链：
+    #   strong_w = min(max_single, 1-cash/2) = 0.6 → 目标总仓位 60%。
+    #   这正是用户看到的「先喊可以出手」在仓位卡上的那一半。
+    #   放在退潮分支**之前**：未就绪时连"退潮试错仓"都不给 —— 试错仓的规矩
+    #   是"只做首板、亏了就走"，而没数据时连首板名单本身都是残缺的。
+    if not sentiment.get("data_ready", True):
+        return {
+            "chain": [{"stage": "数据未就绪", "action": "暂不给仓位建议",
+                       "weight": 0.0, "total": 0.0,
+                       "note": "关键池数据没到手，仓位链按空仓处理"}],
+            "target_total": 0.0,
+            "chain_stage": "not_ready",
+            "note": (sentiment.get("not_ready_reason")
+                     or "关键数据（涨停/跌停/炸板池）本次未取到，"
+                        "情绪状态无法判断 —— 先空仓，等数据齐了再谈仓位"),
+        }
+
     # 退潮期 → 默认空仓；但允许一笔 0.5 成试错仓（野哥的规矩）
     if sentiment.get("stage") == "ebb":
         tw = p.get("ebb_trial_weight", sentiment.get("ebb_trial_weight", 0.05))

@@ -258,10 +258,21 @@ def stabilize(real_date: str, raw_ebb: bool, hurt_area: float,
         }
 
 
-def peek(real_date: str) -> dict:
-    """只读当前稳定结论（不喂新样本）—— 让 E1 与 M3 保持同一口径。"""
+def peek(real_date: str, ready: bool = True) -> dict:
+    """只读当前稳定结论（不喂新样本）—— 让 E1 与 M3 保持同一口径。
+
+    ★ 数据未就绪时必须返回 confirmed=False：`_load()` 读的是**按自然日持久化
+    的磁盘文件**（data/stage_state.json），换日自动归零但**同一交易日跨进程
+    重启不丢**。冷启动那一刻三池还没抓到，文件里却可能已经躺着当天早些时候
+    确认过的退潮 —— 闸门若不在这里把结论按住，"没数据"就会被读成"确认退潮"，
+    用户看到的还是那个顽固 bug（首屏先喊「可以出手」）。未就绪时按上一轮真实
+    结论会读出「确认退潮」，方向**偏保守**，不会造成误放行。
+    """
     with _lock:
         st = _load(real_date)
+    if not ready:
+        return {"confirmed": False, "state": "calm",
+                "hurt_area": st.get("hurt_area", 0.0), "note": st.get("note", "")}
     return {"confirmed": bool(st.get("confirmed")),
             "state": st.get("state", "calm"),
             "hurt_area": st.get("hurt_area", 0.0),

@@ -65,10 +65,15 @@ def has_cached() -> bool:
 
 
 def get_cached() -> dict | None:
-    """直接取当前结果缓存，不触发计算。"""
+    """直接取当前结果缓存，不触发计算。
+
+    ★ 这里就是「实时」路径的定义：TTL（3 分钟）内的内存缓存是**刚算完的**，
+      所以贴 data_source="live" —— 时效门对它不适用（它连 TTL 都出不去，更不
+      可能跨交易日）。来源标记在这一层统一贴，消费方（server / 前端）只读不管。
+    """
     with _lock:
         if _result_cache and (time.time() - _result_ts) < RESULT_TTL:
-            return _result_cache
+            return tag_source(_result_cache, "live")
     return None
 
 
@@ -102,8 +107,72 @@ def save_disk_report(report: dict) -> None:
 _disk_memo: tuple | None = None      # (mtime, report)，按文件 mtime 记忆
 
 
+_WAIT_SENTIMENT = {
+    "stage": "unknown",
+    "label": "等待今日数据",
+    "can_trade": False,
+    "data_ready": False,
+    "trial_only": True,
+    "raw_ebb": False,
+    "signals": [],
+    "metrics": {},
+    "note": "首屏用的是缓存，但它的数据日期不是当日，不构成今日结论。",
+}
+
+
+def _suppress_sentiment(rep: dict) -> dict:
+    """把过期缓存里的结论压成**就绪态占位**，原件挪进 `_sent_kept` 备查。
+
+    顶层既有字段（meta / data_health / picks / position / volume…）一个不删，
+    只动 `sentiment` —— 那是前端唯一真正照着下单的字。隔夜结论留在 `_sent_kept`
+    里不是为了再渲染，而是排查时能看出"拦掉的是哪一份"。
+    """
+    out = dict(rep)
+    sent = rep.get("sentiment")
+    if isinstance(sent, dict):
+        out["_sent_kept"] = sent
+    ph = dict(_WAIT_SENTIMENT)
+    ph["note"] = (f"缓存数据日期 {cache_data_date(rep) or '（缺失）'} "
+                  f"≠ 当日交易日 {today_trade_date() or '（未知）'}，"
+                  "不构成今日结论 —— 正在后台刷新，稍候自动替换。")
+    out["sentiment"] = ph
+    out["_sent_suppressed"] = True
+    out["_sent_suppressed_for"] = cache_data_date(rep)
+    return out
+
+
+def _unsuppress_sentiment(rep: dict) -> dict:
+    """把**新鲜**缓存上可能残留的抑制占位还原掉（见 _suppress_sentiment）。
+
+    内存缓存键控在文件 mtime 上，文件被重写成同日的新报告后 mtime 变了、必然
+    重解析；这里是第二道保险：新鲜就一定给结论，不留占位。
+    """
+    if rep.get("_sent_suppressed"):
+        out = dict(rep)
+        out.pop("_sent_suppressed", None)
+        out.pop("_sent_suppressed_for", None)
+        if not out.get("sentiment") and isinstance(rep.get("_sent_kept"), dict):
+            out["sentiment"] = rep["_sent_kept"]
+        out.pop("_sent_kept", None)
+        return out
+    return rep
+
+
 def get_disk_report() -> dict | None:
-    """读上次落盘的结果（标 stale=true 供前端识别）。没有/损坏返回 None。
+    """读上次落盘的结果。没有/损坏返回 None。
+
+    ★ 时效门在**这一层**收口（不再是由 server 各分支各自记得判）：
+      · 新鲜（meta.date == 当日交易日）→ 照常返回报告 + data_source="disk"
+        + data_ts（那份数据自己的时间戳），**不标 stale**；
+      · 过期（隔夜/跨日，或日期取不到）→ 顶层既有字段一个不删地保留，但
+        `sentiment` 被换成**就绪态占位**（can_trade=False、label="等待今日数据"），
+        并标 stale=True。隔夜那份结论**绝不**当首屏结论端出去 —— 昨日高潮今天
+        照渲染正是用户报的「数值偏热可以出售」。
+      为什么是"替换 sentiment"而不是"保留 + 加个 suppressed 标记"：消费方很多
+      （/api/result、/api/live 的两条回退、/api/report、_portfolio_view…），
+      软标记要靠每个消费方自觉遵守，漏一处就是漏洞；而 sentiment.can_trade
+      是**前端唯一真正照着下单的字**，把它压成就绪态，漏判的代价从"显示错的
+      结论"降级为"多等一下"。硬安全侧。
 
     按文件 mtime 记忆：这份 JSON 有两百多 KB，而 `/api/live`（每分钟一次）和
     `/api/result` 都会走这里 —— 不能每次都重新解析。
@@ -127,8 +196,15 @@ def get_disk_report() -> dict | None:
         if not isinstance(rep, dict) or not rep.get("meta"):
             return None
         rep = dict(rep)
-        rep["stale"] = True
         rep["stale_ts"] = obj.get("ts")
+        if cache_is_fresh(rep):
+            rep = _unsuppress_sentiment(rep)
+            rep.pop("stale", None)
+            rep = tag_source(rep, "disk")
+        else:
+            rep = _suppress_sentiment(rep)
+            rep["stale"] = True
+            rep = tag_source(rep, "disk")
         _disk_memo = (mt, rep)
         return rep
     except Exception:
@@ -139,6 +215,93 @@ def invalidate():
     """使结果缓存失效。"""
     global _result_ts
     _result_ts = 0
+
+
+# ---------------------------------------------------------------- 缓存时效门
+# 用户口径（本轮敲定）：首屏允许用上次缓存照常显示结论，但
+#   ① 必须带「缓存」来源标记 + 时间戳；
+#   ② **仅同一交易日**可用 —— 隔夜/跨日缓存不得渲染结论。
+# 为什么②是硬要求：收盘后情绪阶段、涨停家数、候选名单全都停在昨天的市场状态上，
+# 拿它当"现在的结论"端出去，正是用户最初报的那类"没数据却说可以出手"的另一种形态。
+
+def cache_data_date(rep: dict | None) -> str:
+    """缓存/报告自带的数据日期（yyyyMMdd）。取 meta.date —— 那是**这份数据自己
+    陈述的交易日**（pipeline 落报告时写的 real_date = ds.pool_qdate() or 请求日）。
+
+    不取 meta.ts / 文件 ts：那是"算完的时刻"，跨零点重扫会与数据日期脱节。
+    """
+    m = (rep or {}).get("meta") or {}
+    return str(m.get("date") or "").strip()
+
+
+def cache_ts(rep: dict | None) -> float:
+    """这份数据自己的时间戳（epoch 秒），供前端标注「缓存于 xx:xx」。
+
+    优先 meta.ts（报告算完的时刻），回退磁盘外层 ts（get_disk_report 存在
+    stale_ts）。**不是**响应时间。
+    """
+    m = (rep or {}).get("meta") or {}
+    for v in (m.get("ts"), (rep or {}).get("stale_ts")):
+        try:
+            if v:
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def today_trade_date() -> str:
+    """当日交易日（yyyyMMdd）—— 时效门的比较基准。
+
+    口径：datasource.last_trade_date() 优先（它读涨停池接口自报的 qdate，
+    东财池接口忽略 date 入参、始终返回最新交易日，所以这是"市场认可的最新
+    交易日"）；它取不到时退回本机最近工作日。
+
+    ★ 为什么不用 pool_qdate()：它只回读 **已缓存** 的 qdate（_pool_qdate["ZT"]），
+    新进程/还没调过池接口时是空串。时效门在冷启动首屏就会被调用，用它会得到
+    ""，与任何 meta.date 都不等 → 把**当日**缓存误判成隔夜、白白丢弃可用缓存。
+    last_trade_date() 会真的探一次接口拿权威值，且自带 1800 秒缓存，不会反复请求。
+    """
+    try:
+        d = ds.last_trade_date()
+        if d:
+            return str(d)
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        from datetime import timedelta
+        x = datetime.now()
+        while x.weekday() >= 5:
+            x -= timedelta(days=1)
+        return x.strftime("%Y%m%d")
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
+def cache_is_fresh(rep: dict | None) -> bool:
+    """这份缓存/报告是不是**本交易日**的（时效门）。
+
+    判据：它自己陈述的数据日期 == 当日交易日。任一取不到 → 判**不新鲜**（保守侧：
+    宁可让界面等今日数据，也不能把隔夜结论当今天端出去）。
+    盘后到次日开盘前，last_trade_date() 仍返回刚收盘的交易日，恰好等于当日报告的
+    meta.date —— 同一交易日的晚间缓存照样可用，不会误伤。
+    """
+    d = cache_data_date(rep)
+    if not d:
+        return False
+    return d == today_trade_date()
+
+
+def tag_source(rep: dict | None, source: str) -> dict:
+    """给要返回的缓存/磁盘报告贴来源标记（新增字段，不动任何既有字段）。
+
+    data_source：cache（内存，3 分钟 TTL 内）/ disk（落盘的上次报告）/ live（实时）。
+    data_ts：这份数据自己的时间戳（不是响应时间），前端据此渲染「缓存」角标。
+    """
+    out = dict(rep or {})
+    out["data_source"] = source
+    out["data_ts"] = cache_ts(rep)
+    return out
 
 
 # ---------------------------------------------------------------- 单只股票详情
@@ -218,7 +381,26 @@ def stock_detail(code: str) -> dict:
     sess = trading.market_session()
     preopen = sess["phase"] in ("pre_open", "auction", "rest")
     cached = get_cached() or {}
-    sentiment = cached.get("sentiment") or {"can_trade": True}
+    sentiment = cached.get("sentiment")
+    if not sentiment:
+        # 还没有可复用的缓存（进程刚起、或缓存还没写出来）：**不能默认
+        # {"can_trade": True}** —— 那是同一类"没数据就说可以出手"的漏洞，
+        # 只不过换到了个股详情这条路上。就绪信息由 datasource 出（本轮记账 +
+        # 上一轮兜底），拿不出结论时按未就绪处理。个股详情里正真要用到情绪的
+        # 只有下面一个 can_trade，所以这里只补这一个字段，字段形状与
+        # evaluate_sentiment 保持一致。
+        try:
+            _h = ds.health_best()
+        except Exception:                                   # noqa: BLE001
+            _h = {}
+        _deg = [d for d in (_h.get("degraded") or [])
+                if str(d.get("key") or "").startswith("pool:")]
+        sentiment = {"can_trade": not _deg, "data_ready": not _deg,
+                     "not_ready_reason": (
+                         "、".join(str(d.get("label") or d.get("key") or "")
+                                   for d in _deg) + "接口本次未取到，无法判断情绪"
+                         if _deg else ""),
+                     "data_note": ""}
     volume = cached.get("volume") or {"mode": "unknown"}
 
     p = engine.score_one(cfg, code, snap, bars, zt, preopen=preopen)
@@ -451,9 +633,15 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 final=sess["phase"] in ("just_closed", "after_close", "rest"))
             if sess["phase"] in ("morning", "noon", "afternoon", "tail"):
                 ds.save_intraday_amount(real_date, sess.get("tmin", 0), amt_yi)
+        # 数据健康度：**必须在算情绪之前取** —— evaluate_sentiment 就绪闸门
+        # 要拿它判"三池这一轮有没有取到"（见 core/engine.py 的说明）。此刻
+        # 三池接口刚刚调过，_health 里的记账正是本轮的；之后 report 里再取一次
+        # 也仍是同一份（后续健康项只会更多，不会更少）。
+        _health_now = ds.data_health()
         sentiment = engine.evaluate_sentiment(cfg, zt, dt, zb, zth,
                                               real_date=real_date,
-                                              tmin=sess.get("tmin"))
+                                              tmin=sess.get("tmin"),
+                                              health=_health_now)
 
         # ---- 选股 ----
         codes = ds.load_valid_codes()
@@ -613,7 +801,8 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
 
         # ---- E1 情绪温度计（连板梯队/炸板率/晋级率/涨跌家数） ----
         _prog("构建情绪温度计…", 0, 100)
-        meter = sentiment_meter.build(zt, dt, zb, snaps, real_date, cfg)
+        meter = sentiment_meter.build(zt, dt, zb, snaps, real_date, cfg,
+                                      health=_health_now)
 
         # ---- 盘中实时异动（打开涨停板 = 正在炸板；仅交易时段拉取） ----
         intraday = {}
@@ -811,7 +1000,12 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
             "discipline": m8,
             "limit_up_pool": sorted(zt, key=lambda x: -x.get("boards", 1))[:30],
             # 数据健康度自查：哪些关键数据这轮降级/用的是旧快照（前端如实标注）
-            "data_health": ds.data_health(),
+            "data_health": _health_now,
+            # ★ 就绪闸门结论**提到顶层**：报告里 sentiment.data_ready 只覆盖 M3
+            #   情绪那一块，而"这一份报告到底是不是在缺数据的情况下算出来的"
+            #   是整份报告的性质（候选池、仓位链、纪律检查都建立在同一批数据上）。
+            #   顶层给一个显式字段，前端与自查脚本不必知道它藏在 sentiment 里。
+            "data_ready": bool(sentiment.get("data_ready", True)),
             "config": cfg,
         }
         # 写缓存（持锁，极短）；同时落盘 —— 过期/重启后还能先端出上次结果

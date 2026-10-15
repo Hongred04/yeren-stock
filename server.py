@@ -80,6 +80,46 @@ def _run_analysis(cfg, date, limit, top):
         pipeline.set_progress(None)
 
 
+_WAIT_SENTIMENT_VIEW = {
+    "stage": "unknown",
+    "label": "等待今日数据",
+    "can_trade": False,
+    "data_ready": False,
+    "trial_only": True,
+    "raw_ebb": False,
+    "signals": [],
+    "metrics": {},
+    "note": "今日数据还没到手，暂不给出结论。",
+}
+
+
+def _apply_cached_fallback(view: dict, cached: dict) -> None:
+    """把缓存底稿搬进 /api/live 的返回体 —— **只搬运，不判定**。
+
+    时效门唯一判定点在 pipeline 读取层（get_cached / get_disk_report）：
+      · 新鲜底稿 → sentiment 就是真结论，带 data_source("cache"/"disk") + data_ts；
+      · 跨日底稿 → sentiment 已被换成「等待今日数据」占位、顶层带 stale=True。
+
+    这里绝不再用 cache_is_fresh() 自己判一遍 —— 两套判定迟早走偏，而只要有一处
+    漏判，隔夜结论就会被当成今日结论端出去。也绝不把 sentiment 兜成 `{}`：前端
+    判空仓看的是 `sentiment.data_ready === false`，对 `{}` 会得到 undefined
+    !== false，于是**不打叉**；宁可给就绪态占位，也不能给一个既没结论、又不报警
+    的空白对象。data_source 打在**顶层**（T2 的前端会按顶层读）。
+    """
+    c = cached or {}
+    sent = c.get("sentiment")
+    if not isinstance(sent, dict) or not sent:
+        sent = dict(_WAIT_SENTIMENT_VIEW)
+        if not c:
+            sent["note"] = "还没有任何缓存底稿，等待今日数据。"
+    view["sentiment"] = sent
+    stale = bool(c.get("stale") and sent.get("data_ready") is not True)
+    view["data_source"] = "stale" if stale else (c.get("data_source") or "cache")
+    view["data_ts"] = c.get("data_ts") if c.get("data_ts") else pipeline.cache_ts(c)
+    if stale:
+        view["stale"] = True
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -121,6 +161,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # ------------------------------------------------------------ 路由
+    def _send_stale(self):
+        """缓存已跨日 / 压根没有缓存：明确的"等待今日数据"信号。
+
+        沿用既有的 204 + {"cached": false} 形态（前端已有分支处理它 —— 转后台
+        扫描/显示"扫描中"），并**新增** stale: true 说明这次不是首次使用、而是
+        缓存过期。两者都不渲染任何结论，正是用户要的"数据没到手不说可以出手"。
+        """
+        body = json.dumps({"cached": False, "stale": True},
+                          ensure_ascii=False).encode("utf-8")
+        self.send_response(204)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _live_view(self):
         """轻量实时刷新：只拉"当前关心的那些票"的行情 + 重算情绪阶段。
 
@@ -150,18 +205,38 @@ class Handler(BaseHTTPRequestHandler):
             live_phase = sess["phase"] in ("morning", "noon", "afternoon", "tail")
             if live_phase:
                 real_date = ds.pool_qdate() or cached.get("meta", {}).get("date", "")
+                # ★ 三池取数之前先清一次健康度记账：这条链路不经过 pipeline，
+                #   没人会替它 reset。不清的话 data_health() 拿到的可能是
+                #   几十分钟前那次全量扫描留下的**旧结论**（旧降级会一直挂着，
+                #   数据早到手了却还在打叉），而"本轮到底取没取到"只有清过之后
+                #   的记账才说得清。注意 reset 会把上一轮降级留作兜底（见
+                #   datasource.health_fallback），所以清掉不会让闸门失去判断依据。
+                ds.reset_health()
                 zt = ds.fetch_limit_up_pool()
                 dt = ds.fetch_limit_down_pool()
                 zb = ds.fetch_broken_board_pool()
+                # ★ 实时重算也走同一套就绪闸门：这三个池接口在冷启动/抖动时同样
+                #   会挂，而这条链路的结论**优先级更高** —— 前端每分钟静默刷新
+                #   拿的就是它，一帧"没数据但可以出手"立刻就会被用户看到。
+                #   取在本轮三池调用之后，_health 里的记账正是这一次的。
                 view["sentiment"] = engine.evaluate_sentiment(
                     cfg, zt, dt, zb, [], real_date=real_date,
-                    tmin=sess.get("tmin"))
+                    tmin=sess.get("tmin"), health=ds.data_health())
                 view["live_sentiment"] = True
+                view["data_source"] = "live"
+                view["data_ts"] = time.time()
+                # 实时链路自己也算一份数据健康度：前端据此打叉时不必去翻
+                # 上一次全量报告里的那份（可能已经过期几十分钟了）。
+                view["data_health"] = ds.data_health()
             else:
-                view["sentiment"] = cached.get("sentiment") or {}
+                # 非交易时段：只能回退缓存结论。**时效门不在这里判** —— 它在
+                # pipeline 读取层就判完了（见 pipeline._suppress_sentiment）：
+                # 跨日的底稿拿回来时 sentiment 已经是「等待今日数据」占位、
+                # 顶层带 stale=True/data_source=data_ts。这里只做搬运。
+                _apply_cached_fallback(view, cached)
                 view["live_sentiment"] = False
         except Exception as e:
-            view["sentiment"] = cached.get("sentiment") or {}
+            _apply_cached_fallback(view, cached)
             view["live_sentiment"] = False
             view["sentiment_error"] = f"{type(e).__name__}: {e}"
 
@@ -245,23 +320,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(snap)
             elif path == "/api/result":
                 # 只读缓存，绝不同步计算（否则会锁住 pipeline 导致后台任务卡死）。
-                # 新鲜缓存优先；过期/服务重启后回落到磁盘上的上次结果（标 stale、
-                # 前端显示"上次结果"并自动后台重扫）—— 不再直接甩 204。
-                cached = pipeline.get_cached()
-                if cached:
-                    self._send_json(cached)
+                #
+                # ★ 缓存优先供数（本轮用户口径）：首屏允许用上次缓存**照常显示
+                #   结论**，但必须带来源标记 + 时间戳，且**仅同一交易日**可用 ——
+                #   隔夜缓存的结论是昨天市场的读数，拿它当"现在能不能出手"就是
+                #   另一种形态的"没数据却说可以出手"。
+                #   ★ 时效门**不在这一层判**：get_cached / get_disk_report 回来时
+                #   就已经判完了（见 pipeline._suppress_sentiment）—— 新鲜底稿带
+                #   真结论 + 来源标记，跨日底稿的 sentiment 是「等待今日数据」占位。
+                #   这里只读它的结论，绝不用 cache_is_fresh() 再判一遍（两套判定
+                #   并存迟早走偏，漏一处就是隔夜结论泄漏）。data_source 在顶层。
+                rep = pipeline.get_cached() or pipeline.get_disk_report()
+                if rep:
+                    self._send_json(rep)
                 else:
-                    disk = pipeline.get_disk_report()
-                    if disk:
-                        self._send_json(disk)
-                    else:
-                        # 204: 连磁盘底都没有（真正首次使用）。前端据此转后台任务
-                        body = b'{"cached": false}'
-                        self.send_response(204)
-                        self.send_header("Content-Type", "application/json; charset=utf-8")
-                        self.send_header("Content-Length", str(len(body)))
-                        self.end_headers()
-                        self.wfile.write(body)
+                    # 204: 连磁盘底都没有（真正首次使用）。前端据此转后台任务
+                    self._send_stale()
             elif path == "/api/config":
                 self._send_json({"config": sc.load_config(),
                                  "presets": sc.list_presets()})
