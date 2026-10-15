@@ -325,9 +325,11 @@ def main():
     ok(ds._push2_cheap_skip() is False, "正常状态不跳过 push2")
     ds._push2_trip(60)
     ok(ds._push2_cheap_skip() is True, "家族冷却中 → 判定为注定白打")
-    # 缓存键就是裸的 "breadth"（不是 breadth+日期），清错键会读到上一组测试的缓存
-    ds._cache.pop("breadth", None)
-    ds._cache_ts.pop("breadth", None)
+    # 内存缓存键是 "breadth@<日期>"（2026-10-15 起 date 参与键）；不带 snaps 的
+    # 调用用的是 last_trade_date()。这里按前缀清，避免把日期写死。
+    for _k in [k for k in list(ds._cache) if k.startswith("breadth")]:
+        ds._cache.pop(_k, None)
+        ds._cache_ts.pop(_k, None)
     _before = ds.push2_status()["budget_used"]
     _b = ds.fetch_breadth()
     ok(ds.push2_status()["budget_used"] == _before,
@@ -340,8 +342,9 @@ def main():
     _hit = []
     _orig_p2 = ds._push2_json
     ds._push2_json = lambda p, referer="x": (_hit.append(p) or {})
-    ds._cache.pop("breadth", None)
-    ds._cache_ts.pop("breadth", None)
+    for _k in [k for k in list(ds._cache) if k.startswith("breadth")]:
+        ds._cache.pop(_k, None)
+        ds._cache_ts.pop(_k, None)
     ds.fetch_breadth()
     ok(_hit == [], "★ 冷却中 fetch_breadth 完全没调用 push2（省下 3 秒空等）")
     ds._push2_json = _orig_p2

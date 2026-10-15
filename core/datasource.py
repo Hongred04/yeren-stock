@@ -413,18 +413,26 @@ def _fetch_memo(key: str, date: str, ttl: int, producer, empty, valid=None):
       · ok=False → 传输/解析失败（value 忽略）。
     valid(value)：额外的有效性判定（例如"解析出 0 条且接口没自报交易日"也算失败）。
     empty：连当日历史快照都没有时返回什么（[] / {}）。
+
+    ★ 2026-10-15 修：内存缓存键从裸 key 改成 f"{key}@{date}"。原先只看 key、
+      不看 date，于是 `fetch_breadth(date="20261010")` 之后再取 20261011 会直接
+      命中 1010 那份（producer 根本不执行），**不同交易日返回同一份数** ——
+      历史/回测场景全被当日值顶掉。TTL 是"多久之内不必重取"，不是"哪一天都能
+      共用"，两者的区别就在这里。磁盘侧 _mem_read/_mem_write 本来就按 date 分，
+      只有内存这一层漏了。
     """
     now = time.time()
-    if ttl > 0 and key in _cache and now - _cache_ts.get(key, 0) < ttl:
-        return _cache[key]
+    mk = f"{key}@{date}" if date else key
+    if ttl > 0 and mk in _cache and now - _cache_ts.get(mk, 0) < ttl:
+        return _cache[mk]
     ok, val = False, None
     try:
         ok, val = producer()
     except Exception:
         ok, val = False, None
     if ok and (valid is None or valid(val)):
-        _cache[key] = val
-        _cache_ts[key] = now
+        _cache[mk] = val
+        _cache_ts[mk] = now
         _mem_write(key, date, val)
         _health_set(key, True)
         return val
@@ -433,8 +441,8 @@ def _fetch_memo(key: str, date: str, ttl: int, producer, empty, valid=None):
     if old is not None:
         age = int(now - ots) if ots else 0
         _health_set(key, False, f"接口本次未取到，用的是 {age} 秒前的当日快照", age)
-        _cache[key] = old          # 缓存旧的好数据，而不是空值
-        _cache_ts[key] = now
+        _cache[mk] = old          # 缓存旧的好数据，而不是空值
+        _cache_ts[mk] = now
         return old
     _health_set(key, False, "接口本次未取到，且当日还没有可用快照")
     return empty
@@ -2307,7 +2315,18 @@ def fetch_breadth(date: str = "", ttl: int = 60, snaps: dict | None = None) -> d
 
     ★ 调用方如果能拿到全市场快照（sentiment_meter.build 就有 snaps），
       **优先传 snaps**：那样整条降级链一次都不会走，省下的正是上面那 3 秒。
+
+    ★ 2026-10-15 修（两个错数 bug，都出在缓存键上）：
+      ① 传了 snaps 时用**独立的 memo 键** "breadth:snaps"。原先不管传不传
+         snaps 都写同一个键 "breadth"，于是「用 10 只样本自算出的涨跌家数」
+         会被紧接着的 `fetch_breadth()`（语义是全市场）在 TTL 内直接命中 ——
+         界面上就是把 10/0 当成 2600/2400 显示，差两个数量级。
+         降级链到新浪时 snaps 本身也可能只是部分样本（pipeline 快照失败
+         会退 fetch_snapshots_sina），所以这两者**必须**分开缓存。
+      ② date 传进 _fetch_memo 时要参与内存键（见 _fetch_memo 的 memo_key），
+         否则历史日期查询会被当日值顶掉 —— 回测取 10/10 的数会拿到 10/11 的。
     """
+    snap_key = "breadth:snaps" if snaps else "breadth"
     def producer():
         # ① 自算：数据已在手，不打任何请求
         if snaps:
@@ -2337,7 +2356,8 @@ def fetch_breadth(date: str = "", ttl: int = 60, snaps: dict | None = None) -> d
             return True, fb
         return False, None
 
-    return _fetch_memo("breadth", date or last_trade_date(), ttl, producer, empty={})
+    return _fetch_memo(snap_key, date or last_trade_date(), ttl, producer,
+                       empty={})
 
 
 # ---------------------------------------------------------------- 主力资金流
@@ -2495,6 +2515,30 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
 _THS_GGZJL = ("http://data.10jqka.com.cn/funds/ggzjl/"
               "field/zdf/order/desc/page/{pg}/ajax/1/free/1/")
 
+# ★ 2026-10-15 实测：ggzjl 的 401 会**持续**挡（不是抖动）。同 URL 重试 5 次
+#   全 401、耗时 9.4s，而 q.10jqka.com.cn 的板块路同时段照常（0.7s）——
+#   说明被挡的是 data.10jqka 这个域/路径，不是整站。以前注释里"抖动式 401，
+#   重试就过、实测 20/20 成功"的说法**已经不再成立**（可能被风控升级或封了
+#   我们），所以必须加冷却：否则东财也不通时，每轮扫描都要白等 9 秒。
+_THS_GG_DOWN_UNTIL = 0.0
+_THS_GG_COOLDOWN = 600.0        # 撞到硬 401 就歇 10 分钟再探
+
+
+def _ths_gg_skip() -> bool:
+    """ggzjl 是否在冷却期（刚撞过硬 401）。"""
+    return time.time() < _THS_GG_DOWN_UNTIL
+
+
+def _ths_gg_trip(seconds: float = _THS_GG_COOLDOWN) -> None:
+    global _THS_GG_DOWN_UNTIL
+    _THS_GG_DOWN_UNTIL = max(_THS_GG_DOWN_UNTIL, time.time() + seconds)
+
+
+def _ths_hard_block(exc: Exception) -> bool:
+    """401/403（含 BadStatusLine 里包着的 status=401/403）= 被认出来挡住了。"""
+    s = str(exc)
+    return "status=401" in s or "status=403" in s
+
 
 def _ths_get_retry(url: str, tries: int = 5) -> str:
     """同花顺数据中心 GET —— 401/403 是**抖动式**反爬（同一 URL 重试就过，
@@ -2527,17 +2571,30 @@ def _ths_moneyflow_cell(v: str) -> float | None:
 
 
 def _ths_stock_moneyflow(want: set[str]) -> dict[str, dict]:
-    """同花顺 ggzjl 页全市场翻页 → {code: {main, main_pct, ...}}。
+    """同花顺 ggzjl 页翻页 → {code: {main, main_pct, ...}}。
 
-    每页 50 行 × 105 页；want 通常只有几十~几百只，按涨跌幅序翻页要碰运气，
-    所以**翻满前 20 页**（1000 只，活跃票基本都在）就停 —— 覆盖调用方
-    绝大多数候选；没匹配上的返回空、由上游按"无数据"处理（不猜）。
+    每页 50 行；URL 按**涨跌幅降序**排，所以翻前 20 页 = 1000 只涨幅最高的票，
+    只覆盖调用方候选里"当天活跃"的那部分 —— 跌的/趴着的大票取不到，返回空由
+    上游按"无数据"处理（宁缺不猜）。这是这条降级路**已知的能力边界**，不是 bug；
+    真要全覆盖得换排序字段或翻满 105 页（代价 1 分钟+，不值得）。
+
+    ★ 2026-10-15 修（两处）：
+      ① 加 ggzjl 冷却：硬 401 后 10 分钟内直接返回 {}，不再每轮白等 9.4s。
+      ② 修死代码 `del hit_pg`：原先想「本页一只都没命中就收工」，但那个判断
+         被写成了 `del hit_pg`（只删变量、从不使用），于是只要 want 里有取不到
+         的代码就会**翻满 20 页**。现在真的用它提前收工：连续 2 页零命中就停
+         （按涨幅降序排，越往后越偏离候选池）。
     """
+    if _ths_gg_skip() or not want:
+        return {}
     out: dict[str, dict] = {}
+    empty_pages = 0
     for pg in range(1, 21):
         try:
             html = _ths_get_retry(_THS_GGZJL.format(pg=pg))
-        except Exception:
+        except Exception as exc:          # noqa: BLE001 - 降级链
+            if _ths_hard_block(exc):
+                _ths_gg_trip()            # 硬 401：这条路整体歇一会儿
             if out:
                 break                     # 拿到一部分就够，别硬撞
             return {}                     # 一页都没拿到 = 这条路不通
@@ -2557,7 +2614,9 @@ def _ths_stock_moneyflow(want: set[str]) -> dict[str, dict]:
                         "mid": None, "small": None, "source": "ths"}
         if len(out) >= len(want):
             break
-        del hit_pg
+        empty_pages = 0 if hit_pg else empty_pages + 1
+        if empty_pages >= 2:
+            break                         # 连着两页零命中 → 后面更不可能有
     return out
 
 
@@ -2678,16 +2737,28 @@ def fetch_board_codes(force: bool = False) -> dict[str, str]:
         _write_json(BOARD_LIST_PATH, {"_ts": now, "boards": fresh})
         return fresh
 
-    # ★ 2026-10-14 补：东财号段枚举也失败时，退同花顺清单（140 行业 + 361 概念，
-    #   独立主机）。注意 THS 代码体系与 BK 不通用 —— 只在**拿不到任何东财清单**
-    #   时垫底，且键是板块名（fetch_board_list 按名查就仍然可用）。
+    # ★ 2026-10-14 补：东财号段枚举也失败时，退同花顺清单（90 行业 + 361 概念，
+    #   独立主机）。
+    # ★ 2026-10-15 修（方向搞反 + 代码空间污染）：THS 的 881xxx/30xxxx 与东财
+    #   BKxxxx **不是一套代码**，不能塞进 code→name 这张表里冒充 BK。原实现写的是
+    #   `{v: k for k, v in ths.items()}` —— ths 本身是 {名称: THS代码}，翻过来
+    #   就成了 {THS代码: 名称}，于是：
+    #     · 本函数返回的**方向**和其它分支相反（别人是 {BK: 名}）；
+    #     · fetch_board_list()（:2724 还要再翻一次）于是得到 {881121: 半导体}，
+    #       而它承诺的是 {板块名: 代码} —— 键成了代码；
+    #     · fetch_board_constituents(:3158) 用 `.get(bk_code)` 查名字，永远查不到，
+    #       整块板块成分股静默返回 []；
+    #     · 这份错数据还被写进 data/board_list.json 并保留 7 天。
+    #   现在改成**不污染 BK 表**：THS 清单单独放 "ths_boards"（{名称: THS代码}），
+    #   只有 fetch_board_list() 这个按名查的入口去读它 —— 它要的正好是名称→代码。
     ths = fetch_ths_board_codes()
     if ths:
         _write_json(BOARD_LIST_PATH,
                     {"_ts": now - _BOARD_LIST_TTL + _BOARD_RETRY_AFTER,
-                     "boards": {v: k for k, v in ths.items()},
+                     "boards": boards,              # 保持原有方向，别动
+                     "ths_boards": ths,
                      "note": "ths_degraded"})
-        return {v: k for k, v in ths.items()}
+        return boards
 
     fallback = boards or _seed_boards()
     if fallback:
@@ -2700,16 +2771,35 @@ def fetch_board_codes(force: bool = False) -> dict[str, str]:
 
 
 def fetch_board_list() -> dict[str, str]:
-    """{板块名: BK代码} —— 题材名 → 板块代码的映射表（mainline 用）。"""
-    return {name: bk for bk, name in fetch_board_codes().items() if name}
+    """{板块名: 板块代码} —— 题材名 → 板块代码的映射表（mainline 用）。
+
+    ★ 2026-10-15 修：东财清单拿不到时，这里改读磁盘上的 "ths_boards"
+      （同花顺 {名称: THS代码}）作为**按名查**的兜底。注意它给的代码是
+      881xxx/30xxxx，**不是东财 BK** —— 调用方若要拿去拼东财 secid
+      （fetch_board_kline 之类）会取到空，这是「代码空间不通用」的必然结果，
+      不是本函数能修的；本函数只保证「按板块名能查到东西」这一件事成立。
+    """
+    out = {name: bk for bk, name in fetch_board_codes().items() if name}
+    if out:
+        return out
+    disk = _read_json(BOARD_LIST_PATH)
+    ths = disk.get("ths_boards") or {}
+    if not ths:
+        ths = fetch_ths_board_codes()      # 磁盘没留下（写失败/首启）→ 直接现取
+    return {name: code for name, code in ths.items() if name and code}
 
 
 # ── 同花顺板块（独立主机、独立风控，push2 被掐时的第二条路）──────────────
 # q.10jqka.com.cn 是普通 HTML 页面（gbk 编码），401 只拦 ajax 翻页，
 # 清单页与首页表格直接 GET 就有 —— 实测 2026-10-14：
-#   · /thshy/            行业板块页：cate_items 清单 140 个 + 行情表 50 行
-#                        （板块/涨跌幅/成交额/净流入(亿)/领涨股，净流入排序）
-#   · /thshy/index/2/    行情表翻页（page_info 共 2 页，行业 140 全覆盖）
+#   · /thshy/            行业板块页：cate_items 清单 90 个 + 行情表 50 行
+#                        （板块/涨跌幅/成交额/净流入(亿)/领涨股，默认涨跌幅排序）
+#   · /thshy/index/field/zjjlr/order/desc/page/N/  行情表翻页（N=1,2 共 90 行，
+#                        第 3 页起空表）。**必须带 field 路径才有正确排序**：
+#                        光取首页是 site 默认的涨跌幅序，不是净流入序。
+#                        注：/thshy/index/2/ 这种「页码直接拼在 index 后」的形式
+#                        服务端不认，永远返回第 1 页（page_info 仍是 1/2），
+#                        曾据此误以为「两页共 100 行」——实为同一页取了两遍。
 #   · /gn/               概念板块页：cate_items 清单 361 个（行情表是资讯视图，
 #                        没有概念级资金流 —— 概念资金流不接 THS，仍走东财链）
 # 价值：东财 push2 家族被封时，板块**清单**与**行业资金流**仍有一条完全
@@ -2717,6 +2807,11 @@ def fetch_board_list() -> dict[str, str]:
 _THS_REF = "http://q.10jqka.com.cn/"
 _THS_HY_URL = "http://q.10jqka.com.cn/thshy/"
 _THS_GN_URL = "http://q.10jqka.com.cn/gn/"
+# 行业行情表翻页：field/zjjlr = 按「净流入(亿元)」降序（表头 <a field="zjjlr">）。
+# 不带 field 的首页是站点默认的涨跌幅序，拿它当净流入榜是错的。
+# 「/thshy/index/2/」这种页码形式服务端不认（恒返回第 1 页），勿再用。
+_THS_HY_PAGE = _THS_HY_URL + "index/field/zjjlr/order/desc/page/%d/"
+_THS_HY_PAGE_AJAX = _THS_HY_PAGE + "ajax/1/"
 
 
 def _ths_html(url: str) -> str:
@@ -2737,7 +2832,7 @@ def _ths_code_name(html: str, kind: str) -> dict[str, str]:
 
 
 def fetch_ths_board_codes() -> dict[str, str]:
-    """同花顺板块清单 → {名称: THS代码}（行业 140 + 概念 361）。
+    """同花顺板块清单 → {名称: THS代码}（行业 90 + 概念 361）。
 
     与东财 BK 号段是完全独立的命名体系，键是**板块名**——调用方按名
     对齐。任一清单失败就整体返回 {}，调用方退回东财链（宁缺不猜）。
@@ -2774,7 +2869,7 @@ def _ths_flow_row(cells: list[str]) -> dict | None:
         amount = float(cells[4]) * 1e8  # 亿元 → 元
     except (ValueError, TypeError):
         amount = None
-    return {"code": "",              # THS 代码与 BK 不通用，留空如实标注
+    return {"code": "",              # 行情表无代码列，由 fetch_ths_board_moneyflow 按名补 881xxx
             "name": cells[1].strip(),
             "pct": pct,
             "main": round(net * 1e8) if net is not None else None,  # 元
@@ -2785,36 +2880,72 @@ def _ths_flow_row(cells: list[str]) -> dict | None:
             "source": "ths"}
 
 
-def fetch_ths_board_moneyflow(limit: int = 30) -> list[dict]:
-    """同花顺**行业**板块资金流（净流入排序，页 1+2 共 100 行 → 前 limit）。
+def _ths_hy_page_rows(page: int) -> list[dict]:
+    """行业行情表第 page 页（field/zjjlr 净流入降序）→ 行列表。
 
-    只有行业没有概念（THS 概念页是资讯视图）；main 单位元、口径是 THS 的
-    「净流入」，与东财 f62 主力净额**相近但不是同一个数** —— source=ths
-    让界面如实标注。两页都失败返回 []，由调用方继续往新浪降。
+    两种 URL 形式实测返回同一张表（ajax/1 后缀只是页面 JS 内部标注），
+    先试普通形式、失败再用 ajax 形式重试一次；两者都失败抛异常给调用方降级。
+    实测：page 1 = 50 行、page 2 = 40 行、page 3 起 0 行（共 90 个行业）。
     """
-    rows: list[dict] = []
-    for url in (_THS_HY_URL, _THS_HY_URL + "index/2/"):
+    last: Exception | None = None
+    for url in (_THS_HY_PAGE % page, _THS_HY_PAGE_AJAX % page):
         try:
             html = _ths_html(url)
-        except Exception:
+        except Exception as exc:      # noqa: BLE001 - 降级链：换形式再试
+            last = exc
             continue
+        rows = []
         for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
             cells = [re.sub(r"<[^>]+>", "", c).strip()
                      for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
             row = _ths_flow_row(cells)
             if row:
                 rows.append(row)
+        return rows
+    if last is not None:
+        raise last
+    return []
+
+
+def fetch_ths_board_moneyflow(limit: int = 30) -> list[dict]:
+    """同花顺**行业**板块资金流（净流入降序，翻页取满 90 个行业 → 前 limit）。
+
+    只有行业没有概念（THS 概念页是资讯视图）；main 单位元、口径是 THS 的
+    「净流入」，与东财 f62 主力净额**相近但不是同一个数** —— source=ths
+    让界面如实标注。翻页取到空页或够 limit 就停；首页就失败返回 []，
+    由调用方继续往新浪降（中间页失败则保留已取到的行，宁少不空）。
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+    try:
+        codes = fetch_ths_board_codes()          # {名称: 881xxx}，命中率实测 90/90
+    except Exception:
+        codes = {}
+    for page in range(1, 6):                     # 实测 2 页 90 行，留余量
+        try:
+            got = _ths_hy_page_rows(page)
+        except Exception:
+            if page == 1:
+                return []                        # 首页都不通 → 让调用方降级
+            break                                # 中途断：保留前面已取到的
+        if not got:
+            break                                # 空页 = 到底了
+        fresh = 0
+        for r in got:
+            if r["name"] in seen:
+                continue                          # 同名去重（翻页不重复，保险）
+            seen.add(r["name"])
+            # 补上真实 THS 板块代码（行情表本身不带代码列）：名字完全对齐，
+            # 补不上就留空 —— 下游 _bk() 不读 code，补它是为了这一行自洽
+            r["code"] = codes.get(r["name"], "")
+            rows.append(r)
+            fresh += 1
+        if fresh == 0 and page > 1:
+            break                                # 整页都是旧行 → 服务端没真翻页
         if len(rows) >= limit:
             break
-    # 同名板块两页不会重复（按净流入降序），但保险起见按名去重
-    seen: set[str] = set()
-    out = []
-    for r in rows:
-        if r["name"] in seen:
-            continue
-        seen.add(r["name"])
-        out.append(r)
-    out.sort(key=lambda r: -(r["main"] if r["main"] is not None else -1e18))
+    out = sorted(rows, key=lambda r: -(r["main"] if r["main"] is not None
+                                       else -1e18))
     return out[:limit]
 
 

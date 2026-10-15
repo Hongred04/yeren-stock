@@ -80,7 +80,8 @@ def main():
     ok("跌停池" in h["summary"], f"summary 指名道姓：{h['summary']}")
     ok(h["degraded"][0].get("stale_seconds") is not None, "带「多久之前」的快照时长")
     # 关键：缓存里存的必须是好数据 —— 否则下一次 ttl 内又拿到空
-    ok(ds._cache.get("pool:DT") == [{"code": "sh600000"}],
+    # 内存键含日期（2026-10-15 起 "pool:DT@20261012"），从这里取。
+    ok(ds._cache.get("pool:DT@20261012") == [{"code": "sh600000"}],
        "缓存里是好数据（不是空值）")
 
     print("\n[3] 失败且当日没有历史快照 → 返回空，但 health 说明原因")

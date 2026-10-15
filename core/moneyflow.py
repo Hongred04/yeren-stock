@@ -368,8 +368,16 @@ def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,
         if not boards_in:
             summary += "　|　东财板块接口受限（冷却中），板块资金排行暂缺"
     elif boards_in and has_main:
-        top = "、".join(f"{b['name']}({b['main']:+.0f}亿)" for b in boards_in[:3])
-        summary = f"板块主力净流入居前：{top}"
+        # ★ 2026-10-15 修：THS 降级行的 main 可能是 None（净流入格是 '--' 时
+        #   datasource._ths_flow_row 返回 None），f"{None:+.0f}" 直接
+        #   TypeError 炸掉整个资金面板。与下面 :251「板块吸金」那处保持
+        #   同一种写法：先过滤掉没有净额的行，一条都没就退回下一档。
+        top = "、".join(f"{b['name']}({b['main']:+.0f}亿)"
+                        for b in boards_in[:3] if b.get("main") is not None)
+        if top:
+            summary = f"板块主力净流入居前：{top}"
+        else:
+            summary = "板块主力净额暂缺（板块榜取到了，但净流入格没解析出来）"
     elif boards_in:
         top = "、".join(f"{b['name']}({b['pct']:+.1f}%/{b['amount']:.0f}亿)"
                         for b in boards_in[:3] if b.get("amount") is not None) or "无"

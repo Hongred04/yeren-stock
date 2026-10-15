@@ -2174,8 +2174,8 @@ function renderDetail(p){
     <div class="dp-sec">
       <h4>资金</h4>
       <div class="kv">
-        ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main>=0?'up':'dn'}">${p.moneyflow.main>=0?'+':''}${f2(p.moneyflow.main)}亿</div></div>
-        <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct>=0?'up':'dn'}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
+        ${p.moneyflow?`<div><div class="k">主力净额</div><div class="v ${p.moneyflow.main==null?'':(p.moneyflow.main>=0?'up':'dn')}">${p.moneyflow.main==null?'—':(p.moneyflow.main>=0?'+':'')+f2(p.moneyflow.main)+'亿'}</div></div>
+        <div><div class="k">主力净占比</div><div class="v ${p.moneyflow.main_pct==null?'':(p.moneyflow.main_pct>=0?'up':'dn')}">${f2(p.moneyflow.main_pct)}%</div></div>`:''}
         ${p.hot_rank?`<div><div class="k">同花顺人气</div><div class="v" style="color:var(--org)">第 ${p.hot_rank} 名${
           p.hot_tag?` · ${esc(p.hot_tag)}`:''}</div></div>`:''}
         ${(!p.moneyflow&&!p.hot_rank)?'<div class="fl" style="font-size:12.5px">暂无资金与人气数据</div>':''}
