@@ -15,42 +15,43 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from . import datasource as ds
 from . import regime
 from . import trading
 
 
-def _next_trade_date(real_date: str, holidays=None) -> tuple[str, bool]:
+def _next_trade_date(real_date: str, cfg=None) -> tuple[str, bool]:
     """real_date（YYYYMMDD）之后的下一个交易日，返回 ('MM-DD', 是否精确)。
 
     ★ v1.39.0：原来只做"工作日 +1 跳周末"，**不看休市日历**，节前会把"明日"
     写成实际休市的日期（10-01 会写成 10-02），整张「明日判断」卡的日期是错的。
 
+    休市日历**自动获取**：core/datasource.fetch_market_holidays 直接解析
+    上交所官网《年度休市安排》页面（带 24h 缓存）。**不需要任何人工维护的表**
+    —— 早先的版本在 strategy_config 里放了一张手填的 market_holidays，
+    已废弃（人会忘记补，而这类数据过期后是**静默出错**）。
+
     第二个返回值是**精确性标志**，供调用方决定措辞：
-      · True  —— 算出来的日期确定是交易日（跳过了周末 + 命中了休市表，
-                 或本机日期本就远离任何已知假期）；
-      · False —— 只跳了周末，休市表里没有覆盖到这个年份，日期可能因法定
-                 节假日而顺延，文案必须保留"以交易所公告为准"的免责。
+      · True  —— 算出来的日期确定是交易日（拿到了休市日历，或指数K线里有）；
+      · False —— 日历取不到，退回工作日估算，文案必须保留"以交易所公告为准"。
     绝不猜：宁可标 False 让界面说"估算"，也不能让用户以为日期是准的。
     """
     try:
-        d = datetime.strptime(real_date, "%Y%m%d")
+        r = ds.trade_calendar_hint(str(real_date))
+    except Exception:
+        r = {}
+    nxt = str((r or {}).get("next") or "")
+    if len(nxt) == 8:
+        return f"{nxt[4:6]}-{nxt[6:8]}", bool((r or {}).get("exact"))
+    # 兜底：工作日 +1 跳周末（与旧行为一致，但标不精确）
+    try:
+        d = datetime.strptime(str(real_date), "%Y%m%d")
     except (ValueError, TypeError):
         d = datetime.now()
-    # 休市表：接受 {"20261001", ...} 或 [20261001, ...] 两种写法
-    hs: set[str] = set()
-    for x in (holidays or ()):
-        s = str(x).strip()
-        if s:
-            hs.add(s)
     d += timedelta(days=1)
-    for _ in range(30):                    # 上限 30 天，防脏数据死循环
-        ds_ = d.strftime("%Y%m%d")
-        if d.weekday() < 5 and ds_ not in hs:
-            break
+    while d.weekday() >= 5:
         d += timedelta(days=1)
-    # 表里**没有任何**这一年附近的条目 → 无法确认，标 False（保留免责）
-    exact = bool(hs) and any(s[:4] >= d.strftime("%Y")[:4] for s in hs)
-    return d.strftime("%m-%d"), exact
+    return d.strftime("%m-%d"), False
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -274,8 +275,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
                           "then": "按新周期题材对待：优先进首板（试错仓），确认后再加仓"})
 
     # 下一交易日：能确认就用准确措辞，不能确认就保留"估算 + 免责"（v1.39.0）
-    _holidays = (cfg.get("M7_earnings") or {}).get("market_holidays") or []
-    next_date, next_exact = _next_trade_date(real_date, _holidays)
+    next_date, next_exact = _next_trade_date(real_date)
     tail = ("明日为交易日（已按休市日历核对）。"
             "以上是推演不是预测 —— 开盘后以量能和情绪的实际读数修正。"
             if next_exact else

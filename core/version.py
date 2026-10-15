@@ -1449,25 +1449,56 @@
            热度，不是买点建议"，消除同屏误读。
 
         ⑤ 【"明日"日期不查休市日历】core/outlook.py._next_trade_date 原来只做
-           "工作日 +1 跳周末"，节前会把明日写成实际休市日。修：签名改为
-           _next_trade_date(real_date, holidays=None) -> (date, exact)，
-           holidays 读 cfg["M7_earnings"]["market_holidays"]（strategy_config
-           新增该键，默认空表）；返回值新增 date_exact（表未覆盖该年份 → False，
-           文案保留"节假日顺延以交易所公告为准"免责；覆盖到 → True，文案改为
-           "明日为交易日（已按休市日历核对）"）。index.html 明日卡片对
-           date_exact===false 显示"估算"二字。不调接口：outlook 在渲染路径上。
+           "工作日 +1 跳周末"，节前会把明日写成实际休市日。
+           修：改为 (date, exact) 二元返回，date_exact=False 时界面显示"估算"
+           并保留"节假日顺延以交易所公告为准"免责，True 时显示"已核对"。
+           ★ 休市日历**自动获取**（见本版第（三）条），**不需要人工填表** ——
+           中途曾在 strategy_config 放了一张手填的 market_holidays，已废弃：
+           交易日历过期后是**静默出错**，不该交给人工维护。
 
         ⑥ 【rel_adj 拼接双标点】core/engine.py 剥掉重复档位名后 _tail 可能以
            标点开头，拼出"…降为缩量存量；。"；且 tier3 多句 advice 会被"；"
            挤成一句。修：剥完继续 lstrip 孤立标点，有内容用"。"拼接，
            无内容只留 rel_adj。
 
-        测试：全量 Python 1278 通过 / 0 失败（37 个 test_*.py 全绿）。
+         【三】休市日历自动获取（回答"非要我手动填吗"）
+         早先版本在 strategy_config 放了手填的 market_holidays 并交代
+         "每年 12 月记得补" —— 这不该交给人工维护：交易日历过期后是
+         **静默出错**，节前把"明日"写成休市日，用户按它做隔日计划就落空，
+         而页面上看不出任何异常。
+         两条自动化路线都试过：
+           · 从历史K线外推（有K线即开市，构造性正确）—— **行不通**。
+             指数K线只能说明哪天开过盘，永远推不出哪天将放假；中国节假日
+             跟农历走（春节/端午/中秋逐年漂移）。实测该外推在春节/劳动/
+             清明/端午**全部给出错误日期且自称 exact=True**，比不做还危险。
+           · 解析交易所官网 —— 可行且正确。上交所《年度休市安排》页面公开
+             稳定，文本形如「春节：2月15日（星期日）至2月23日（星期一）
+             休市」，按段落正则展开成工作日列表即可。深/北交所与上交所一致。
+         实现：core/datasource.py
+           · fetch_market_holidays(year, ttl=86400)：抓
+             https://www.sse.com.cn/disclosure/dealinstruc/closed/ 并解析，
+             优先走项目自己的 _get（keep-alive + 自动重试），失败退 urllib；
+             24h 缓存（实测首次 0.47s，之后 ~0ms）。校验：解析出的 19 个
+             工作日休市日与上交所公告逐日一致。
+           · fetch_trade_dates(n)：从指数K线反推**已发生**的交易日。
+           · trade_calendar_hint(date, n)：①自动日历 ②指数K线 ③工作日估算
+             三级取"下一个交易日"+可信度。
+         core/outlook.py._next_trade_date 改调 trade_calendar_hint；
+         strategy_config 里手填的 market_holidays 已删除。
+         两个诚实的边界（均已覆盖测试）：
+           · 跨年：12-31 看次日时次年安排尚未公布 → exact=False，**不猜** 01-01；
+           · 断网：日历与K线都取不到 → 退回工作日估算并标 exact=False，
+             界面显示"估算"。
+         新增 tests/test_market_calendar.py（14 项）：抓取结果与上交所公告
+         逐日比对、周末不得混入、六个节前边界全部跳对、周五跳周末、
+         跨年不得乱猜、静态表不得复活、断网降级必须诚实。
+
+        测试：全量 Python 1292 通过 / 0 失败（38 个 test_*.py 全绿）。
         重点覆盖：tests/test_sentiment_meter.py 16 通过（既有标定 4/20/22
         因涨跌比正常、惩罚为 0，全部保留）、tests/test_outlook_sowing.py 12
         通过、tests/test_volume_mode.py 36 通过、tests/test_regime.py 32 通过、
         tests/test_known_defects.py 59 通过、tests/test_data_sources.py 76 通过
-        （已更新到就绪闸门的新契约）。
+        （已更新到就绪闸门的新契约）、tests/test_market_calendar.py 14 通过。
         （tests/test_known_defects.js 与 test_frontend_robustness.js 需要
          jsdom，本机未安装，无法运行 —— 环境缺口，非本次改动引入。）
 """

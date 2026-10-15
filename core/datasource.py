@@ -1083,6 +1083,184 @@ def fetch_snapshots_sina(codes: list[str], batch: int = SINA_BATCH,
     return result
 
 
+def fetch_market_holidays(year: int | None = None, ttl: int = 86400) -> list[str]:
+    """**自动获取**交易所休市日历，返回该年 ['20260101', ...]（只含工作日）。
+
+    ★ 为什么不写死表、也不从K线外推（v1.39.0）：两条路都试过，都不对 ——
+      · 写死表：每年 12 月才公布次年安排，过期后**静默出错**，还得靠人记得补；
+      · 从历史K线外推：试过了，**行不通**。指数K线只能告诉你"哪天开过盘"，
+        永远推不出"哪天将放假"——中国节假日跟农历走（春节/端午/中秋逐年
+        漂移），同日期的历史规律完全靠不住。实测外推在春节/劳动/清明/端午
+        全部给出**错误日期且自称 exact=True**，比不做还危险。
+
+    正解：上交所官网《年度休市安排》页面是公开、稳定、可解析的，直接读它。
+    https://www.sse.com.cn/disclosure/dealinstruc/closed/
+    页面文本形如「春节：2月15日（星期日）至2月23日（星期一）休市」，
+    按段落正则解析，把区间内**工作日**展开成列表（周末本就不开市，不收）。
+    深交所/北交所与上交所安排一致，读一处即可。
+
+    带 24h 缓存（cached()）：交易日历一年才变一次，一天最多拉一次。
+    失败返回 []（调用方退回"工作日估算 + 免责"，绝不猜）。
+    """
+    y = int(year or datetime.now().year)
+
+    def producer():
+        import re as _re
+        from datetime import date as _date, timedelta as _td
+        url = "https://www.sse.com.cn/disclosure/dealinstruc/closed/"
+        raw = ""
+        # 优先走项目自己的 http（keep-alive 连接池，自动重试），失败退回 urllib
+        try:
+            b = _get(url, timeout=15, referer="https://www.sse.com.cn/")
+            raw = b.decode("utf-8", errors="ignore") if isinstance(b, bytes) else (b or "")
+        except Exception:
+            raw = ""
+        if not raw:
+            import urllib.request
+            import ssl as _ssl
+            headers = {
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0 Safari/537.36"),
+                "Referer": "https://www.sse.com.cn/",
+            }
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as f:
+                raw = f.read().decode("utf-8", "ignore")
+        if not raw:
+            return []
+
+        # 定位 "<年>年休市安排 … 相关公告" 这一段
+        seg = _re.search(rf"{y}\s*年休市安排(.{{0,6000}}?)相关公告", raw, _re.S)
+        if not seg:
+            return []
+        body = _re.sub(r"<[^>]+>", " ", seg.group(1))
+        body = _re.sub(r"\s+", " ", body)
+
+        out: list[str] = []
+        pat = _re.compile(
+            r"(\d{1,2})月(\d{1,2})日\s*（[^）]*）\s*至\s*"
+            r"(\d{1,2})月(\d{1,2})日\s*（[^）]*）\s*休市")
+        for m in pat.finditer(body):
+            m1, d1, m2, d2 = (int(x) for x in m.groups())
+            try:
+                a, b = _date(y, m1, d1), _date(y, m2, d2)
+            except ValueError:
+                continue
+            cur = a
+            while cur <= b:
+                if cur.weekday() < 5:            # 只收工作日（周末本就不开市）
+                    out.append(cur.strftime("%Y%m%d"))
+                cur += _td(days=1)
+        return sorted(set(out))
+
+    return cached(f"holidays:{y}", ttl, producer) or []
+
+
+def fetch_trade_dates(n: int = 300) -> list[str]:
+    """从指数日K**反推**已发生的交易日，返回 ['20260105', ...] 正序。
+
+    ★ 为什么不写死节假日表（v1.39.0）：休市安排每年 12 月由交易所公布，
+    写死的表一年就过期，过期后「明日判断」的日期会**静默出错**，而且
+    得靠人记得去补 —— 这是最不该交给人工维护的一类数据。
+
+    这里的取法是**构造性正确**的：指数只要在某个自然日有 K 线，
+    那天就必然是交易日（休市日不可能有行情）。所以不需要知道
+    "哪天放假"，只需要知道"哪天开过盘"。
+
+    用项目已有的 fetch_kline（通达信 → 腾讯 → 新浪 三路降级，
+    安卓包走腾讯/新浪），不新开网络通道。
+
+    失败一律返回 []（调用方据此退回"工作日估算"，绝不猜）。
+    """
+    try:
+        bars = fetch_kline("sh000001", n)
+    except Exception:
+        return []
+    out: list[str] = []
+    for b in bars or []:
+        d = str((b or {}).get("date") or "").strip()
+        # 只收 YYYY-MM-DD，统一转 YYYYMMDD
+        if len(d) == 10 and d[4] == "-" and d[7] == "-":
+            try:
+                out.append(d.replace("-", ""))
+            except Exception:
+                continue
+    seen = set()
+    uniq = []
+    for d in out:
+        if d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    uniq.sort()
+    return uniq
+
+
+def trade_calendar_hint(date: str, n: int = 300) -> dict:
+    """date 之后的第一个交易日，返回 {"next","exact","reason"}。
+
+    ★ 优先级（v1.39.0）：
+      1. **节假日日历**（fetch_market_holidays，自动抓交易所官网）：
+         能拿到就精确 —— 跳周末 + 跳休市日，exact=True。
+      2. 指数K线里已有更晚的交易日（回补/补数场景）：直接用，exact=True。
+      3. 都拿不到 → 退"工作日 +1 跳周末"，exact=False（界面标"估算"）。
+
+    ★ 曾经想用"历史K线外推未来假期"，**实测证明行不通**：指数K线只能
+      说明哪天开过盘，永远推不出哪天将放假 —— 中国节假日跟农历走
+      （春节/端午/中秋逐年漂移）。实测该外推在春节/劳动/清明/端午
+      全部给出**错误日期且自称 exact=True**，比不做还危险，故废弃。
+    """
+    try:
+        d = datetime.strptime(str(date), "%Y%m%d")
+    except (ValueError, TypeError):
+        d = datetime.now()
+    y = d.year
+
+    # ① 自动获取的休市日历（含次年：跨年时 12 月看"明日"会用到）
+    hs: set[str] = set()
+    covered: set[int] = set()          # 真正抓到数据的年份
+    for yy in (y, y + 1):
+        try:
+            got = fetch_market_holidays(yy)
+        except Exception:
+            got = []
+        if got:
+            hs.update(got)
+            covered.add(yy)
+    if hs:
+        cur = d + timedelta(days=1)
+        for _ in range(40):
+            s = cur.strftime("%Y%m%d")
+            if cur.weekday() < 5 and s not in hs:
+                # ★ 只有该日期所属年份的日历**真的抓到了**，才敢说精确
+                #   （v1.39.0）：12/31 看"明日"时次年的安排可能还没公布，
+                #   此时 01-01 是不是休市无从得知 —— 报 exact=True 就是
+                #   在猜。实测 20261231 曾被算成 01-01 且自称精确，是错的。
+                exact = cur.year in covered
+                return {"next": s, "exact": exact,
+                        "reason": ("已按交易所休市日历核对" if exact else
+                                   f"{cur.year} 年休市安排尚未公布，按工作日估算"
+                                   "（以交易所公告为准）")}
+            cur += timedelta(days=1)
+        return {"next": "", "exact": False, "reason": "休市日历异常：连续 40 天无交易日"}
+
+    # ② 指数K线里已有更晚的交易日
+    cal = fetch_trade_dates(n)
+    later = [x for x in cal if x > str(date)]
+    if later:
+        return {"next": later[0], "exact": True, "reason": "已按指数K线核对"}
+
+    # ③ 退回工作日估算
+    cur = d + timedelta(days=1)
+    while cur.weekday() >= 5:
+        cur += timedelta(days=1)
+    return {"next": cur.strftime("%Y%m%d"), "exact": False,
+            "reason": "休市日历不可用，按工作日估算（节假日顺延以交易所公告为准）"}
+
+
 def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
     """指数快照 —— 用于测算全市场量能。
 
