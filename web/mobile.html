@@ -189,6 +189,34 @@ footer{font-size:11px;color:var(--tx3);text-align:center;margin:13px 0 4px;line-
 #sheet .kv .k2{font-size:10px;color:var(--tx3);font-weight:700}
 #sheet .kv .v2{font-size:13px;font-weight:900;margin-top:1px}
 
+/* ── 上证指数按钮 + 走势弹层（与桌面版同一口径，触摸友好）── */
+.btnIdx{flex:none;background:var(--card);border:1px solid var(--line);border-radius:9px;
+  padding:4px 7px;font-size:11px;font-weight:800;font-family:inherit;color:var(--tx3);
+  line-height:1.25;font-variant-numeric:tabular-nums;text-align:right;min-height:34px}
+.btnIdx b{display:block;font-size:13px}
+.btnIdx.up{color:var(--red);border-color:var(--red)}
+.btnIdx.dn{color:var(--grn);border-color:var(--grn)}
+.btnIdx:active{opacity:.7}
+#idxMask{position:fixed;inset:0;background:rgba(10,14,20,.45);z-index:58;opacity:0;
+  pointer-events:none;transition:opacity .22s}
+#idxMask.on{opacity:1;pointer-events:auto}
+#idxSheet{position:fixed;left:0;right:0;bottom:0;z-index:59;background:var(--card);
+  border-radius:18px 18px 0 0;padding:9px 11px calc(13px + env(safe-area-inset-bottom));
+  transform:translateY(102%);transition:transform .26s cubic-bezier(.32,.72,.32,1);
+  max-height:88vh;overflow:auto;box-shadow:0 -8px 40px rgba(0,0,0,.18)}
+#idxSheet.on{transform:translateY(0)}
+.idxHead{display:flex;align-items:center;gap:6px}
+.idxX{flex:none;background:none;border:0;color:var(--tx3);font-size:16px;
+  padding:0 3px;line-height:1;min-width:32px;min-height:32px}
+.idxX:active{color:var(--red)}
+.idxTabs{display:flex;gap:5px;margin-top:7px}
+.idxTab{flex:1;background:var(--sk);border:1px solid var(--line);border-radius:9px;
+  padding:6px 0;font-size:12px;font-weight:800;font-family:inherit;color:var(--tx3);min-height:34px}
+.idxTab.on{background:var(--blu);color:#fff;border-color:var(--blu)}
+.idxTop{margin-top:7px;font-size:11.5px;line-height:1.6;color:var(--tx2);
+  font-variant-numeric:tabular-nums}
+.idxBody{margin-top:5px;min-height:180px}
+
 /* ── 加载态 ── */
 #loading{text-align:center;padding:34px 13px;color:var(--tx2)}
 #loading .big{font-size:33px;margin-bottom:8px}
@@ -296,12 +324,30 @@ main{animation:mrise 640ms var(--ease) .08s both}
 <body>
 
 <header>
-  <div style="min-width:0">
+  <div style="min-width:0;flex:1">
     <div class="brand">野人体系</div>
     <div class="hmeta" id="hmeta">载入中…</div>
   </div>
+  <button id="btnIdx" class="btnIdx" title="点开看上证指数走势">—</button>
   <button id="btnRefresh">⟳ 刷新</button>
 </header>
+
+<!-- 指数走势弹层：与桌面版同一口径（分时/日K/周K/月K），数据走同一个 /api/index -->
+<div id="idxMask"></div>
+<div id="idxSheet">
+  <div class="idxHead">
+    <div id="idxTitle" style="font-weight:800;font-size:14px">上证指数</div>
+    <button id="btnIdxClose" class="idxX" title="关闭">✕</button>
+  </div>
+  <div class="idxTabs" id="idxTabs">
+    <button class="idxTab on" data-p="min1">分时</button>
+    <button class="idxTab" data-p="day">日K</button>
+    <button class="idxTab" data-p="week">周K</button>
+    <button class="idxTab" data-p="month">月K</button>
+  </div>
+  <div id="idxTop" class="idxTop"></div>
+  <div id="idxBody" class="idxBody"></div>
+</div>
 
 <main>
   <div id="err"></div>
@@ -657,6 +703,31 @@ function render(fromCache,ts){
   $('hmeta').textContent=`v${m.version||'?'} · ${m.date||''}`+
     (m.session&&m.session.label?' · '+m.session.label:'')+
     (fromCache?(' · 上次结果 '+(ts||'')+'（后台刷新中）'):(' · 已更新 '+ts));
+
+  /* ── 顶栏上证指数按钮（v1.40.0）──
+     原来顶栏只有「v1.40.0 · 日期」和一句会话状态，**完全看不到大盘** ——
+     而手机上看盘第一件事就是「今天大盘怎么样」。桌面版早就有了，手机漏了。
+     口径与 web/index.html 的 #hdIdx 一致：点数与涨幅都取自后端
+     （前端的 REPORT 里没有昨收，自己用 price 反推 pct 会越差越多）。
+     取不到就显示「—」并标灰 —— 不显示 0.00（那会被读成"平盘"，是假事实）。 */
+  {
+    const bi=$('btnIdx');
+    if(bi){
+      const ix=(d.index||{})['sh000001'];
+      if(ix&&ix.price!=null&&isFinite(Number(ix.price))){
+        const pv=Number(ix.pct), cg=(ix.chg==null?null:Number(ix.chg));
+        bi.className='btnIdx '+(isFinite(pv)?(pv>0?'up':(pv<0?'dn':'')):'');
+        bi.innerHTML=`<span style="font-size:10px">上证指数</span><b>${num(ix.price)}</b>`
+          +`<span style="font-size:10.5px">${isFinite(pv)?(pv>0?'+':'')+num(pv)+'%':'—'}</span>`;
+        bi.title='上证指数 '+(cg!=null&&isFinite(cg)?(cg>0?'+':'')+num(cg)+' 点　':'')
+          +(isFinite(pv)?(pv>0?'+':'')+num(pv)+'%':'')+'　点开看分时 / 日K / 周K / 月K';
+      }else{
+        bi.className='btnIdx';
+        bi.innerHTML='<span style="font-size:10px">上证指数</span><b>—</b>';
+        bi.title='本次报告里没有指数快照（可能刚开盘或数据源抖动）';
+      }
+    }
+  }
 
   /* ═══ Tab 1 · 今日 ═══ */
   // ★ 数据就绪闸门（与 web/index.html 同一口径，见那边的长注释）：
@@ -1179,6 +1250,244 @@ function drawKmini(p){
     hot.addEventListener('mousemove',pick);
   }
 }
+
+/* ── 上证指数走势（分时 / 日K / 周K / 月K）──
+   与桌面版 web/index.html 同一口径：同一个后端接口 /api/index，同一套
+   画图数学（包括分时 Y 轴必须包住昨收、且贴合当日真实高低 —— 见下面注释）。
+   差别只在交互：手机是触摸设备，不套十字光标，改成「手指点一下，上方读数行跟着变」，
+   与上面 drawKmini 的做法保持一致。
+   为什么手机端也要有：顶栏那个数字只是"此刻"，用户在手机上同样要判断
+   「今天是往下砸还是往上冲」—— 这一个判断必须看图，一个数字给不出来。 */
+let IDX_P='min1', IDX_CACHE={};
+const IDX_LABEL={min1:'分时',day:'日K',week:'周K',month:'月K'};
+
+function idxOpen(){
+  $('idxSheet').classList.add('on');
+  $('idxMask').classList.add('on');
+  idxTop(null);
+  idxShow(IDX_P);
+}
+function idxClose(){
+  $('idxSheet').classList.remove('on');
+  $('idxMask').classList.remove('on');
+}
+function idxTop(d){
+  const el=$('idxTop'); if(!el) return;
+  if(!d){ el.innerHTML='<span class="fl">正在取上证指数…</span>'; return; }
+  const pv=Number(d.pct), cg=(d.chg==null?null:Number(d.chg));
+  const col=!isFinite(pv)?'var(--tx)':(pv>0?'var(--red)':(pv<0?'var(--grn)':'var(--tx)'));
+  el.innerHTML=`<span style="font-weight:800;color:var(--tx)">${esc(d.name||'上证指数')}</span>
+    <span class="fl" style="font-size:10.5px">${esc(String(d.code||'').toUpperCase())}</span>
+    <span style="font-weight:900;font-size:15px;color:${col};margin-left:5px">${num(d.price)}</span>
+    <span style="font-weight:800;color:${col}">
+      ${cg!=null&&isFinite(cg)?(cg>0?'+':'')+num(cg)+' 点　':''}${isFinite(pv)?(pv>0?'+':'')+num(pv)+'%':'—'}</span>`;
+  $('idxTitle').textContent=(d.name||'上证指数')+' 走势';
+}
+async function idxShow(period){
+  IDX_P=period;
+  document.querySelectorAll('#idxTabs .idxTab').forEach(t=>{
+    t.classList.toggle('on', t.dataset.p===period);
+  });
+  const body=$('idxBody');
+  const key='sh000001:'+period;
+  if(IDX_CACHE[key]){ body.innerHTML=IDX_CACHE[key]; idxBind(body,IDX_CACHE[key+'|d']); return; }
+  body.innerHTML='<div class="fl" style="font-size:12.5px;padding:30px 0;text-align:center">正在取'
+    +(IDX_LABEL[period]||'')+'数据…</div>';
+  try{
+    const r=await fetch('/api/index?code=sh000001&period='+encodeURIComponent(period),
+      {cache:'no-store'});
+    const d=await r.json();
+    if(IDX_P!==period) return;                    // 期间用户又切了页签
+    if(!d||!d.ok||!(d.bars||[]).length){
+      // 失败时 idxTop 还停在「正在取…」—— 必须一起收掉，否则用户看到
+      // 上面在转圈、下面说失败，自相矛盾。
+      idxTop(null);
+      $('idxTop').innerHTML='<span style="color:var(--org)">走势数据没取到</span>';
+      body.innerHTML='<div style="font-size:12.5px;color:var(--org);line-height:1.8;padding:8px 0">'
+        +esc((d&&d.error)||'没取到这个指数的走势数据')+'</div>'
+        +'<button class="btnghost" id="idxRetry" style="margin-top:6px">重试</button>';
+      const rb=$('idxRetry'); if(rb) rb.onclick=()=>idxShow(period);
+      return;
+    }
+    idxTop(d);
+    const html=d.period==='min1'?idxIntraday(d):idxKL(d);
+    IDX_CACHE[key]=html; IDX_CACHE[key+'|d']=d;
+    body.innerHTML=html;
+    idxBind(body,d);
+  }catch(e){
+    $('idxTop').innerHTML='<span style="color:var(--org)">走势数据没取到</span>';
+    body.innerHTML='<div style="font-size:12.5px;color:var(--org);line-height:1.8;padding:8px 0">'
+      +'取数据失败：'+esc(String((e&&e.message)||e))+'</div>'
+      +'<button class="btnghost" id="idxRetry" style="margin-top:6px">重试</button>';
+    const rb=$('idxRetry'); if(rb) rb.onclick=()=>idxShow(period);
+  }
+}
+// 宽度按屏幕实宽取，避免 720 的 viewBox 在小屏上把字压扁
+function _idxW(){ return Math.max(320, Math.min(720, ($('idxBody')||{}).clientWidth||360)); }
+
+function idxIntraday(d){
+  const bars=d.bars||[], n=bars.length;
+  if(n<2) return '<div class="fl" style="font-size:12.5px">分时数据不足</div>';
+  const base=Number(d.prev_close)||bars[0].close;
+  const closes=bars.map(b=>b.close), vols=bars.map(b=>b.volume||0);
+  // ⚠️ 与桌面版 drawIntraday **逐字一致**：余量按当日真实波幅算、昨收只保证在轴内。
+  //    只按「对昨收的最大偏离 ×2」对称扩轴，在单边行情里会把轴撑成两倍宽
+  //    （实测 10-15：全天 3675~3723、昨收 3767，对称后轴顶 3867 = +2.64%，
+  //     而当天其实只跌 1.59%），图看上去像振幅 4%，与事实不符。
+  const _plo=Math.min(...bars.map(b=>(b.low!=null?b.low:b.close)));
+  const _phi=Math.max(...bars.map(b=>(b.high!=null?b.high:b.close)));
+  const _span=Math.max(_phi-_plo, 1e-9);
+  const _fallback=Math.max(base*0.004, 1e-6);
+  const _padAll=(_span>1e-6?_span:_fallback)*0.10;
+  let mn=_plo-_padAll, mx=_phi+_padAll;
+  const _minOff=Math.max(_span*0.06, _fallback*2);
+  if(base<mn) mn=base-_minOff;
+  if(base>mx) mx=base+_minOff;
+  const rg=(mx-mn)||1;
+
+  const W=_idxW(), H=200;
+  const padL=44, padR=30, padT=12, padB=18, gap=8;
+  const volH=38, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR, priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+  const X=i=>padL+i*iw/(n-1), Yp=v=>priceB-(v-mn)/rg*priceH;
+  const maxVol=Math.max(...vols,1), Yv=v=>volB-v/maxVol*volH;
+  const yBase=Yp(base);
+
+  const lastC=closes[n-1], up=lastC>=base;
+  const lineCol=up?'#d92d3f':'#0f9d58';
+  const fillCol=up?'rgba(217,45,63,.10)':'rgba(15,157,88,.10)';
+  let path='';
+  closes.forEach((v,i)=>{ path+=`${i?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; });
+  const area=`M${X(0).toFixed(1)},${yBase.toFixed(1)}`+path.slice(1)
+    +`L${X(n-1).toFixed(1)},${yBase.toFixed(1)}Z`;
+  const bw=Math.max(1,Math.min(3,iw/n*0.7));
+  let volBars='';
+  bars.forEach((b,i)=>{
+    if(i===0) return;
+    const c=b.close>=closes[i-1]?'#d92d3f':'#0f9d58', y=Yv(vols[i]);
+    volBars+=`<rect x="${(X(i)-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${c}" opacity=".5"/>`;
+  });
+  // 左轴价格 + 右轴涨跌幅：**均匀五档**（轴不对称后再用「以昨收对称」的档位会挤成一团）
+  const ticks=[];
+  for(let i=0;i<5;i++){
+    const v=mx-(mx-mn)*i/4;
+    ticks.push({v, y:Yp(v), pctv:base?((v-base)/base*100):0});
+  }
+  const lastPct=base?((lastC-base)/base*100):0;
+  return `<div class="fl" style="font-size:10.5px;margin-bottom:3px">
+      分时 · ${esc(d.trade_date||'')}${d.prev_close_exact?'':'（基准为推算值）'}
+      　虚线 = 昨收 ${num(base)}</div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${ticks.map(t=>`<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}"
+          stroke="${t.isBase?'#9aa3b2':'#eef1f5'}"${t.isBase?' stroke-dasharray="4 3"':''}/>
+        <text x="${padL-4}" y="${(t.y+3.5).toFixed(1)}" font-size="8.5" fill="#9aa3b2" text-anchor="end">${t.v.toFixed(0)}</text>
+        <text x="${W-padR+3}" y="${(t.y+3.5).toFixed(1)}" font-size="8.5" fill="${t.isBase?'#9aa3b2':(t.pctv>=0?'#d92d3f':'#0f9d58')}" text-anchor="start">${t.pctv>=0?'+':''}${t.pctv.toFixed(1)}%</text>`).join('')}
+      <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+      <path d="${area}" fill="${fillCol}" stroke="none"/>
+      <path d="${path}" fill="none" stroke="${lineCol}" stroke-width="1.3"/>
+      ${volBars}
+      <text x="${W-padR}" y="${(Yp(lastC)-5).toFixed(1)}" font-size="9" fill="${lineCol}"
+        text-anchor="end" font-weight="800">${num(lastC)} ${lastPct>=0?'+':''}${lastPct.toFixed(2)}%</text>
+      <text x="${X(0).toFixed(1)}" y="${H-4}" font-size="8.5" fill="#9aa3b2" text-anchor="start">09:30</text>
+      <text x="${X(Math.floor((n-1)/2)).toFixed(1)}" y="${H-4}" font-size="8.5" fill="#9aa3b2" text-anchor="middle">11:30/13:00</text>
+      <text x="${X(n-1).toFixed(1)}" y="${H-4}" font-size="8.5" fill="#9aa3b2" text-anchor="end">15:00</text>
+      <rect id="idxHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+    </svg>`;
+}
+
+function idxKL(d){
+  const bars=d.bars||[], n=bars.length;
+  if(n<2) return '<div class="fl" style="font-size:12.5px">K线数据不足</div>';
+  const closes=bars.map(b=>b.close), vols=bars.map(b=>b.volume||0);
+  const ma5=_maOf(closes,5), ma10=_maOf(closes,10), ma20=_maOf(closes,20);
+  let mn=Math.min(...bars.map(b=>b.low)), mx=Math.max(...bars.map(b=>b.high));
+  [ma5,ma10,ma20].forEach(a=>a.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; } }));
+  const pad=(mx-mn)*0.06||0.1; mn-=pad; mx+=pad;
+  const rg=(mx-mn)||1;
+  const W=_idxW(), H=200;
+  const padL=44, padR=12, padT=12, padB=18, gap=8;
+  const volH=38, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR, priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+  const X=i=>padL+i*iw/(n-1), Yp=v=>priceB-(v-mn)/rg*priceH;
+  const maxVol=Math.max(...vols,1), Yv=v=>volB-v/maxVol*volH;
+  const bw=Math.max(1.4,Math.min(6,iw/n*0.62));
+  const prevC=i=>i>0?closes[i-1]:bars[i].open;
+  let candle='', volBars='';
+  bars.forEach((b,i)=>{
+    const x=X(i), c=b.close>=prevC(i)?'#d92d3f':'#0f9d58';
+    candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
+    const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    const y=Yv(vols[i]);
+    volBars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${c}" opacity=".55"/>`;
+  });
+  const maPath=arr=>{
+    let p='', st=false;
+    arr.forEach((v,i)=>{ if(v==null) return; p+=`${st?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; st=true; });
+    return p;
+  };
+  const yT=[0,.25,.5,.75,1].map(t=>({v:mx-rg*t,y:padT+priceH*t}));
+  const xIdx=[0,Math.round((n-1)*.34),Math.round((n-1)*.67),n-1]
+    .filter((v,i,a)=>a.indexOf(v)===i);
+  const fmtDate=s=>{
+    s=String(s||'');
+    if(bars[0].date && s.slice(0,4)!==String(bars[0].date).slice(0,4)) return s;
+    return s.slice(5);
+  };
+  const last=bars[n-1], lpc=prevC(n-1), lPct=lpc>0?(last.close-lpc)/lpc*100:0;
+  const lCol=lPct>=0?'#d92d3f':'#0f9d58', yl=Yp(last.close);
+  const label=IDX_LABEL[d.period]||'K线';
+  const maLegend=[['MA5',ma5,'#e0a01a'],['MA10',ma10,'#2563d9'],['MA20',ma20,'#8b5cf6']]
+    .map(([nm,arr,col])=>`<span style="color:${col};font-weight:800">${nm} ${arr[n-1]==null?'—':arr[n-1].toFixed(2)}</span>`)
+    .join('<span class="fl" style="font-weight:400"> · </span>');
+  return `<div class="fl" style="font-size:10.5px;margin-bottom:3px;line-height:1.5">
+      ${maLegend}<br>${label} · 共 ${n} 根${d.period!=='day'?'（由日K聚合）':''}</div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    ${yT.map(t=>`<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="#eef1f5"/>
+      <text x="${padL-4}" y="${(t.y+3.5).toFixed(1)}" font-size="8.5" fill="#9aa3b2" text-anchor="end">${t.v.toFixed(0)}</text>`).join('')}
+    <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+    ${volBars}${candle}
+    <path d="${maPath(ma5)}" fill="none" stroke="#e0a01a" stroke-width="1"/>
+    <path d="${maPath(ma10)}" fill="none" stroke="#2563d9" stroke-width="1"/>
+    <path d="${maPath(ma20)}" fill="none" stroke="#8b5cf6" stroke-width="1"/>
+    <text x="${W-padR}" y="${(yl-4).toFixed(1)}" font-size="9" fill="${lCol}" text-anchor="end" font-weight="800">${num(last.close)} ${lPct>=0?'+':''}${lPct.toFixed(2)}%</text>
+    ${xIdx.map(i=>`<text x="${X(i).toFixed(1)}" y="${H-4}" font-size="8.5" fill="#9aa3b2" text-anchor="middle">${esc(fmtDate(bars[i].date))}</text>`).join('')}
+    <rect id="idxHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+  </svg>`;
+}
+
+// 触摸读数：手指点/划，把那一刻的价与涨跌幅写到 idxTop 里（不套十字光标，同 drawKmini）
+function idxBind(root,d){
+  const hot=root.querySelector('#idxHot'), svg=root.querySelector('svg');
+  if(!hot||!svg) return;
+  const bars=d.bars||[], n=bars.length; if(n<2) return;
+  const W=_idxW(), padL=44, padR=12, iw=W-padL-padR;
+  const base=Number(d.prev_close)||0;
+  const pick=ev=>{
+    const r=svg.getBoundingClientRect(); if(!r.width) return;
+    const cx=(ev.touches?ev.touches[0].clientX:ev.clientX);
+    let i=Math.round(((cx-r.left)/r.width*W-padL)/(iw/(n-1)));
+    i=Math.max(0,Math.min(n-1,i));
+    const b=bars[i];
+    const pv=(d.period==='min1')?(base?((b.close-base)/base*100):0)
+      :(()=>{const pc=i>0?bars[i-1].close:b.open; return pc>0?(b.close-pc)/pc*100:0;})();
+    const when=(d.period==='min1')?(b.time||''):(b.date||'');
+    const col=pv>=0?'var(--red)':'var(--grn)';
+    $('idxTop').innerHTML=`<span style="font-weight:800;color:var(--tx)">${esc(when)}</span>
+      <span style="font-weight:900;font-size:15px;color:${col};margin-left:5px">${num(b.close)}</span>
+      <span style="font-weight:800;color:${col}">${pv>=0?'+':''}${pv.toFixed(2)}%</span>`
+      +(d.period==='min1'?'':`<span class="fl" style="font-size:10.5px">　开 ${num(b.open)} 高 ${num(b.high)} 低 ${num(b.low)}</span>`);
+  };
+  hot.addEventListener('touchstart',pick,{passive:true});
+  hot.addEventListener('touchmove',pick,{passive:true});
+  hot.addEventListener('mousemove',pick);
+}
+$('idxMask').onclick=idxClose;
+$('btnIdxClose').onclick=idxClose;
+$('btnIdx').onclick=idxOpen;
+document.querySelectorAll('#idxTabs .idxTab').forEach(t=>{
+  t.onclick=()=>idxShow(t.dataset.p);
+});
 
 /* ── 抽屉：候选详情 ── */
 function openSheet(i){

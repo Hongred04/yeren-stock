@@ -60,12 +60,16 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:8px 13px;
 /* 顶栏指数：给上证指数一个专属位，数字比普通 tag 更大更重 —— 它是要一眼扫到的。
    底色按涨跌上色（.up 红 / .dn 绿 / .fl 灰，沿用全站 A 股语义，红涨绿跌）。 */
 .tag.idx{gap:4px;padding:3px 7px}
+/* 指数格：名称（小而灰）→ 点位（大字重）→ 涨跌点数 → 涨跌幅。
+   名称是**必须**的：只有一个数字时用户认不出这是哪个指数。 */
+.tag.idx .nm{font-size:11px;font-weight:700;color:var(--tx2)}
 .tag.idx b{font-size:13px;font-weight:800;font-variant-numeric:tabular-nums}
+.tag.idx .cg{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
 .tag.idx .pc{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
 .tag.idx.up{background:var(--red-bg)}
-.tag.idx.up b,.tag.idx.up .pc{color:var(--red)}
+.tag.idx.up b,.tag.idx.up .pc,.tag.idx.up .cg,.tag.idx.up .nm{color:var(--red)}
 .tag.idx.dn{background:var(--grn-bg)}
-.tag.idx.dn b,.tag.idx.dn .pc{color:var(--grn)}
+.tag.idx.dn b,.tag.idx.dn .pc,.tag.idx.dn .cg,.tag.idx.dn .nm{color:var(--grn)}
 .tag.clk{cursor:pointer}
 .tag.clk:hover{background:var(--blu-bg);color:var(--blu)}
 .tag.srcwarn{background:var(--org-bg)}
@@ -789,7 +793,7 @@ td{padding:6px var(--s3)}
 <header>
   <div class="hd">
     <div class="logo"><span class="dot"></span>股票监控</div>
-    <div class="tag idx" id="hdIdx" title="上证指数（实时快照，随静默刷新更新）"><b>—</b><span class="pc">—</span></div>
+    <div class="tag idx clk" id="hdIdx" title="上证指数（点开看分时和日K/周K/月K）"><b>—</b><span class="pc">—</span></div>
     <div class="tag">策略 <b id="hdPreset">—</b></div>
     <div class="tag">日期 <b id="hdDate">—</b></div>
     <div class="tag">版本 <b id="hdVer">—</b></div>
@@ -1077,6 +1081,15 @@ td{padding:6px var(--s3)}
     <div class="dp-tabs" id="dpTabs"></div>
   </div>
   <div class="dp-b" id="dpBody"></div>
+</div>
+
+<!-- ══════════ 指数走势：右侧弹出面板（复用详情面板的样式族）══════════ -->
+<div class="dpanel" id="ipanel">
+  <div class="dp-h">
+    <div class="dp-t1" id="ipTop"></div>
+    <div class="dp-tabs" id="ipTabs"></div>
+  </div>
+  <div class="dp-b" id="ipBody"></div>
 </div>
 
 <script>
@@ -1577,19 +1590,31 @@ function render(){
   $('hdDate').textContent=(m.date||'—')+(REPORT.stale?'（上次结果·正在后台刷新）':'');
   $('hdVer').textContent='v'+(m.version||'?');
   // 上证指数 —— 放在顶栏最前面，涨跌用全站 A 股语义着色（红涨绿跌）。
-  // 取不到就整格显示「—」并标灰，不显示 0.00（0.00 会被误读成"平盘"，是假事实）。
+  // ★ 口径必须写全：光一个「3707.48」既不说是**哪个**指数，也不给涨跌点数，
+  //   用户得自己心算跌了多少。所以这里固定输出
+  //   　上证指数　3707.48　-59.75　-1.59%
+  //   涨跌点数与涨跌幅都来自后端（注意别在前端用 price 自减 —— 前端根本没有
+  //   昨收，算出来的只会是错的）。
+  //   取不到就整格显示「—」并标灰，不显示 0.00（0.00 会被误读成"平盘"，是假事实）。
   const idx=(REPORT.index||{})['sh000001'];
   const hdIdx=$('hdIdx');
   if(idx&&idx.price!=null&&isFinite(Number(idx.price))){
     const pv=Number(idx.pct);
-    hdIdx.className='tag idx '+pct(isFinite(pv)?pv:0);
-    hdIdx.innerHTML=`<b>${f2(idx.price)}</b><span class="pc">${isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'—'}</span>`;
-    hdIdx.title='上证指数 '+(isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'')+'（实时快照，随静默刷新更新）';
+    const cg=(idx.chg==null)?null:Number(idx.chg);
+    // 后端可能只给 pct 不给 chg（老底稿）：那就只显示涨跌幅，不硬凑点数
+    const chgTxt=(cg!=null&&isFinite(cg))?`<span class="cg">${cg>0?'+':''}${f2(cg)}</span>`:'';
+    hdIdx.className='tag idx clk '+pct(isFinite(pv)?pv:0);
+    hdIdx.innerHTML=`<span class="nm">上证指数</span><b>${f2(idx.price)}</b>${chgTxt}`
+      +`<span class="pc">${isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'—'}</span>`;
+    hdIdx.title='上证指数 '+(isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'')
+      +(cg!=null&&isFinite(cg)?`（${cg>0?'+':''}${f2(cg)} 点）`:'')
+      +'　点开看分时 / 日K / 周K / 月K';
   }else{
-    hdIdx.className='tag idx fl';
-    hdIdx.innerHTML='<b>—</b><span class="pc">—</span>';
+    hdIdx.className='tag idx clk fl';
+    hdIdx.innerHTML='<span class="nm">上证指数</span><b>—</b><span class="pc">—</span>';
     hdIdx.title='上证指数：本次报告里没有指数快照（可能刚开盘或数据源抖动）';
   }
+  hdIdx.onclick=()=>openIndexChart();
   const ses=m.session;
   $('hdTime').textContent=(ses&&ses.label?ses.label+' · ':'')
     +'扫描'+n0(m.scanned)+'只 · 耗时'+n0(m.elapsed)+'秒';
@@ -2129,6 +2154,9 @@ async function resolveStock(code){
    面板体分三个页签（决策/依据/行情），内容按 p.code 缓存，
    切换页签不重新渲染 —— 否则每次切回「行情」都要重画 K 线。 */
 function openDetailPanel(){
+  // 两个右侧面板（个股详情 / 指数走势）共用同一块遮罩，同时只能开一个 ——
+  // 叠着开会出现「关掉上面那个、下面的还在但遮罩没了」的呆滞状态。
+  closeIndexChart();
   $('dpanel').classList.add('on');
   $('mask').classList.add('on');
 }
@@ -2641,6 +2669,362 @@ function drawK(p){
     // 贴边翻转，别被容器裁掉
     const px=ev.clientX-el.getBoundingClientRect().left;
     tip.style.left=Math.max(2,Math.min(px+12, (el.clientWidth||W)-tip.offsetWidth-4))+'px';
+    tip.style.top=(ev.clientY-el.getBoundingClientRect().top-6)+'px';
+  };
+  hot.addEventListener('mousemove',move);
+  hot.addEventListener('mouseleave',hide);
+  svg.addEventListener('mouseleave',hide);
+}
+
+/* ══════════════════ 指数走势：分时 / 日K / 周K / 月K ══════════════════
+   顶栏那个「3707.48」原来只给一个数字，点不开、也看不出是什么指数。这里补上
+   点开看走势。四张图各有各的画法，**不能共用一套**：
+     · 分时 —— 价格折线 + 昨收虚线基准 + 红绿填充 + 量柱。它**没有 open/high/low
+       的意义**（每分钟就一个价），画成蜡烛反而假。
+     · 日/周/月K —— 蜡烛 + 量 + MA，用 drawK 那套（这里另写一份轻量的，
+       因为 drawK 绑死在 #kchart 和个股的涨停阈值上）。
+   共同点：都按「红涨绿跌」着色（全站 A 股语义）。 */
+let IDX_PERIOD='min1', IDX_CACHE={}, IDX_CUR='sh000001';
+
+const IDX_PERIODS=[['min1','分时'],['day','日K'],['week','周K'],['month','月K']];
+
+function openIndexChart(code){
+  IDX_CUR=code||'sh000001';
+  IDX_PERIOD='min1';                 // 点开默认看分时（用户最常看的就是今天）
+  $('ipanel').classList.add('on');
+  $('mask').classList.add('on');
+  ipTop(null);
+  ipShow(IDX_PERIOD);
+}
+function closeIndexChart(){
+  $('ipanel').classList.remove('on');
+  // ⚠️ 不能无条件摘 mask：个股详情面板可能也开着（两个面板互斥打开，但
+  //    用户可能先开详情、再点指数 —— 那时关掉指数不该把详情的遮罩也摘了）
+  if(!$('dpanel').classList.contains('on')) $('mask').classList.remove('on');
+}
+function ipTop(d){
+  const el=$('ipTop'); if(!el) return;
+  if(!d){
+    el.innerHTML=`<span class="nm">…</span><span class="sp"></span>
+      <span class="close" title="关闭">×</span>`;
+    const c=el.querySelector('.close'); if(c) c.onclick=closeIndexChart;
+    return;
+  }
+  const pv=Number(d.pct), cg=(d.chg==null?null:Number(d.chg));
+  const col=!isFinite(pv)?'var(--tx)':(pv>0?'var(--red)':(pv<0?'var(--grn)':'var(--tx)'));
+  el.innerHTML=`<span class="nm">${esc(d.name||'指数')}</span>
+    <span class="cd">${esc(String(d.code||'').toUpperCase())}</span>
+    <span class="dp-score"><span class="n" style="color:${col}">${f2(d.price)}</span></span>
+    <span style="font-weight:800;font-size:12.5px;color:${col};font-variant-numeric:tabular-nums">
+      ${cg!=null&&isFinite(cg)?(cg>0?'+':'')+f2(cg):''}　${isFinite(pv)?(pv>0?'+':'')+f2(pv)+'%':'—'}</span>
+    <span class="sp"></span>
+    <span class="close" title="关闭">×</span>`;
+  const c=el.querySelector('.close'); if(c) c.onclick=closeIndexChart;
+}
+function ipTabs(){
+  return IDX_PERIODS.map(([k,label])=>
+    `<div class="dp-tab${IDX_PERIOD===k?' on':''}" data-ip="${k}">${label}</div>`).join('');
+}
+function bindIpTabs(){
+  $('ipTabs').querySelectorAll('.dp-tab').forEach(t=>{
+    t.onclick=()=>ipShow(t.dataset.ip);
+  });
+}
+async function ipShow(period){
+  IDX_PERIOD=period;
+  $('ipTabs').innerHTML=ipTabs(); bindIpTabs();
+  const body=$('ipBody');
+  const cacheKey=IDX_CUR+':'+period;
+  if(IDX_CACHE[cacheKey]){
+    ipRender(IDX_CACHE[cacheKey]);
+    return;
+  }
+  body.innerHTML=`<div class="fl" style="font-size:13px;padding:26px 0;text-align:center">
+    正在取${({min1:'分时',day:'日K',week:'周K',month:'月K'})[period]||''}数据…</div>`;
+  try{
+    const r=await fetch('/api/index?code='+encodeURIComponent(IDX_CUR)
+      +'&period='+encodeURIComponent(period),{cache:'no-store'});
+    const d=await r.json();
+    if(IDX_PERIOD!==period) return;              // 期间用户又切了页签
+    if(!d||!d.ok||!(d.bars||[]).length){
+      body.innerHTML=`<div style="font-size:13px;color:var(--org);line-height:1.8;padding:6px 0">
+        ${esc((d&&d.error)||'没取到这个指数的走势数据')}</div>
+        <div style="padding:10px 0 2px"><button class="btn2" id="ipRetry">重试</button></div>`;
+      const rb=body.querySelector('#ipRetry');
+      if(rb) rb.onclick=()=>ipShow(period);
+      return;
+    }
+    IDX_CACHE[cacheKey]=d;
+    ipTop(d);
+    ipRender(d);
+  }catch(e){
+    body.innerHTML=`<div style="font-size:13px;color:var(--org);line-height:1.8;padding:6px 0">
+      取数据失败：${esc(String(e&&e.message||e))}</div>
+      <div style="padding:10px 0 2px"><button class="btn2" id="ipRetry">重试</button></div>`;
+    const rb=body.querySelector('#ipRetry');
+    if(rb) rb.onclick=()=>ipShow(period);
+  }
+}
+function ipRender(d){
+  $('ipBody').innerHTML=
+    d.period==='min1'?drawIntraday(d):drawIndexKL(d);
+  // SVG 是刚 innerHTML 进去的，十字光标必须在渲染之后再绑（拿不到就静默跳过）
+  try{ bindIndexCrosshair(d); }catch(e){}
+}
+
+/* ── 分时图：价格折线 + 昨收基准 + 红绿填充 + 量柱 ── */
+function drawIntraday(d){
+  const bars=d.bars||[], n=bars.length;
+  if(n<2) return '<div class="fl" style="font-size:13px">分时数据不足</div>';
+  const base=Number(d.prev_close)||bars[0].close;
+  const closes=bars.map(b=>b.close);
+  const vols=bars.map(b=>b.volume||0);
+  // 分时 Y 轴：**必须包含昨收**（否则「现在在昨收上方还是下方」这条判断没了依据），
+  // 但同时要**贴合当日真实波动区间** —— 只按「对昨收的最大偏离 × 2」对称取值，
+  // 在单边行情里会把坐标轴撑成两倍宽：实测 10-15 全天最低 3675、最高 3723，
+  // 昨收 3767，对称外扩后轴顶跑到 3867（+2.64%），而当天其实只跌了 1.59% ——
+  // 图看上去像振幅 4%，与事实不符。
+  //
+  // ★ 第二版（更紧）：原先取「当日高低 ∪ 昨收」的并集再留 8% 余量，在昨收远离
+  //   当日区间时（10-15 就是：当日高低 3675~3723，昨收 3767）会把轴多撑出
+  //   40 多个点，实测曲线只占画布高的 46%。改成：
+  //   ① 余量按**当日真实波幅**算（而不是被昨收撑开后的并集高度）；
+  //   ② 昨收只保证**落在轴内**（各侧留一小段），不决定轴宽。
+  //   这样单边行情里曲线能铺满画布，同时昨收虚线仍在画面内。
+  const _plo=Math.min(...bars.map(b=>(b.low!=null?b.low:b.close)));
+  const _phi=Math.max(...bars.map(b=>(b.high!=null?b.high:b.close)));
+  const _span=Math.max(_phi-_plo, 1e-9);
+  // ★ 平盘日（全天没波动）时 _span≈0：轴宽会退化成 0，刻度叠在同一个像素上，
+  //   文字糊成一团。用昨收的千分之四兜底，保证总有可读的展开。
+  const _fallback=Math.max(base*0.004, 1e-6);
+  const _padAll=(_span>1e-6?_span:_fallback)*0.10;
+  let mn=_plo-_padAll, mx=_phi+_padAll;
+  // 昨收必须在轴内：不够就只往那一侧补，另一侧不动。
+  // ★ 补的量不能按「当前轴宽的 6%」算 —— 昨收远在区间外时（跳空/涨跌停日），
+  //   轴会先被拉宽、再按新宽度算 6%，结果把三条刻度挤进轴宽的 2.8% 里，
+  //   文字直接叠在一起。这里改成**按当日波幅的固定比例**补，并留绝对下限。
+  const _minOff=Math.max(_span*0.06, _fallback*2);
+  if(base<mn) mn=base-_minOff;
+  if(base>mx) mx=base+_minOff;
+  const rg=(mx-mn)||1;
+
+  const W=720, H=250;
+  const padL=52, padR=14, padT=14, padB=20, gap=10;
+  const volH=46, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR;
+  const priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+  const X=i=>padL+i*iw/(n-1);
+  const Yp=v=>priceB-(v-mn)/rg*priceH;
+  const maxVol=Math.max(...vols,1);
+  const Yv=v=>volB-v/maxVol*volH;
+  const yBase=Yp(base);
+
+  // 折线：颜色按**相对昨收**涨跌（不是相邻两点比较 —— 那是蜡烛的口径）
+  const lastC=closes[n-1];
+  const up=lastC>=base;
+  const lineCol=up?'#d92d3f':'#0f9d58';
+  const fillCol=up?'rgba(217,45,63,.10)':'rgba(15,157,88,.10)';
+  let path='';
+  closes.forEach((v,i)=>{ path+=`${i?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; });
+  const area=`M${X(0).toFixed(1)},${yBase.toFixed(1)}`+path.slice(1)
+    +`L${X(n-1).toFixed(1)},${yBase.toFixed(1)}Z`;
+
+  // 量柱
+  const bw=Math.max(1,Math.min(4,iw/n*0.7));
+  let volBars='';
+  bars.forEach((b,i)=>{
+    if(i===0) return;                          // 第一根没有上一根可比，跳过
+    const c=b.close>=closes[i-1]?'#d92d3f':'#0f9d58';
+    const y=Yv(vols[i]);
+    volBars+=`<rect x="${(X(i)-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${c}" opacity=".5"/>`;
+  });
+
+  // 左轴刻度：**均匀五档**（mx→mn 等分），再把最靠近昨收的那一档标成基准线。
+  //
+  // ★ 为什么不再用「以昨收为中心对称」的 [mx,(mx+base)/2,base,(mn+base)/2,mn]：
+  //   那个公式默认轴是关于昨收对称的。轴一旦不对称（单边行情 / 跳空日昨收落在
+  //   边缘），(mx+base)/2 与 base 就会挤到一起 —— 实测昨日区间 3675~3723、
+  //   昨收 3767 时，轴顶 3797 与昨收 3767 只差 30，而轴宽 127，三条刻度被压进
+  //   11.8% 的高度里；跳空日更糟，压到 2~3%，文字直接叠死。
+  //   均匀分档的间距恒等于轴宽的 1/4，与昨收落在哪儿无关，永远不会挤。
+  const ticks=[];
+  for(let i=0;i<5;i++){
+    const v=mx-(mx-mn)*i/4;
+    ticks.push({v, y:Yp(v), pctv:base?((v-base)/base*100):0});
+  }
+  // 昨收虚线单独画在**它的真实价位**上（Yp(base)，上面已算过 yBase），不冒充刻度 ——
+  // 若把最近的刻度改标成基准，那条线的价格标签就会显示成档位价而不是昨收，
+  // 与右上的「虚线 = 昨收 3767.23」对不上。
+
+  const lastPct=base?((lastC-base)/base*100):0;
+  return `<div style="font-size:11px;margin-bottom:4px;color:var(--tx3)">
+      分时 · ${esc(d.trade_date||'')}${d.prev_close_exact?'':'（基准为推算值）'}
+      　<span style="color:var(--tx3)">虚线 = 昨收 ${f2(base)}</span></div>
+    <div style="position:relative" id="ipWrap">
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${ticks.map(t=>`<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}"
+          stroke="#eef1f5"/>
+        <text x="${padL-6}" y="${(t.y+3.5).toFixed(1)}" font-size="9.5" fill="#9aa3b2" text-anchor="end">${t.v.toFixed(2)}</text>
+        <text x="${W-padR+3}" y="${(t.y+3.5).toFixed(1)}" font-size="9" fill="${t.pctv>=0?'#d92d3f':'#0f9d58'}" text-anchor="start">${t.pctv>=0?'+':''}${t.pctv.toFixed(2)}%</text>`).join('')}
+      <line x1="${padL}" y1="${yBase.toFixed(1)}" x2="${W-padR}" y2="${yBase.toFixed(1)}"
+        stroke="#9aa3b2" stroke-dasharray="4 3"/>
+      <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+      <text x="${padL-6}" y="${(volT+9).toFixed(1)}" font-size="9" fill="#9aa3b2" text-anchor="end">量</text>
+      <path d="${area}" fill="${fillCol}" stroke="none"/>
+      <path d="${path}" fill="none" stroke="${lineCol}" stroke-width="1.4"/>
+      ${volBars}
+      <text x="${W-padR}" y="${(Yp(lastC)-6).toFixed(1)}" font-size="10" fill="${lineCol}"
+        text-anchor="end" font-weight="800">${f2(lastC)} ${lastPct>=0?'+':''}${lastPct.toFixed(2)}%</text>
+      <text x="${X(0).toFixed(1)}" y="${H-5}" font-size="9.5" fill="#9aa3b2" text-anchor="start">09:30</text>
+      <text x="${X(Math.floor((n-1)/2)).toFixed(1)}" y="${H-5}" font-size="9.5" fill="#9aa3b2" text-anchor="middle">11:30/13:00</text>
+      <text x="${X(n-1).toFixed(1)}" y="${H-5}" font-size="9.5" fill="#9aa3b2" text-anchor="end">15:00</text>
+      <line id="ixH" x1="${padL}" y1="0" x2="${W-padR}" y2="0" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+      <line id="ixV" x1="0" y1="${padT}" x2="0" y2="${volB}" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+      <rect id="ixHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+    </svg>
+    <div id="ixtip" style="position:absolute;display:none;pointer-events:none;z-index:5;
+      background:rgba(20,24,32,.92);color:#fff;border-radius:8px;padding:7px 10px;
+      font-size:11.5px;line-height:1.6;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.2)"></div>
+    </div>`;
+}
+
+/* ── 日/周/月K：蜡烛 + 量 + MA5/10/20 + 十字光标 ── */
+function drawIndexKL(d){
+  const bars=d.bars||[], n=bars.length;
+  if(n<2) return '<div class="fl" style="font-size:13px">K线数据不足</div>';
+  const closes=bars.map(b=>b.close), highs=bars.map(b=>b.high),
+        lows=bars.map(b=>b.low), vols=bars.map(b=>b.volume||0);
+  const ma5=_maOf(closes,5), ma10=_maOf(closes,10), ma20=_maOf(closes,20);
+  let mn=Math.min(...lows), mx=Math.max(...highs);
+  [ma5,ma10,ma20].forEach(a=>a.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; } }));
+  const pad=(mx-mn)*0.06||0.1; mn-=pad; mx+=pad;
+  const rg=(mx-mn)||1;
+  const W=720, H=250;
+  const padL=52, padR=14, padT=14, padB=20, gap=10;
+  const volH=46, priceH=H-padT-padB-volH-gap;
+  const iw=W-padL-padR;
+  const priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
+  const X=i=>padL+i*iw/(n-1);
+  const Yp=v=>priceB-(v-mn)/rg*priceH;
+  const maxVol=Math.max(...vols,1);
+  const Yv=v=>volB-v/maxVol*volH;
+  const bw=Math.max(1.6,Math.min(7,iw/n*0.62));
+  const prevC=i=>i>0?closes[i-1]:bars[i].open;
+  const colOf=i=>bars[i].close>=prevC(i)?'#d92d3f':'#0f9d58';
+
+  let candle='', volBars='';
+  bars.forEach((b,i)=>{
+    const x=X(i), c=colOf(i);
+    candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
+    const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    const y=Yv(vols[i]);
+    volBars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${c}" opacity=".55"/>`;
+  });
+  const maPath=arr=>{
+    let p='', started=false;
+    arr.forEach((v,i)=>{ if(v==null) return; p+=`${started?'L':'M'}${X(i).toFixed(1)},${Yp(v).toFixed(1)}`; started=true; });
+    return p;
+  };
+  const yTicks=[0,.25,.5,.75,1].map(t=>({v:mx-rg*t,y:padT+priceH*t}));
+  const xIdx=[0,Math.round((n-1)*.34),Math.round((n-1)*.67),n-1]
+    .filter((v,i,a)=>a.indexOf(v)===i);
+  // 周/月K 的日期只显示到月-日即可，但跨度大时要带上年，否则「同一张图里
+  // 两个 10-15」根本分不清是哪一年。
+  const fmtDate=s=>{
+    s=String(s||'');
+    if(n>0 && bars[0].date && s.slice(0,4)!==String(bars[0].date).slice(0,4)) return s;
+    return s.slice(5);
+  };
+  const last=bars[n-1], lpc=prevC(n-1), lPct=lpc>0?(last.close-lpc)/lpc*100:0;
+  const lCol=lPct>=0?'#d92d3f':'#0f9d58', yl=Yp(last.close);
+  const mg=d.ma||{};
+  const maLegend=[['MA5',ma5,'#e0a01a'],['MA10',ma10,'#2563d9'],['MA20',ma20,'#8b5cf6']]
+    .map(([nm,arr,col])=>{
+      const v=arr[n-1];
+      return `<span style="color:${col};font-weight:800">${nm} ${v==null?'—':v.toFixed(2)}</span>`;
+    }).join('<span class="fl" style="font-weight:400"> · </span>');
+
+  const label=({day:'日K',week:'周K',month:'月K'})[d.period]||'K线';
+  return `<div style="font-size:11px;margin-bottom:4px;display:flex;gap:4px;flex-wrap:wrap">
+      ${maLegend}<span class="fl" style="font-weight:400"> · </span>
+      <span class="fl" style="font-weight:400">${label} · 共 ${n} 根${d.period!=='day'?'（由日K聚合）':''}</span></div>
+    <div style="position:relative" id="ipWrap">
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    ${yTicks.map(t=>`<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${W-padR}" y2="${t.y.toFixed(1)}" stroke="#eef1f5"/>
+      <text x="${padL-6}" y="${(t.y+3.5).toFixed(1)}" font-size="9.5" fill="#9aa3b2" text-anchor="end">${t.v.toFixed(2)}</text>`).join('')}
+    <line x1="${padL}" y1="${volB}" x2="${W-padR}" y2="${volB}" stroke="#eef1f5"/>
+    <text x="${padL-6}" y="${(volT+9).toFixed(1)}" font-size="9" fill="#9aa3b2" text-anchor="end">量</text>
+    ${volBars}${candle}
+    <path d="${maPath(ma5)}" fill="none" stroke="#e0a01a" stroke-width="1.1"/>
+    <path d="${maPath(ma10)}" fill="none" stroke="#2563d9" stroke-width="1.1"/>
+    <path d="${maPath(ma20)}" fill="none" stroke="#8b5cf6" stroke-width="1.1"/>
+    <line x1="${padL}" y1="${yl.toFixed(1)}" x2="${W-padR}" y2="${yl.toFixed(1)}" stroke="${lCol}" stroke-width="1" stroke-dasharray="4 3" opacity=".8"/>
+    <text x="${W-padR}" y="${(yl-4).toFixed(1)}" font-size="9.5" fill="${lCol}" text-anchor="end" font-weight="800">${f2(last.close)} ${lPct>=0?'+':''}${lPct.toFixed(2)}%</text>
+    ${xIdx.map(i=>`<text x="${X(i).toFixed(1)}" y="${H-5}" font-size="9.5" fill="#9aa3b2" text-anchor="middle">${esc(fmtDate(bars[i].date))}</text>`).join('')}
+    <line id="ixH" x1="${padL}" y1="0" x2="${W-padR}" y2="0" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+    <line id="ixV" x1="0" y1="${padT}" x2="0" y2="${volB}" stroke="#9aa3b2" stroke-dasharray="3 3" opacity="0"/>
+    <rect id="ixHot" x="${padL}" y="${padT}" width="${iw}" height="${volB-padT}" fill="transparent"/>
+  </svg>
+  <div id="ixtip" style="position:absolute;display:none;pointer-events:none;z-index:5;
+    background:rgba(20,24,32,.92);color:#fff;border-radius:8px;padding:7px 10px;
+    font-size:11.5px;line-height:1.6;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.2)"></div>
+  </div>`;
+}
+
+/* 指数图的十字光标：分时和K线共用（两边的元素 id 与布局坐标一致）。
+   必须在 ipRender 之后调用 —— SVG 是刚 innerHTML 进去的，得重新查。 */
+function bindIndexCrosshair(d){
+  const el=$('ipBody') && $('ipBody').querySelector('#ipWrap');
+  if(!el) return;
+  const bars=d.bars||[], n=bars.length;
+  if(n<2) return;
+  const hot=el.querySelector('#ixHot'), vL=el.querySelector('#ixV'),
+        hL=el.querySelector('#ixH'), tip=el.querySelector('#ixtip'),
+        svg=el.querySelector('svg');
+  if(!hot||!vL||!hL||!tip||!svg) return;
+  const W=720, padL=52, padR=14, iw=W-padL-padR;
+  const hide=()=>{ vL.setAttribute('opacity','0'); hL.setAttribute('opacity','0'); tip.style.display='none'; };
+  const move=(ev)=>{
+    const r=svg.getBoundingClientRect();
+    if(!r.width) return;                        // 未布局：别算出 NaN
+    const vx=(ev.clientX-r.left)/r.width*W;
+    let i=Math.round((vx-padL)/(iw/(n-1)));
+    i=Math.max(0,Math.min(n-1,i));
+    const b=bars[i];
+    const x=padL+i*iw/(n-1);
+    vL.setAttribute('x1',x.toFixed(1)); vL.setAttribute('x2',x.toFixed(1)); vL.setAttribute('opacity','.75');
+    // 水平线贴在该点的收盘价上（分时与K线都一样：看的就是那一刻的价）
+    const base=Number(d.prev_close)||0;
+    const yv=b.close;
+    hL.setAttribute('y1','0'); hL.setAttribute('y2','0');   // 位置下面按同比例算
+    const mnB=Math.min(...bars.map(z=>z.low!=null?z.low:z.close));
+    const mxB=Math.max(...bars.map(z=>z.high!=null?z.high:z.close));
+    let lo=mnB, hi=mxB;
+    if(d.period==='min1'){
+      // ⚠️ 必须与 drawIntraday 的取值**逐字一致**：这里少包了 base，光标就会
+      //    和折线错位（图上那条横线贴不到价格上）。两处口径改一处就该改另一处。
+      const _l=Math.min(...bars.map(z=>(z.low!=null?z.low:z.close)), base);
+      const _h=Math.max(...bars.map(z=>(z.high!=null?z.high:z.close)), base);
+      const _p=(_h-_l)*0.08||base*0.008;
+      lo=_l-_p; hi=_h+_p;
+    }else{
+      const p=(hi-lo)*0.06||0.1; lo-=p; hi+=p;
+    }
+    const rg2=(hi-lo)||1;
+    const H=250, padT=14, padB=20, gap=10, volH=46;
+    const priceH=H-padT-padB-volH-gap, priceB=padT+priceH;
+    const yy=priceB-(yv-lo)/rg2*priceH;
+    hL.setAttribute('y1',yy.toFixed(1)); hL.setAttribute('y2',yy.toFixed(1)); hL.setAttribute('opacity','.75');
+    const pv=base?((b.close-base)/base*100):0;
+    const when=d.period==='min1'?(b.time||''):esc(b.date);
+    tip.innerHTML=`<b>${when}</b><br>收 ${f2(b.close)}`
+      +(d.period==='min1'?'':`<br>开 ${f2(b.open)}　高 ${f2(b.high)}<br>低 ${f2(b.low)}`)
+      +`<br><span style="color:${pv>=0?'#ff8a8a':'#7ee0a8'}">${pv>=0?'+':''}${pv.toFixed(2)}%</span>`
+      +(b.volume?`　量 ${(b.volume/1e4).toFixed(0)}万手`:'');
+    tip.style.display='block';
+    const px=ev.clientX-el.getBoundingClientRect().left;
+    tip.style.left=Math.max(2,Math.min(px+12,(el.clientWidth||W)-tip.offsetWidth-4))+'px';
     tip.style.top=(ev.clientY-el.getBoundingClientRect().top-6)+'px';
   };
   hot.addEventListener('mousemove',move);
@@ -4161,10 +4545,12 @@ function closeAllPanels(){ $('panel').classList.remove('on'); $('portPanel').cla
 // closeAllPanels 管三个配置面板，closeDetail 管详情 —— 两者互不影响，
 // 但都要清遮罩，所以先各自收面板再统一关遮罩。
 $('btnClose').onclick=closeAllPanels;
-$('mask').onclick=()=>{ closeAllPanels(); closeDetail(); };
+$('mask').onclick=()=>{ closeAllPanels(); closeDetail(); closeIndexChart(); };
 // Esc 关闭详情（配置面板有自己的关闭按钮，这里只管详情，避免误关正在编辑的策略）
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape' && $('dpanel').classList.contains('on')) closeDetail();
+  if(e.key!=='Escape') return;
+  if($('ipanel').classList.contains('on')){ closeIndexChart(); return; }
+  if($('dpanel').classList.contains('on')) closeDetail();
 });
 $('hdSrc').onclick=openSrc;
 // 自动刷新开关：默认开；关掉就彻底不轮询（省电/省流量）
@@ -4209,7 +4595,15 @@ $('btnReset').onclick=async()=>{ if(!confirm('恢复当前策略的默认参数�
   $('panel').classList.remove('on');$('mask').classList.remove('on'); load(true); };
 // 详情里的 K 线是按容器宽度算的；窗口尺寸变了要按当前可见页签重画，
 // 否则切回来还是旧宽度（隐藏容器宽度为 0，画出来会挤成一条）。
-window.addEventListener('resize',()=>{ if(SEL&&DP_CUR&&DP_TAB==='quote') drawK(DP_CUR); });
+window.addEventListener('resize',()=>{
+  if(SEL&&DP_CUR&&DP_TAB==='quote') drawK(DP_CUR);
+  // 指数图用的是 viewBox 自适应，不需要重画；但面板宽度变了要让光标重新定位，
+  // 也就是重绑一次（代价极低）。只在面板开着时做。
+  if($('ipanel').classList.contains('on')){
+    const d=IDX_CACHE[IDX_CUR+':'+IDX_PERIOD];
+    if(d) try{ bindIndexCrosshair(d); }catch(e){}
+  }
+});
 
 load();
 </script>

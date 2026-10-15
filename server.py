@@ -176,6 +176,112 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _index_view(self, code, period):
+        """指数走势数据：分时 / 日K / 周K / 月K。
+
+        ★ 顶栏原来只写一个末位价格，既不说是**哪个指数**、也不给涨跌点数 ——
+          3707.48 这个数字涨跌了多少全靠用户自己心算。这里把口径一次补齐：
+          name（是什么）/ price（现在多少）/ chg（涨跌点数）/ pct（涨跌幅）/
+          prev_close（昨收基准，分时那条虚线要用）。
+
+        ★ 分时是**独立链路**（新浪分钟线），日/周/月K 走项目已有的三路降级日K
+          再本地聚合。两条路互不兜底：分钟级取不到时如实报空，绝不拿日K 假装
+          分时 —— 那会把「今天的分时」画成「最近几十天」，是彻头彻尾的假图。
+        """
+        import datetime
+        from core.version import APP_VERSION          # noqa: F401  （仅保持导入约定）
+
+        code = (code or "sh000001").strip().lower()
+        if not code:
+            code = "sh000001"
+        period = (period or "min1").strip().lower()
+        alias = {"min": "min1", "1m": "min1", "m1": "min1", "today": "min1",
+                 "d": "day", "daily": "day", "k": "day",
+                 "w": "week", "weekly": "week",
+                 "mo": "month", "monthly": "month", "y": "month"}
+        period = alias.get(period, period)
+        if period not in ("min1", "day", "week", "month"):
+            period = "min1"
+
+        name_map = {"sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指",
+                    "sh000300": "沪深300", "sh000905": "中证500", "sh000852": "中证1000",
+                    "sh000016": "上证50", "sz399005": "中小100"}
+
+        out = {"ok": False, "code": code, "period": period,
+               "name": name_map.get(code, code.upper()),
+               "ts": time.time(), "bars": [], "source": ""}
+        try:
+            if period == "min1":
+                raw_min = ds.fetch_minute_line(code, 1, 300)
+                # ★ 只保留**最后一个交易日**的分时。300 根 1 分钟线在盘中只够
+                #   覆盖「当天 + 前一日尾盘」（实测：10-14 有 61 根 + 10-15 有
+                #   239 根，合计正好 300）。两条日期的点连成一条折线，图会变成
+                #   「昨天下午一路跌到今天收盘」的一条长斜线，而用户以为是今天
+                #   的分时 —— 既失真又误导。分时的定义就是**一个交易日**。
+                if raw_min:
+                    _last_day = raw_min[-1].get("date")
+                    bars = [x for x in raw_min if x.get("date") == _last_day]
+                else:
+                    bars = []
+                out["source"] = "sina-min"
+                out["trade_date"] = bars[-1]["date"] if bars else ""
+            else:
+                daily = ds.fetch_kline(code, 260)
+                if period == "day":
+                    bars = daily[-120:]
+                    out["source"] = "kline"
+                else:
+                    bars = ds.resample_kline(daily, period)
+                    bars = bars[-120:]
+                    out["source"] = "kline-aggregated"
+            out["bars"] = bars or []
+        except Exception as e:                                # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {e}"
+
+        bars = out["bars"]
+        # 昨收 = **上一交易日收盘价**，四种周期都用这一个口径。
+        #
+        # ★ 踩过的坑（真实错误，别改回去）：分时那条分支原本没有单独取昨收，
+        #   于是落到「退而取 bars[0].open」的兜底上 —— 而 300 根 1 分钟线在
+        #   盘中只够覆盖**当天 + 前一日尾盘**，bars[0] 是「昨天 13:59」那一分钟
+        #   的价，拿它当昨收就得出 -1.77%，而真实昨收（昨收 3767.23）是 -1.59%。
+        #   同一屏里顶栏写 -1.59%、弹出的分时写 -1.77%，用户只会认为其中一个是错的。
+        #   所以昨收**只从日K取**，绝不能从分时窗口的第一根推。
+        prev_close = None
+        try:
+            full = ds.fetch_kline(code, 260)
+            if len(full) >= 2:
+                prev_close = float(full[-2]["close"])
+        except Exception:                                     # noqa: BLE001
+            prev_close = None
+        if prev_close is None and period != "min1" and len(bars) >= 2:
+            # 日K 拿不到（极少数）时才退到「本序列倒数第二根」；分时**不适用**
+            # 这条兜底 —— 它的相邻两根是分钟，不是交易日。
+            prev_close = float(bars[-2].get("close") or 0) or None
+        out["prev_close"] = prev_close
+        # 昨收是估算值时如实标出来（前端据此在图上写「基准推算」）
+        out["prev_close_exact"] = prev_close is not None
+
+        last = bars[-1] if bars else None
+        if last:
+            price = float(last.get("close") or 0)
+            out["price"] = price
+            if prev_close:
+                out["chg"] = round(price - prev_close, 2)
+                out["pct"] = round((price - prev_close) / prev_close * 100, 2)
+        # 均线（周/月K 的 MA 也是按各自的根算，不是把日线均线搬过来）
+        closes = [float(b.get("close") or 0) for b in bars]
+        ma = {}
+        for w in (5, 10, 20):
+            if len(closes) >= w and w:
+                ma[f"ma{w}"] = round(sum(closes[-w:]) / w, 2)
+        out["ma"] = ma
+        out["ok"] = bool(bars)
+        if not bars:
+            out["error"] = out.get("error") or "没取到该指数的走势数据（数据源未响应）"
+        out["server_time"] = datetime.datetime.now().strftime("%H:%M:%S")
+        return out
+
     def _live_view(self):
         """轻量实时刷新：只拉"当前关心的那些票"的行情 + 重算情绪阶段。
 
@@ -351,6 +457,11 @@ class Handler(BaseHTTPRequestHandler):
                 # 状态取自最近一次真实使用，不另发探测请求 —— 详见
                 # core/datasource.py 末尾的「数据源总览」。
                 self._send_json({"ok": True, **ds.sources_status()})
+            elif path == "/api/index":
+                # 指数走势：分时 / 日K / 周K / 月K（顶栏点开看）
+                self._send_json(self._index_view(
+                    (qs.get("code") or ["sh000001"])[0],
+                    (qs.get("period") or ["min1"])[0]))
             elif path == "/api/stock":
                 # 单只股票详情：自选/持仓里点开不在当日候选中的股票也看得到
                 code = (qs.get("code") or [""])[0]

@@ -1347,11 +1347,26 @@ def fetch_index_snapshots(date: str = "", ttl: int = 30) -> dict:
                 # 实测 上证指数 4.65e11 = 4649.6 亿，且下游一律按 `>1e5 ? /1e8 : 原值`
                 # 处理（见 pipeline）。原注释写的是"万元"，照着它做 ×1e4 会凭空放大一万倍。
                 # 解析层统一走 _parse_tx_line 的成交额字段（第 37 位）。
+                #
+                # ★ v1.40.0：补 chg（涨跌**点数**）与 prev_close（昨收）。顶栏原来
+                #   只有一个价格 + 一个百分比，用户「跌了多少点」得自己乘除；而且
+                #   前端手里没有昨收，**没法自己算**点数（用 price 反推 pct 会因
+                #   四舍五入越差越多）。所以口径必须在后端一次算准。
+                _price = rec["price"]; _pct = rec["pct"]
+                _prev = None
+                if _price is not None and _pct is not None and (100.0 + _pct) != 0:
+                    try:
+                        _prev = _price / (1.0 + _pct / 100.0)
+                    except ZeroDivisionError:
+                        _prev = None
                 out[rec["code"]] = {
                     "name": codes.get(rec["code"], rec["name"]),
-                    "price": rec["price"],
-                    "pct": rec["pct"],
+                    "price": _price,
+                    "pct": _pct,
                     "amount": rec["amount"],
+                    "prev_close": (round(_prev, 2) if _prev else None),
+                    "chg": (round(_price - _prev, 2)
+                            if (_price is not None and _prev) else None),
                 }
             if len(out) >= 2:
                 return True, out
@@ -1403,6 +1418,13 @@ KLINE_HOSTS = [
 ]
 SINA_KLINE = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
               "CN_MarketData.getKLineData?symbol={code}&scale=240&ma=5&datalen={n}")
+
+# 分钟线（含分时 scale=1）。新浪这个接口与上面的日K是**同一个**，
+# 只是 scale 换了个值（240=日、1=1分、5/15/30/60=分钟），字段名叫 `day`
+# 但装的是 `2026-10-15 09:35:00` 这种带时间的时刻。
+SINA_MKLINE = ("https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService"
+               ".getKLineData?symbol={code}&scale={scale}&ma=no&datalen={n}")
+MKLINE_REFERER = "https://finance.sina.com.cn"
 
 
 # ---------------------------------------------------------------- 通达信（mootdx）
@@ -1815,6 +1837,119 @@ def fetch_kline(code: str, n: int = 70) -> list[dict]:
             bars = _kline_from_sina(code, n)
         return bars
     return cached(f"kline:{code}:{n}", 1800, producer)
+
+
+def _minute_from_sina(code: str, scale: int, n: int) -> list[dict]:
+    """新浪分钟线。scale=1 即分时，240 是日K（走上面那条）。
+
+    与日K接口是同一个（CN_MarketDataService.getKLineData），所以 host 混用
+    没问题 —— 实测 `quotes.sina.cn` 这条路稳定，`money.finance.sina.com.cn`
+    对 scale=1 反而常返回空。失败一律返回 []，由调用方决定怎么降级。
+    """
+    try:
+        raw = _get(SINA_MKLINE.format(code=code, scale=scale, n=n), timeout=12,
+                   referer=MKLINE_REFERER).decode("utf-8", errors="ignore")
+        arr = json.loads(raw)
+    except Exception:                                        # noqa: BLE001
+        return []
+    out = []
+    for b in arr if isinstance(arr, list) else []:
+        try:
+            t = str(b["day"])
+            out.append({
+                "date": t[:10],                              # YYYY-MM-DD
+                "time": t[11:16] if len(t) >= 16 else "",    # HH:MM
+                "open": float(b["open"]), "close": float(b["close"]),
+                "high": float(b["high"]), "low": float(b["low"]),
+                "volume": float(b.get("volume") or 0),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def fetch_minute_line(code: str = "sh000001", scale: int = 1,
+                      n: int = 300) -> list[dict]:
+    """分钟线 / 分时。返回 [{date,time,open,close,high,low,volume}]，按时间正序。
+
+    ★ 为什么分时要用**分钟线**而不是画一根根 1 分钟蜡烛：
+    分时的标准画法是「价格折线 + 昨收基准线 + 均价线」，用 close 连成折线即可；
+    open/high/low 也一并带回来，前端想画量柱或蜡烛都够用。日K 那条路
+    （fetch_kline，通达信→腾讯→新浪三路）**不覆盖分钟级**，所以这里是独立一条
+    链路 —— 只有新浪一家，取不到就如实返回空，不要拿日K 假装分时。
+    """
+    scale = int(scale) if scale else 1
+    n = max(30, min(int(n or 300), 1023))        # 1023 是新浪 datalen 实测上限
+    def producer():
+        return _minute_from_sina(code, scale, n)
+    # 分时在盘中是要跟着动的，但也不该每秒都打接口：60 秒足够，且收盘后
+    # 一整天都是同一份，缓存命中率极高。
+    return cached(f"mkline:{code}:{scale}:{n}", 60, producer)
+
+
+def resample_kline(bars: list[dict], period: str = "week") -> list[dict]:
+    """把日K 聚合成周K / 月K。
+
+    ★ 为什么聚合而不是直接取周/月接口：日K 这条链路上已经有**三路降级**
+    （通达信→腾讯→新浪）在保它，而周K/月K 再引一个接口就是再引一个坏点；
+    聚合本身是纯函数、不可能失败。少一个接口就少一处「今天这个源挂了」。
+    ★ 周K 按 **ISO 周**（周一为一周之始）分组，与行情软件的周K 口径一致 ——
+    用「每 5 根日K 一组」在节假日多的 A 股会错位（春节那周只有 2 个交易日，
+    按根数切会把两周并成一周）。
+    ★ 月K 按自然月。两者都用该组**最后一个交易日**作为这根的日期标签
+    （行情软件惯例：周K 的日期显示的是当周最后一天）。
+    """
+    if not bars:
+        return []
+    per = "month" if str(period).lower().startswith("m") else "week"
+    out: list[dict] = []
+    cur_key = None
+    cur: list[dict] = []
+
+    def key_of(b):
+        d = str(b.get("date") or "")[:10]
+        parts = d.split("-")
+        if len(parts) != 3:
+            return d                                   # 日期畸形：各自成组，不猜
+        if per == "month":
+            return parts[0] + "-" + parts[1]
+        try:
+            import datetime as _dt
+            y, m, dd = int(parts[0]), int(parts[1]), int(parts[2])
+            iso = _dt.date(y, m, dd).isocalendar()
+            return f"{iso[0]}-W{iso[1]:02d}"
+        except (ValueError, TypeError):
+            return d
+
+    def flush(group: list[dict]) -> None:
+        if not group:
+            return
+        out.append({
+            "date": str(group[-1].get("date") or ""),
+            "open": group[0]["open"],
+            "close": group[-1]["close"],
+            "high": max(b["high"] for b in group),
+            "low": min(b["low"] for b in group),
+            "volume": sum(float(b.get("volume") or 0) for b in group),
+        })
+
+    for b in bars:
+        try:
+            if b.get("open") is None or b.get("close") is None:
+                continue
+            float(b["open"]); float(b["close"]); float(b["high"]); float(b["low"])
+        except (KeyError, ValueError, TypeError):
+            continue                                   # 坏一根就跳一根，不废整段
+        k = key_of(b)
+        if cur_key is None:
+            cur_key = k
+        elif k != cur_key:
+            flush(cur)
+            cur = []
+            cur_key = k
+        cur.append(b)
+    flush(cur)
+    return out
 
 
 KLINE_CACHE_DIR = paths.cache_path("kline")
