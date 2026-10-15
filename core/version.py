@@ -1379,5 +1379,96 @@
          测试：新增 tests/test_outlook_sowing.py（12 项：维度出现/前瞻盯线/
          节点门禁/空 sowing 不崩）。
          全量 Python 845 + JS 281 = 1126 通过 / 0 失败。
+  1.39.0  数据就绪闸门（v1.39.0）+「今日总览」自查修复（用户实测 2026-10-15 尾盘）
+
+         【一】数据未就绪不再输出任何「可以出手」的结论
+         用户反复反馈的顽固 bug：「每次首次启动就数据还未获得齐全就说可以
+         出手，过一会获得数据了就说不能出手」。措辞层补过两次，第三次从
+         引擎层堵漏。
+         根因：冷启动那一刻三池（涨停/跌停/炸板）还没抓到，空池算出来的
+         hurt_area=0.0 会被读成「没风险」而不是「没数据」；同时
+         stage_stabilizer.peek() 读的是按自然日持久化的磁盘文件，同一交易日
+         跨进程重启不丢，于是文件里早些时候确认过的退潮也被当成本轮结论。
+         修：core/stage_stabilizer.py peek(real_date, ready=True) 未就绪一律
+         返回 confirmed=False（方向偏保守，不会误放行）；core/engine.py
+         evaluate_sentiment 增加就绪闸门 —— data_ready 为假时 can_trade=False、
+         note 只讲「数据没到手」不讲任何行情判断、且不喂样本给稳定器（空池的
+         hurt_area 是假样本）；core/datasource.py / server.py / core/trading.py
+         健康度记账与透传，就绪结论提到报告顶层 data_health。
+         注：本项原先在代码注释里标 v1.38.6、涨停基因标 v1.38.0，但
+         APP_VERSION 一直停在 1.35.1、changelog 也停在 1.35.1，两者各走各的。
+         本次统一重编号为 1.39.0（1.36.0–1.38.6 曾被非正式提交信息占用，
+         跳过以免撞名）。
+
+         【二】「今日总览」自查修复（6 条）
+
+        ① 【温度计与 M3 同屏打架】当日沪指 -2.03%、深成指 -2.91%、
+           创业板指 -3.68%、跌 5122 家、跌停 22 家：M3 判 "ebb 退潮期·只做
+           首板试错仓"，E1 温度计 57° 却报 "🌱 修复·启动 · 轻仓试错，只打最强"
+           —— 同屏两个相反指令。根因：温度四项（涨停家数30 + 连板高度25 +
+           炸板率20 + 晋级率/宽度25）**完全不含大盘涨跌与跌停家数**，大盘暴跌
+           2~3.7% 仍被算成"较上日 +8° 回暖"。
+           修：core/sentiment_meter.py 新增 _breadth_penalty(up_ratio,
+           down_ratio, limit_down) → 0..18 分惩罚（只减不加，上限常量
+           _MARKET_PENALTY=18，全市场普跌 / 跌停家数两路取大），并入
+           _temperature（_temperature 新增 down_ratio / limit_down 两个
+           关键字参数）；stage==revive 且惩罚 >= 18 时 E1 建议换成"空仓等企稳，
+           别在下跌中接涨停"，>=12 时警告"仓位减半、只做最强的那一只"。
+           返回新增 market_note（"大盘拖累：… —— 温度已扣 N 分"）与
+           metrics.market_penalty / market_penalty_why / down_ratio。
+           实测 2026-10-15：温度 57 → 39、档位 revive → ice（🧊 冰点），
+           与 M3 的退潮结论一致。index.html renderMeter 用 .srcwarn 渲染
+           market_note；并**更正**该处原注释「两把尺子在数据层面已统一，
+           不再需要口径说明创可贴」—— 实测仍是错的。
+
+        ② 【缩量红盘判据错位】core/engine.py 原文
+              recent = hist[-5:]
+              if recent and all(b["close"] > b["open"] for b in recent[-3:]):
+           · hist[-5:] 切出来只用了 [-3:]，前两根是**死代码**；
+           · 判据看的是**近 3 日**是否连续收阳，而非**当日**红盘 —— 当日暴跌
+             只要前三天恰好收阳，就会输出"筹码结构好，可低吸"。
+           修：改为只判**当日**末根 K 线（close > open，平盘不算），
+           末根缺 OHLC → 不判定（绝不猜）。
+
+        ③ 【放量下跌仍劝做中长线】core/engine.py tier==3 的 advice 原来是
+           "资金进得去大市值，做中长线波段/趋势票"，**只看成交额单因子、
+           不看涨跌方向**。当日两市 15696 亿（rel=0.947、trend=1.19）判
+           peak_swing，同日三大指数全线下跌 —— 放量下跌恰是中长线最差进场点。
+           修：新增 _down_day（末根指数 K 线 close <= open 即当日收阴），
+           tier3 收阴时改为"量能虽大但当日指数收阴 —— 是放量下跌不是放量上攻，
+           别在此位置建中长线仓"；tier2（comfort_short）收阴时追加
+           "※但当日指数收阴 —— 题材也只在低吸位做，不追高"。
+
+        ④ 【支线卡劝追连板，与"不接力"自相矛盾】picks_note 声明
+           "涨停名单里有 N 只 2 板以上的票 —— 体系一律不接力，未列入候选"，
+           但 mainline.py 的支线 judge 对任何支线都说"只做其最强的那一只"，
+           而该板块最高板已 2 板以上时那个"最强"正是不接力对象（实测饲料/
+           影视院线最高 5 板）。修：mainline.py 支线 judge 增加 maxb 分支
+           （>=2 板改为"连板不接力，只等它回落后的新首板，别追高"）；
+           pipeline.py 的 picks_note 补一句"下方板块卡提到它们只是展示板块
+           热度，不是买点建议"，消除同屏误读。
+
+        ⑤ 【"明日"日期不查休市日历】core/outlook.py._next_trade_date 原来只做
+           "工作日 +1 跳周末"，节前会把明日写成实际休市日。修：签名改为
+           _next_trade_date(real_date, holidays=None) -> (date, exact)，
+           holidays 读 cfg["M7_earnings"]["market_holidays"]（strategy_config
+           新增该键，默认空表）；返回值新增 date_exact（表未覆盖该年份 → False，
+           文案保留"节假日顺延以交易所公告为准"免责；覆盖到 → True，文案改为
+           "明日为交易日（已按休市日历核对）"）。index.html 明日卡片对
+           date_exact===false 显示"估算"二字。不调接口：outlook 在渲染路径上。
+
+        ⑥ 【rel_adj 拼接双标点】core/engine.py 剥掉重复档位名后 _tail 可能以
+           标点开头，拼出"…降为缩量存量；。"；且 tier3 多句 advice 会被"；"
+           挤成一句。修：剥完继续 lstrip 孤立标点，有内容用"。"拼接，
+           无内容只留 rel_adj。
+
+        测试：全量 Python 1278 通过 / 0 失败（37 个 test_*.py 全绿）。
+        重点覆盖：tests/test_sentiment_meter.py 16 通过（既有标定 4/20/22
+        因涨跌比正常、惩罚为 0，全部保留）、tests/test_outlook_sowing.py 12
+        通过、tests/test_volume_mode.py 36 通过、tests/test_regime.py 32 通过、
+        tests/test_known_defects.py 59 通过、tests/test_data_sources.py 76 通过
+        （已更新到就绪闸门的新契约）。
+        （tests/test_known_defects.js 与 test_frontend_robustness.js 需要
+         jsdom，本机未安装，无法运行 —— 环境缺口，非本次改动引入。）
 """
-APP_VERSION = "1.35.1"
+APP_VERSION = "1.39.0"

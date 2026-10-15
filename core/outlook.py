@@ -22,7 +22,7 @@ from . import trading
 def _next_trade_date(real_date: str, holidays=None) -> tuple[str, bool]:
     """real_date（YYYYMMDD）之后的下一个交易日，返回 ('MM-DD', 是否精确)。
 
-    ★ v1.36.0：原来只做"工作日 +1 跳周末"，**不看休市日历**，节前会把"明日"
+    ★ v1.39.0：原来只做"工作日 +1 跳周末"，**不看休市日历**，节前会把"明日"
     写成实际休市的日期（10-01 会写成 10-02），整张「明日判断」卡的日期是错的。
 
     第二个返回值是**精确性标志**，供调用方决定措辞：
@@ -273,7 +273,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
                                   f"出现第二只、独苗晋级二板",
                           "then": "按新周期题材对待：优先进首板（试错仓），确认后再加仓"})
 
-    # 下一交易日：能确认就用准确措辞，不能确认就保留"估算 + 免责"（v1.36.0）
+    # 下一交易日：能确认就用准确措辞，不能确认就保留"估算 + 免责"（v1.39.0）
     _holidays = (cfg.get("M7_earnings") or {}).get("market_holidays") or []
     next_date, next_exact = _next_trade_date(real_date, _holidays)
     tail = ("明日为交易日（已按休市日历核对）。"

@@ -390,7 +390,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 + ("不构成峰值量能，" if _orig == 3 else "")
                 + f"由{_TIER_CN[_orig]}降为{_TIER_CN[tier]}")
 
-    # ★ 放量下跌 ≠ 可以做中长线（v1.36.0 修）：原来 tier==3 的 advice 是
+    # ★ 放量下跌 ≠ 可以做中长线（v1.39.0 修）：原来 tier==3 的 advice 是
     #   「资金进得去大市值，做中长线波段/趋势票」，**只看成交额单因子、不看
     #   涨跌方向**。2026-10-15 实测：两市 15696 亿（rel=0.947 分位 95%、
     #   trend=1.19）判 peak_swing，而同一天沪指 -2.03%、深成指 -2.91%、
@@ -438,7 +438,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     #   没说 → advice 自带档位名，信息完整。
     #   实测 20261014 的渲染就是这个坑：rel_adj 结尾「降为缩量存量」后面紧跟
     #   advice 开头的「缩量存量，」。同名字连读两遍，读起来像卡带。
-    # ★ v1.36.0：`_tail` 剥掉档位名后可能**只剩一个标点**（例如 advice 就是
+    # ★ v1.39.0：`_tail` 剥掉档位名后可能**只剩一个标点**（例如 advice 就是
     #   "量能舒适，可做" → 剥完 "可做" 还好；但若是 "缩量存量。" 这种纯标点
     #   开头），拼出来会出现"…降为缩量存量；。"这种双标点。另外 tier3 在
     #   放量下跌时会走多句 advice，`rel_adj` 的"；"会把它和后文挤成一句。
@@ -458,7 +458,7 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
 
     # 极致缩量还红盘
     #
-    # ★ v1.36.0 修两处（用户实测 2026-10-15）：原文是
+    # ★ v1.39.0 修两处（用户实测 2026-10-15）：原文是
     #       recent = hist[-5:]
     #       if recent and all(b["close"] > b["open"] for b in recent[-3:]):
     #   ① `hist[-5:]` 切出来只用了 `[-3:]`，前两根是**死代码**，`recent` 变量
@@ -589,7 +589,7 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
       ④ 高度标的被闷杀：跌停 ≥ 5 只
     判定成立 → 无条件清仓，停止一切低吸和打板，管住手。
 
-    ★ 数据就绪闸门（v1.38.6，用户实测的顽固 bug 第三次复发后补的引擎层堵漏）
+    ★ 数据就绪闸门（v1.39.0，用户实测的顽固 bug 第三次复发后补的引擎层堵漏）
       症状：「每次首次启动就数据还未获得齐全就说可以出手，过一会获得数据了
       就说不能出手」。措辞上补过两次补丁（web/index.html 结论卡那段注释），
       病根一直没堵 —— 它根本不在措辞层，在**这一层**。
@@ -1478,7 +1478,7 @@ def screen(cfg: dict, snaps: dict[str, dict], kl: dict[str, list[dict]],
                 extra_den += w_ss
                 if ss_why:
                     greasons = [f"小盘弹性（{'、'.join(ss_why)}）"] + greasons
-        # ★ 涨停基因（v1.38.0，E11）：门槛式，见 core/gene.seal_score 上方注释。
+        # ★ 涨停基因（v1.39.0，E11）：门槛式，见 core/gene.seal_score 上方注释。
         #   只在传了 gene_table 时启用；够到顶档才给分（不是线性——实测该因子
         #   在首板上的形状是门槛不是斜坡，G4 判"方向不一致"是对的）。
         if gene_table and a.get("use_gene_seal", True):

@@ -637,7 +637,7 @@ def position_plan(cfg: dict, picks: list[dict], sentiment: dict,
     max_single = p.get("max_single_weight", 0.60)
     hold_before = p.get("hold_before_boards", 5)
 
-    # ★ 数据未就绪闸门（v1.38.6）：没数据时**给不出任何仓位**。
+    # ★ 数据未就绪闸门（v1.39.0）：没数据时**给不出任何仓位**。
     #   必须读 data_ready 而不是只看 stage —— stage="unknown" 分不出
     #   「接口没取到」和「今天真的没有涨停」这两件事（前者是暂态、后者是市场
     #   事实），只看 stage 就会在冷启动时按"无信号"给出 Day1 平铺链：

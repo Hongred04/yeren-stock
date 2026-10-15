@@ -89,7 +89,7 @@ def _breadth_penalty(up_ratio: float | None, down_ratio: float | None,
                      limit_down: int | None) -> tuple[int, str]:
     """大盘系统性下跌的惩罚分（0.._MARKET_PENALTY）与说明。
 
-    ★ 为什么必须有这一项（v1.36.0 修）：原来的 `_temperature()` 只看
+    ★ 为什么必须有这一项（v1.39.0 修）：原来的 `_temperature()` 只看
     涨停家数 / 连板高度 / 炸板率 / 晋级率四个**局部**指标，**完全不看大盘
     涨跌与跌停家数**。2026-10-15 实测：沪指 -2.03%、深成指 -2.91%、
     创业板指 -3.68%，涨 411 家 / 跌 5122 家（涨跌比 0.08）、跌停 22 家 ——
@@ -123,7 +123,7 @@ def _temperature(limit_up: int, max_boards: int, broken_ratio: float,
                  limit_down: int | None = None) -> int:
     """0-100 情绪温度。四项加权：涨停家数30 / 连板高度25 / 炸板率20 / 晋级率25。
 
-    ★ v1.36.0：在上面的四项之上再减一项**大盘惩罚**（见 _breadth_penalty）。
+    ★ v1.39.0：在上面的四项之上再减一项**大盘惩罚**（见 _breadth_penalty）。
     原来的四项全是"涨停池内部"的局部指标 —— 跌停 20 家、跌 5000 家，只要
     涨停结构还看得过去，温度就照样报"回暖"。惩罚项只减不加，且由
     _MARKET_PENALTY 封顶，不会动到 4/20/22 等既有测试标定（那些用例的
@@ -176,7 +176,7 @@ def _temperature(limit_up: int, max_boards: int, broken_ratio: float,
     else:
         ur = up_ratio if up_ratio is not None else 0.5
         t4 = int(max(0.0, min(1.0, (ur - 0.35) / 0.35)) * 22) + 3
-    # ⑤ 大盘系统性下跌惩罚（0..18，只减不加）—— v1.36.0 新增
+    # ⑤ 大盘系统性下跌惩罚（0..18，只减不加）—— v1.39.0 新增
     _pen, _ = _breadth_penalty(up_ratio, down_ratio, limit_down)
     return int(max(0, min(100, t1 + t2 + t3 + t4 - _pen)))
 
@@ -358,7 +358,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     #   三次都是 978/4496/699）。快照为空（冷启动/盘前）时才走网络降级链。
     breadth = ds.fetch_breadth(snaps=snaps) if snaps else ds.fetch_breadth()
     up_ratio = breadth.get("up_ratio") if breadth else None
-    # 涨跌比与跌停家数 —— 交给温度计的大盘惩罚项（v1.36.0）
+    # 涨跌比与跌停家数 —— 交给温度计的大盘惩罚项（v1.39.0）
     down_ratio = None
     if breadth and breadth.get("total"):
         try:
@@ -399,7 +399,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         stage = "ebb"
     info = STAGES.get(stage, STAGES["revive"])
 
-    # ★ 大盘暴跌时不许报「修复·启动 · 轻仓试错」（v1.36.0）：
+    # ★ 大盘暴跌时不许报「修复·启动 · 轻仓试错」（v1.39.0）：
     #   即便涨停结构尚可把温度推进了 revive 档，只要当日是**普跌**局面，
     #   "轻仓试错、只打最强"就是把用户往火坑里推。此时:
     #     · 指数层（跌停 ≥ 20 且涨家数 < 15%）→ 直接按 ice 口径说话，
@@ -431,7 +431,7 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "premium_src": premium_src,       # em=东财昨日涨停池 / local=本地归档
         "breadth": breadth, "prev_pool_date": pdate, "prev_temp": prev_temp,
         "drop_alert": drop_alert,
-        # 大盘惩罚：界面据此解释"为什么涨停结构还行、温度却不高"（v1.36.0）
+        # 大盘惩罚：界面据此解释"为什么涨停结构还行、温度却不高"（v1.39.0）
         "market_penalty": _pen, "market_penalty_why": _pen_why,
         "down_ratio": None if down_ratio is None else round(down_ratio, 4),
     }
