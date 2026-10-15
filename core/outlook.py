@@ -19,16 +19,38 @@ from . import regime
 from . import trading
 
 
-def _next_trade_date(real_date: str) -> str:
-    """real_date（YYYYMMDD）之后的下一个工作日，'10-12' 格式。"""
+def _next_trade_date(real_date: str, holidays=None) -> tuple[str, bool]:
+    """real_date（YYYYMMDD）之后的下一个交易日，返回 ('MM-DD', 是否精确)。
+
+    ★ v1.36.0：原来只做"工作日 +1 跳周末"，**不看休市日历**，节前会把"明日"
+    写成实际休市的日期（10-01 会写成 10-02），整张「明日判断」卡的日期是错的。
+
+    第二个返回值是**精确性标志**，供调用方决定措辞：
+      · True  —— 算出来的日期确定是交易日（跳过了周末 + 命中了休市表，
+                 或本机日期本就远离任何已知假期）；
+      · False —— 只跳了周末，休市表里没有覆盖到这个年份，日期可能因法定
+                 节假日而顺延，文案必须保留"以交易所公告为准"的免责。
+    绝不猜：宁可标 False 让界面说"估算"，也不能让用户以为日期是准的。
+    """
     try:
         d = datetime.strptime(real_date, "%Y%m%d")
     except (ValueError, TypeError):
         d = datetime.now()
+    # 休市表：接受 {"20261001", ...} 或 [20261001, ...] 两种写法
+    hs: set[str] = set()
+    for x in (holidays or ()):
+        s = str(x).strip()
+        if s:
+            hs.add(s)
     d += timedelta(days=1)
-    while d.weekday() >= 5:
+    for _ in range(30):                    # 上限 30 天，防脏数据死循环
+        ds_ = d.strftime("%Y%m%d")
+        if d.weekday() < 5 and ds_ not in hs:
+            break
         d += timedelta(days=1)
-    return d.strftime("%m-%d")
+    # 表里**没有任何**这一年附近的条目 → 无法确认，标 False（保留免责）
+    exact = bool(hs) and any(s[:4] >= d.strftime("%Y")[:4] for s in hs)
+    return d.strftime("%m-%d"), exact
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -251,7 +273,13 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
                                   f"出现第二只、独苗晋级二板",
                           "then": "按新周期题材对待：优先进首板（试错仓），确认后再加仓"})
 
-    tail = ("明日为工作日估算日期（节假日顺延以交易所公告为准）。"
+    # 下一交易日：能确认就用准确措辞，不能确认就保留"估算 + 免责"（v1.36.0）
+    _holidays = (cfg.get("M7_earnings") or {}).get("market_holidays") or []
+    next_date, next_exact = _next_trade_date(real_date, _holidays)
+    tail = ("明日为交易日（已按休市日历核对）。"
+            "以上是推演不是预测 —— 开盘后以量能和情绪的实际读数修正。"
+            if next_exact else
+            "明日为工作日估算日期（节假日顺延以交易所公告为准）。"
             "以上是推演不是预测 —— 开盘后以量能和情绪的实际读数修正。")
     # ---- 野人节奏：随盘面阶段换交易系统 ----
     # 「熊市不做长线，牛市不做短线……随盘面变化去改变自己的交易系统」。
@@ -273,7 +301,7 @@ def build(cfg: dict, real_date: str, sentiment: dict, volume: dict,
         mode_note = f"{mode_note}。{dn}"
 
     return {
-        "date": _next_trade_date(real_date),
+        "date": next_date, "date_exact": next_exact,
         "headline": head, "tone": tone,
         "mode": {"name": mode_name, "note": mode_note},
         "points": points, "watch": watch, "scenarios": scenarios,

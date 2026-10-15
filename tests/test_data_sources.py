@@ -96,7 +96,13 @@ def main():
         {"code": "sh600002", "name": "乙", "pct": -3.0, "boards_y": 2,
          "yfbt": 93000, "sector": "X"},
     ]
-    m = sm.build([], [], [], {}, "20260920", {"E1_meter": {"enabled": True}})
+    # ★ v1.36.0：sm.build 的「三池全空 → 数据未就绪」闸门会直接返回空 metrics，
+    #   本节测的是**打板溢价口径**，与"有没有池子"无关 —— 给它一个最小非空
+    #   涨停池让闸门放行，否则 me["money_effect"] 会 KeyError（闸门本身由
+    #   tests/test_data_memory.py 与 test_data_readiness.py 覆盖）。
+    _ZT_MIN = [{"code": "sh600001", "name": "甲", "boards": 1,
+                "first_time": 93500, "sector": "X"}]
+    m = sm.build(_ZT_MIN, [], [], {}, "20260920", {"E1_meter": {"enabled": True}})
     me = m["metrics"]
     ok(me["money_effect"] == 1.0, "打板溢价 = 东财均值 (5 + -3)/2 = 1.0")
     ok(me["height_premium"] == -3.0, "连板溢价只统计昨日≥2板")
@@ -107,7 +113,7 @@ def main():
         {"code": "sh600001", "name": "甲", "pct": 0.0, "boards_y": 1,
          "yfbt": 93000, "sector": "X"},
     ]
-    m2 = sm.build([], [], [], {}, "20260921", {"E1_meter": {"enabled": True}})
+    m2 = sm.build(_ZT_MIN, [], [], {}, "20260921", {"E1_meter": {"enabled": True}})
     ok(m2["metrics"]["money_effect"] is None
        and m2["metrics"]["premium_src"] == "",
        "全零不进口径（无本地兜底数据时为空）")

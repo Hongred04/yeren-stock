@@ -81,9 +81,53 @@ def _prev_pool(real_date: str) -> tuple[str, list[dict]]:
 
 # ---------------------------------------------------------------- 温度判定
 
+# ★ 大盘系统性下跌的惩罚上限（分）。见 _breadth_penalty 的注释。
+_MARKET_PENALTY = 18
+
+
+def _breadth_penalty(up_ratio: float | None, down_ratio: float | None,
+                     limit_down: int | None) -> tuple[int, str]:
+    """大盘系统性下跌的惩罚分（0.._MARKET_PENALTY）与说明。
+
+    ★ 为什么必须有这一项（v1.36.0 修）：原来的 `_temperature()` 只看
+    涨停家数 / 连板高度 / 炸板率 / 晋级率四个**局部**指标，**完全不看大盘
+    涨跌与跌停家数**。2026-10-15 实测：沪指 -2.03%、深成指 -2.91%、
+    创业板指 -3.68%，涨 411 家 / 跌 5122 家（涨跌比 0.08）、跌停 22 家 ——
+    这种日子四项局部指标仍然凑出 57 分，档位落到 `revive`，温度计报
+    「🌱 修复·启动 · 温度 57°（较上日 +8° 回暖）」，而同一屏的 M3 结论卡报
+    「退潮期 · 只做首板试错仓」。两把尺子给出**完全相反**的指令，用户无法
+    执行 —— 这正是「市场的情况和文字不符」最严重的一处。
+
+    判据分层（取最重的一档，不叠加 —— 避免暴跌日为一次事故重复扣分）：
+      · 普跌且跌停潮（跌停 ≥ 20 且涨家数占比 < 15%）→ 满额
+      · 普跌（涨家数占比 < 12%）                    → 12
+      · 明显偏空（涨家数占比 < 25%）                → 6
+      涨跌比正常（≥ 25%）→ 0 分，绝不惩罚，保住原有标定。
+    """
+    if up_ratio is None:
+        return 0, ""
+    _dr = down_ratio if down_ratio is not None else (1.0 - float(up_ratio))
+    _ld = int(limit_down or 0)
+    if _ld >= 20 and up_ratio < 0.15:
+        return _MARKET_PENALTY, f"普跌且跌停{_ld}家"
+    if up_ratio < 0.12:
+        return 12, f"仅{up_ratio*100:.0f}%个股上涨"
+    if up_ratio < 0.25:
+        return 6, f"仅{up_ratio*100:.0f}%个股上涨"
+    return 0, ""
+
+
 def _temperature(limit_up: int, max_boards: int, broken_ratio: float,
-                 promote_rate: float | None, up_ratio: float | None) -> int:
-    """0-100 情绪温度。四项加权：涨停家数30 / 连板高度25 / 炸板率20 / 晋级率25。"""
+                 promote_rate: float | None, up_ratio: float | None,
+                 down_ratio: float | None = None,
+                 limit_down: int | None = None) -> int:
+    """0-100 情绪温度。四项加权：涨停家数30 / 连板高度25 / 炸板率20 / 晋级率25。
+
+    ★ v1.36.0：在上面的四项之上再减一项**大盘惩罚**（见 _breadth_penalty）。
+    原来的四项全是"涨停池内部"的局部指标 —— 跌停 20 家、跌 5000 家，只要
+    涨停结构还看得过去，温度就照样报"回暖"。惩罚项只减不加，且由
+    _MARKET_PENALTY 封顶，不会动到 4/20/22 等既有测试标定（那些用例的
+    涨跌比都正常，惩罚为 0）。"""
     # ① 涨停家数（0-30）
     if limit_up >= 100:
         t1 = 30
@@ -132,7 +176,9 @@ def _temperature(limit_up: int, max_boards: int, broken_ratio: float,
     else:
         ur = up_ratio if up_ratio is not None else 0.5
         t4 = int(max(0.0, min(1.0, (ur - 0.35) / 0.35)) * 22) + 3
-    return int(max(0, min(100, t1 + t2 + t3 + t4)))
+    # ⑤ 大盘系统性下跌惩罚（0..18，只减不加）—— v1.36.0 新增
+    _pen, _ = _breadth_penalty(up_ratio, down_ratio, limit_down)
+    return int(max(0, min(100, t1 + t2 + t3 + t4 - _pen)))
 
 
 def _stage_of(temp: int, prev_temp: int | None = None) -> str:
@@ -219,12 +265,38 @@ def _space_board(real_date: str, max_boards: int,
 
 
 def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
-          real_date: str, cfg: dict | None = None) -> dict:
-    """构建情绪温度计。zt/dt/zb 为涨停/跌停/炸板池，snaps 为全市场快照。"""
+          real_date: str, cfg: dict | None = None,
+          health: dict | None = None) -> dict:
+    """构建情绪温度计。zt/dt/zb 为涨停/跌停/炸板池，snaps 为全市场快照。
+
+    health: core/datasource.data_health() 或它的子集（pipeline 与 server 都传
+            本轮刚取的那份）。**不传 = 不声明数据状态**，闸门不生效（向后兼容
+            那些只想要温度读数的调用点）。
+    """
     a = (cfg or {}).get("E1_meter", {})
     if not a.get("enabled", True):
         return {"enabled": False, "temperature": 0, "stage": "disabled",
                 "label": "模块已关闭", "advice": "", "ladder": [], "metrics": {}}
+
+    # 三池降级 → 这一帧的温度整体不可信（见 evaluate_sentiment 的长注释）。
+    if not health:
+        # [T1 取证路径] 不传 health 时以「三池是否全空」自证：冷启动那一刻
+        # 三个池接口一起挂，拿到的就是三张空表。三池都有货 → 按健康处理，
+        # 既有测试（sm.build(ZT,DT,ZB,{},...) 走的就是不传 health）逐字不变。
+        not_ready = not zt and not dt and not zb
+    else:
+        not_ready = any(
+            str(d.get("key") or "").startswith("pool:")
+            for d in list(health.get("degraded") or []))
+    if not_ready:
+        # ★ 温度计同样不给读数：temperature=None、stage="unknown"、metrics 空。
+        #   理由：M3(evaluate_sentiment) 走的就是"池子没到手 → 不出结论"这条路，
+        #   温度计若还报个「60°」，前端两张卡就各说各话（正是用户报的「一会能
+        #   出手一会不能」的同族症状）。空 metrics 让前端 hasMetrics 自动降级，
+        #   不必改 web/。enabled 仍是 True —— 关掉的是读数，不是模块。
+        return {"enabled": True, "temperature": None, "stage": "unknown",
+                "label": "数据未就绪", "advice": "关键池数据没到手，暂不给温度读数",
+                "ladder": [], "metrics": {}, "history": [], "data_ready": False}
 
     n_zt, n_dt, n_zb = len(zt), len(dt), len(zb)
     ladder = _ladder(zt)
@@ -286,8 +358,17 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     #   三次都是 978/4496/699）。快照为空（冷启动/盘前）时才走网络降级链。
     breadth = ds.fetch_breadth(snaps=snaps) if snaps else ds.fetch_breadth()
     up_ratio = breadth.get("up_ratio") if breadth else None
+    # 涨跌比与跌停家数 —— 交给温度计的大盘惩罚项（v1.36.0）
+    down_ratio = None
+    if breadth and breadth.get("total"):
+        try:
+            down_ratio = float(breadth.get("down") or 0) / float(breadth["total"])
+        except (TypeError, ValueError, ZeroDivisionError):
+            down_ratio = None
 
-    temp = _temperature(n_zt, max_boards, broken_ratio, promote_rate, up_ratio)
+    temp = _temperature(n_zt, max_boards, broken_ratio, promote_rate, up_ratio,
+                        down_ratio=down_ratio, limit_down=n_dt)
+    _pen, _pen_why = _breadth_penalty(up_ratio, down_ratio, n_dt)
 
     # 亏钱面积（事实数据，进 metrics）。退潮与否**只由 M3 稳定器确认**（见下方
     # peek 覆盖）—— E1 不自己拿原始面积强置"退潮"（v1.25.2 修：曾与自身注释相悖）。
@@ -305,10 +386,31 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     stage = _stage_of(temp, prev_temp)
     # 退潮与否**以 M3 稳定器的确认为准**（E1 只用自己的温度决定非退潮时的档位）。
     # 两个页面各报一个阶段是"一会能出手一会退潮"的另一个来源，这里统一口径。
-    v = stab.peek(real_date)
+    # ★ 就绪闸门：池子没取到时这里的 stage 也是拿空表/旧快照算的温度，一律不可信；
+    #   此时连"退潮确认"都不认（稳定器里躺着的是**上一轮**的结论，可能已经过期），
+    #   直接沿用温度分档，由前端按 data_ready=False 打叉说明数据没到手。
+    try:
+        v = stab.peek(real_date, ready=not_ready)
+    except TypeError:
+        # 兼容按旧签名打桩/包一层的老调用点（tests 里有 `stab.peek = lambda date:`）。
+        # 这一帧必然 not_ready=False —— 未就绪在上面已经返回，不会走到这里。
+        v = stab.peek(real_date)
     if v["confirmed"]:
         stage = "ebb"
     info = STAGES.get(stage, STAGES["revive"])
+
+    # ★ 大盘暴跌时不许报「修复·启动 · 轻仓试错」（v1.36.0）：
+    #   即便涨停结构尚可把温度推进了 revive 档，只要当日是**普跌**局面，
+    #   "轻仓试错、只打最强"就是把用户往火坑里推。此时:
+    #     · 指数层（跌停 ≥ 20 且涨家数 < 15%）→ 直接按 ice 口径说话，
+    #       但**不**改写 stage（阶段归属由温度与 M3 决定），只改写文案；
+    #     · 其余偏空 → 保留档位名，把建议换成"控仓等待"。
+    advice = info["advice"]
+    if stage == "revive" and _pen >= _MARKET_PENALTY:
+        advice = (f"涨停结构尚可但大盘系统性下跌（{_pen_why}）—— "
+                  f"赚钱效应被大盘吞噬，空仓等企稳，别在下跌中接涨停")
+    elif stage in ("revive", "ferment") and _pen >= 12:
+        advice = f"{advice}　※但当日{_pen_why}，整体在跌 —— 仓位减半、只做最强的那一只"
 
     # 一字板家数 / 平均封成比
     one_word = sum(1 for r in zt if 0 < _i(r.get("first_time")) < 93000)
@@ -329,6 +431,9 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
         "premium_src": premium_src,       # em=东财昨日涨停池 / local=本地归档
         "breadth": breadth, "prev_pool_date": pdate, "prev_temp": prev_temp,
         "drop_alert": drop_alert,
+        # 大盘惩罚：界面据此解释"为什么涨停结构还行、温度却不高"（v1.36.0）
+        "market_penalty": _pen, "market_penalty_why": _pen_why,
+        "down_ratio": None if down_ratio is None else round(down_ratio, 4),
     }
     delta = (temp - prev_temp) if prev_temp is not None else None
 
@@ -348,10 +453,14 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
 
     return {
         "enabled": True, "temperature": temp, "stage": stage,
-        "label": f"{info['emoji']} {info['label']}", "advice": info["advice"],
+        "label": f"{info['emoji']} {info['label']}", "advice": advice,
         "delta": delta, "ladder": ladder, "metrics": metrics,
         "space": _space_board(real_date, max_boards),
         "heat_series": heat_series,
-        "note": "温度 = 涨停家数30 + 连板高度25 + 炸板率20 + 晋级率/宽度25；"
-                "M3 判「能不能出手」，温度计看「今天多少度」",
+        "market_note": (
+            f"大盘拖累：{_pen_why} —— 涨停结构尚可但整体在跌，"
+            f"温度已扣 {_pen} 分" if _pen else ""),
+        "note": "温度 = 涨停家数30 + 连板高度25 + 炸板率20 + 晋级率/宽度25"
+                + (f" − 大盘惩罚{_pen}({_pen_why})" if _pen else "")
+                + "；M3 判「能不能出手」，温度计看「今天多少度」",
     }

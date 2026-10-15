@@ -390,14 +390,37 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
                 + ("不构成峰值量能，" if _orig == 3 else "")
                 + f"由{_TIER_CN[_orig]}降为{_TIER_CN[tier]}")
 
+    # ★ 放量下跌 ≠ 可以做中长线（v1.36.0 修）：原来 tier==3 的 advice 是
+    #   「资金进得去大市值，做中长线波段/趋势票」，**只看成交额单因子、不看
+    #   涨跌方向**。2026-10-15 实测：两市 15696 亿（rel=0.947 分位 95%、
+    #   trend=1.19）判 peak_swing，而同一天沪指 -2.03%、深成指 -2.91%、
+    #   创业板指 -3.68%、跌 5122 家 —— 放量下跌恰恰是中长线最差的进场点。
+    #   `engine.py:119-125` 的长注释已经修过"放量后的回落被判成峰值"，但
+    #   这一条（放量**下跌**）当时没修。
+    #   判据只认**当日**指数方向：末根 K 线收盘 ≤ 开盘 即当日收阴。
+    #   数据不足（hist 空/末根缺 OHLC）→ 不额外提示，保持原 advice 不变。
+    _down_day = False
+    if hist:
+        _b = hist[-1] or {}
+        try:
+            _o, _c = float(_b["open"]), float(_b["close"])
+            _down_day = _o > 0 and _c <= _o
+        except (KeyError, TypeError, ValueError):
+            _down_day = False
+
     if tier == 3:
         mode = "peak_swing"
-        advice = "资金进得去大市值，做中长线波段/趋势票"
+        advice = ("资金进得去大市值，做中长线波段/趋势票"
+                  if not _down_day else
+                  "量能虽大但当日指数收阴 —— 是放量下跌不是放量上攻，"
+                  "别在此位置建中长线仓，等指数企稳再谈波段")
         short_only = False
     elif tier == 2:
         mode = "comfort_short"
         advice = (f"量能处于舒适区（{int(comfort)}亿以上），"
-                  f"游资具备轮动能力，题材可做")
+                  f"游资具备轮动能力，题材可做"
+                  + ("　※但当日指数收阴 —— 题材也只在低吸位做，不追高"
+                     if _down_day else ""))
         short_only = False
     elif tier == 1:
         mode = "shrink_short"
@@ -415,19 +438,46 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
     #   没说 → advice 自带档位名，信息完整。
     #   实测 20261014 的渲染就是这个坑：rel_adj 结尾「降为缩量存量」后面紧跟
     #   advice 开头的「缩量存量，」。同名字连读两遍，读起来像卡带。
+    # ★ v1.36.0：`_tail` 剥掉档位名后可能**只剩一个标点**（例如 advice 就是
+    #   "量能舒适，可做" → 剥完 "可做" 还好；但若是 "缩量存量。" 这种纯标点
+    #   开头），拼出来会出现"…降为缩量存量；。"这种双标点。另外 tier3 在
+    #   放量下跌时会走多句 advice，`rel_adj` 的"；"会把它和后文挤成一句。
+    #   这里统一：剥完先剥开头的孤立标点；拼接用"。"而非"；"，让两句各成一句。
     if rel_adj:
         _tail = advice
         for _nm in ("缩量存量", "极度缩量", "量能舒适", "峰值量能"):
             if _tail.startswith(_nm):
                 _tail = _tail[len(_nm):].lstrip("，,、 ")
                 break
-        advice = f"{rel_adj}；{_tail}"
+        # 剥完若以标点开头（纯标点残留）→ 继续剥，避免"；。"这种双标点
+        _tail = _tail.lstrip("，,、。；;!！~ ")
+        if _tail:
+            advice = f"{rel_adj}。{_tail}"
+        else:
+            advice = rel_adj
 
     # 极致缩量还红盘
+    #
+    # ★ v1.36.0 修两处（用户实测 2026-10-15）：原文是
+    #       recent = hist[-5:]
+    #       if recent and all(b["close"] > b["open"] for b in recent[-3:]):
+    #   ① `hist[-5:]` 切出来只用了 `[-3:]`，前两根是**死代码**，`recent` 变量
+    #      毫无意义 —— 直接写 `hist[-3:]` 才是它真正想表达的。
+    #   ② 判据错位：它看的是**近 3 日**是否连续收阳，而不是**当日**是否红盘。
+    #      当日三大指数全线 -2.0% ~ -3.7%、跌 5122 家，只要前三天恰好收阳，
+    #      就会给用户输出「筹码结构好，可低吸」—— 与当日盘面直接相反，这是
+    #      「市场的情况和文字不符」里最容易造成真实亏损的一条。
+    #   红盘说的是**今天这根 K 线**：close > open 即红盘（平盘不算）。
+    #   数据不足（hist 为空或末根缺 OHLC）→ 不判定，绝不猜。
     red_flag = ""
     if v.get("shrink_red_flag") and hist:
-        recent = hist[-5:]
-        if recent and all(b["close"] > b["open"] for b in recent[-3:]):
+        _today = hist[-1] or {}
+        try:
+            _o = float(_today["open"])
+            _c = float(_today["close"])
+        except (KeyError, TypeError, ValueError):
+            _o = _c = None
+        if _o is not None and _o > 0 and _c > _o:
             if mode in ("shrink_short", "dry"):
                 mode = "shrink_red"
                 advice = ("极致缩量还红盘 = 控盘好、散户90%套牢躺平 → "

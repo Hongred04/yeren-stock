@@ -96,6 +96,16 @@ h2 .cnt{font-size:11.5px;font-weight:600;color:var(--tx3)}
   padding:9px 12px;font-size:12.5px;line-height:1.65}
 .mode b{color:var(--org)}
 
+/* ── 缓存角标（结论大卡顶部，v1.37.0）──
+   与 web/index.html 同一口径：首屏用上次缓存渲染时结论照常显示，但必须让用户
+   一眼看出"这不是本轮实时数据"。用暖黄（--org 系，与降级提示同一语义色）
+   而不是装饰性浅灰；长期挂在卡上，所以不加描边/阴影以免刺眼。
+   深色模式下 --org/--org-bg 有独立取值（见文件顶部 media query），不必另写。 */
+.cachetag{display:inline-flex;align-items:center;gap:6px;margin-bottom:8px;
+  background:var(--org-bg);color:var(--org);border-radius:8px;
+  padding:3px 9px;font-size:11.5px;font-weight:800;letter-spacing:.02em}
+.cachetag b{font-family:var(--mono);font-weight:800}
+
 /* ── 情绪三格 / 指标格 ── */
 .stats3{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:11px}
 .stat{background:var(--card);border:1px solid var(--line2);border-radius:13px;
@@ -649,32 +659,93 @@ function render(fromCache,ts){
     (fromCache?(' · 上次结果 '+(ts||'')+'（后台刷新中）'):(' · 已更新 '+ts));
 
   /* ═══ Tab 1 · 今日 ═══ */
+  // ★ 数据就绪闸门（与 web/index.html 同一口径，见那边的长注释）：
+  //   首次启动时涨停/跌停/炸板三个池子还没拉回来，engine 侧会算出
+  //   hurt_area=0、四条退潮信号全不触发 → can_trade=true → 这里就报
+  //   「可以出手，但要挑龙头」；等池子回来再翻成「今天不要买」。
+  //   用户看到的就是"一会能买一会不能买" —— 那不是抖动，是拿缺数据当成了市场结论。
+  //   所以数据没齐时只能报"还没法判断"，正负都不给。
+  //   判据用 === false：老缓存里没有 data_ready 字段时退回既有逻辑，不误判、不报错。
+  const notReady=sen.data_ready===false;
+  const notReadyReason=(sen.not_ready_reason||'').trim();
+  // ★ 缓存角标（v1.37.0，与 web/index.html 同一口径）：
+  //   首屏用上次缓存渲染时结论**照常显示**，但挂角标 + 数据时间戳，
+  //   让用户分清"真偏热"和"缓存的偏热"——缓存的偏热是真数据算的，只是不是本轮实时。
+  //   ★ 层级：data_source / data_ts 挂在**报告顶层**（d = REPORT），不在 sentiment 里 ——
+  //     后端 core/pipeline.py:302-303 与 server.py:193-194/204-205/215-216 写的都是顶层。
+  //     读成 sen.data_source 会永远是 undefined，角标整套静默失效。
+  //   ★ 防御：data_source / data_ts 是后端新字段，老后端 / 降级响应里可能没有。
+  //     缺失时一律按"实时"处理：不显示角标，**绝不报错**。用显式白名单而不是
+  //     `!=='live'`，否则 undefined 会被当成缓存，给所有老后端挂假角标。
+  //     白名单含 "stale"：server.py:208/219 跨日不给结论时写的就是它。
+  const _src=d.data_source;
+  const srcIsCache=_src==='cache'||_src==='disk';
+  const cacheTs=(()=>{
+    if(!srcIsCache) return '';
+    const t=Number(d.data_ts);
+    if(!isFinite(t)||t<=0) return '';
+    try{
+      return new Date(t*1000).toLocaleTimeString('zh-CN',
+        {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+    }catch(e){ return ''; }
+  })();
+  const cacheTag=srcIsCache
+    ?`<div class="cachetag" title="本次结论用的是上次缓存数据，后台正在静默刷新，拿到新数据后会自动替换">📦 缓存${
+        cacheTs?'数据 · <b>'+esc(cacheTs)+'</b>':''}</div>`
+    :'';
   const canTrade=sen.can_trade&&vol.mode!=='dry';
   const frozen=sen.stage==='unknown';
-  const cls=!canTrade?'stop':(frozen?'stop':((sen.stage==='climax'||sen.stage==='follow')?'go':'hold'));
-  const em=!canTrade?'🚫':(frozen?'🧊':(cls==='go'?'✅':'⚠️'));
-  const title=!canTrade?'今天不要买'
+  // ★ 等待今日数据态（v1.37.0）：报告自己声明「隔夜 / 缓存不可用」时（后端
+  //   /api/result 给 204 + {"cached":false} 或 {"stale":true}，refresh() 把
+  //   rep.stale 透传进来），按已定口径**不渲染隔夜结论**，改为等待态。
+  //   为什么不能只靠 fromCache：fromCache 表达的是"这次是本地存的旧渲染"，
+  //   而这里要拦的是"数据本身跨日失效" —— 后者即使拿到全新的 REPORT 也算隔夜。
+  //   判据只看显式信号，undefined 一律放行（老后端不受影响）。
+  //   ★ 三个信号各自独立、都要认：stale===true / cached===false /
+  //     data_source==='stale'（server.py:208/219 跨日时同时写后两个）。
+  //     少认一个，将来后端只改一处就会漏判，页面会把隔夜结论当今日的说。
+  const waitToday=!!(d.stale===true||d.cached===false||_src==='stale');
+  const cls=(notReady||waitToday)?'stop':(!canTrade?'stop':(frozen?'stop':((sen.stage==='climax'||sen.stage==='follow')?'go':'hold')));
+  const em=(notReady||waitToday)?(waitToday?'⏳':'🚫'):(!canTrade?'🚫':(frozen?'🧊':(cls==='go'?'✅':'⚠️')));
+  const title=(notReady||waitToday)
+    ?(waitToday?'等待今日数据':'数据未就绪，暂不判断')
+    :(!canTrade?'今天不要买'
     :(frozen?'暂无涨停信号 —— 空仓等启动'
-    :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水'));
-  const reason=!canTrade?(sen.can_trade?(vol.advice||''):(sen.note||'情绪进入退潮期'))
+    :(cls==='go'?'可以出手，但要挑龙头':'可以小仓位试水')));
+  const reason=waitToday
+    ?`${d.wait_reason||'缓存数据已隔夜，今日数据仍在获取中'} —— 数据齐了才判断冷热，现在不做任何结论。`
+    :(notReady
+    ?`${notReadyReason||'关键数据仍在获取中'} —— 数据齐了才判断冷热。`
+    :(!canTrade?(sen.can_trade?(vol.advice||''):(sen.note||'情绪进入退潮期'))
     :`${sen.label||sen.stage||''}${vol.label?'，'+vol.label:''}${
-        mt.seal_rate!=null?('，封板率 '+Math.round(mt.seal_rate*100)+'%'):''}。`;
+        mt.seal_rate!=null?('，封板率 '+Math.round(mt.seal_rate*100)+'%'):''}。`));
   const mode=out.mode||{};
   const sp=meter.space||{};
   // M3 情绪周期（能不能出手，权威口径，经滞回稳定）与 E1 温度计（量化温度）
   // 是两套阶段口径（M3 与 E1 同词不同义）：用词相同（高潮/退潮）含义不同。
   // v1.25.2 起 E1 的「退潮」只可能来自 M3 稳定器确认（sentiment_meter 不再
-  // 拿原始亏钱面积/温度骤降强置 ebb）—— 两把尺子在数据层面已统一，
-  // 同屏不会再出现一句「情绪高潮」一句「退潮」。
+  // 拿原始亏钱面积/温度骤降强置 ebb）。
+  // ★ v1.36.0 更正：下面原本写「两把尺子在数据层面已统一，同屏不会再出现
+  //   一句情绪高潮一句退潮」—— 这句是**错的**。实测 2026-10-15 仍然打架：
+  //   当日沪指 -2.03%、跌 5122 家、跌停 22 家，M3 判「退潮」，E1 温度 57° 报
+  //   「🌱 修复·启动」。根因是温度四项完全不含大盘涨跌与跌停家数。
+  //   修法见 core/sentiment_meter._breadth_penalty（温度 57→39、档位 revive→ice）。
+  //   手机端这条修复**自动生效**（读的是同一个后端字段），此处只更正注释并
+  //   补渲染 market_note，让用户在手机上也能看到"为什么降分"。
   const hist=d.history||{};
   const histNote=(hist.days!=null&&hist.days<8&&!fromCache)
     ? `<div class="notice">历史归档正在补齐（已 ${hist.days} 天${
         hist.rest?('，还剩 '+hist.rest+' 天'):''}）—— 题材记忆需要几天的数据底座，
         补完后「已连续 N 日活跃」这类判断才准。</div>` : '';
   let t1=`<section class="hero ${cls}">
+    ${cacheTag}
     <div class="top"><div class="em">${em}</div>
       <div><h1>${esc(title)}</h1>
-        <div class="sub">${esc(sen.label||'')}${vol.label?' · '+esc(vol.label):''}</div></div></div>
+        <!-- 未就绪时副标题不能照念 sen.label（那正是"情绪高潮"这种拿缺数据算出来的结论），
+             换成说明在等什么；数据齐了才恢复原样。 -->
+        <div class="sub">${waitToday?'隔夜数据已作废 · 后台正在静默获取今日数据，拿到后本卡自动更新'
+          :(notReady?(notReadyReason?esc(notReadyReason):'关键数据仍在获取中')
+          :esc(sen.label||''))}${(!notReady&&!waitToday&&vol.label)?' · '+esc(vol.label):''}</div></div></div>
     <p>${esc(reason)}</p>
     ${mode.name?`<div class="mode"><b>今日应对打法 · ${esc(mode.name)}</b> —— ${esc(mode.note||'')}</div>`:''}
   </section>${histNote}
@@ -688,9 +759,11 @@ function render(fromCache,ts){
     <div class="stat"><div class="t">涨停/跌停</div>
       <div class="v"><span class="up">${mt.limit_up!=null?mt.limit_up:'—'}</span><span class="fl" style="font-size:14px">/</span><span class="dn">${mt.limit_down!=null?mt.limit_down:'—'}</span></div>
       <div class="s">炸板 ${mt.broken!=null?mt.broken:'—'}</div></div>
-  </div>`;
+  </div>
+  ${meter.market_note?`<div class="notice" style="border-left-color:#d92d3f;background:#fff5f5">
+    ⚠️ ${esc(meter.market_note)}</div>`:''}`;
   if(out.headline){
-    t1+=`<h2>明日判断 <span class="cnt">${esc(out.date||'')}</span></h2>
+    t1+=`<h2>明日判断 <span class="cnt">${esc(out.date||'')}${out.date_exact===false?' 估算':''}</span></h2>
       <div class="card">
         <div class="theme" style="font-size:16px">${esc(out.headline)}</div>
         ${(out.watch||[]).length?`<ul class="watchlist">${
