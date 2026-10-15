@@ -20,6 +20,9 @@
   比例噪声极大），此时只认强信号，否则每天 9:35 都会先报一次「退潮」。
 - **状态四档**：calm 正常 / watch 退潮预警（未确认，只降仓不清仓）/
   ebb 确认退潮 / recovering 缓解中（仍是退潮，但提示可以留意了）。
+  ★ recovering 与"解除退潮"用**同一套滞回**（连续 exit_n 次 + 跨越 exit_span
+  秒）：只按单帧面积回落就切的话，面积在阈值附近抖动时会「退潮 ↔ 缓解中」
+  每个刷新来回跳一次（2026-10-15 实测修复）。
 
 状态按自然日持久化在 data/stage_state.json，跨进程重启不丢；
 换日自动归零。
@@ -121,6 +124,27 @@ def _cmp(hurt: float, threshold: float, margin: float, up: bool) -> bool:
     return a >= b if up else a <= b
 
 
+def _alive_note(st: dict, hurt_area: float, threshold: float, c: dict) -> str:
+    """没有发生状态切换时，给一句"当前读数"的说明。
+
+    只在切换时写 note 的话，页面会长期挂着切换那一刻的旧数字
+    （实测：面积已回落到 15%，页面上仍写"50% 已超阈值一个身位"）。
+    """
+    pct = f"{hurt_area*100:.0f}%"
+    th = f"{threshold*100:.0f}%"
+    if st.get("confirmed"):
+        if st.get("state") == "recovering":
+            return (f"亏钱面积已回落至 {pct}（阈值 {th} 下方 {c['exit_margin']*100:.0f} 个点），"
+                    f"连续 {st.get('raw_false_n', 0)} 次确认缓解中 —— "
+                    f"仍是退潮期，仓位不改，只是别再加空")
+        return (f"退潮中：亏钱面积 {pct}（阈值 {th}），"
+                f"原始信号已连续 {st.get('raw_true_n', 0)} 次 —— 按退潮执行")
+    if st.get("state") == "watch":
+        return (f"退潮预警未确认：亏钱面积 {pct}（阈值 {th}），"
+                f"原始信号已连续 {st.get('raw_true_n', 0)} 次 —— 先降仓、别急着清")
+    return f"情绪平稳：亏钱面积 {pct}（阈值 {th}）"
+
+
 def stabilize(real_date: str, raw_ebb: bool, hurt_area: float,
               threshold: float = 0.30, tmin: int | None = None,
               cfg: dict | None = None) -> dict:
@@ -189,7 +213,15 @@ def stabilize(real_date: str, raw_ebb: bool, hurt_area: float,
         if confirmed:
             clear = (not raw_ebb) and _cmp(hurt_area, threshold,
                                            c["exit_margin"], up=False)
-            st["state"] = "recovering" if clear else "ebb"
+            # ★ 2026-10-15 修：recovering 也要走滞回，不能看单帧。
+            #   原来只要这一帧"原始信号为假且面积回落"就切 recovering，
+            #   下一帧面积弹回又切回 ebb —— 页面上就是「退潮/缓解中」来回跳。
+            #   这里的规矩与"解除退潮"完全一致：连续 exit_n 次、跨越
+            #   exit_span 秒才算缓解；只是**不改 confirmed**（仍按退潮执行）。
+            #   迟滞量足够让噪声进不来，又不影响真正消退时给出提示。
+            eased = (clear and st["raw_false_n"] >= c["exit_n"]
+                     and now - st["raw_false_since"] >= c["exit_span"])
+            st["state"] = "recovering" if eased else "ebb"
         elif raw_ebb:
             st["state"] = "watch"          # 退潮预警：还没有确认
         else:
@@ -200,7 +232,10 @@ def stabilize(real_date: str, raw_ebb: bool, hurt_area: float,
         st["threshold"] = threshold
         st["warmed"] = warmed
         st["strong"] = strong
-        st["note"] = note or st.get("note", "")
+        # ★ 2026-10-15 修：note 只在**状态切换**时写，切换后一直留着老数字——
+        #   实测已经出现「面积 50% 已超阈值」这句挂在 hurt_area=0.15 的帧上，
+        #   页面上等于一直报旧数。这里每次刷新都把当前读数补进去。
+        st["note"] = note or _alive_note(st, hurt_area, threshold, c)
         st["last_ts"] = now
         _save(st)
 

@@ -566,9 +566,17 @@ def evaluate_sentiment(cfg: dict, limit_up: list[dict], limit_down: list[dict],
     else:
         note = "可按周期节奏操作"
 
+    # ★ 2026-10-15 修：label 原来是静态的「退潮期 · 无条件清仓」，可是退潮期
+    #   按野哥规矩**允许 0.5 成试错仓**（trial_only=True）。于是页面上同一屏
+    #   出现「无条件清仓」与「最多 0.5 成试错仓」两句互相打架的话 —— 用户看到
+    #   的就是"一会说能买、一会说不推荐买"。label 必须跟着**实际允许的动作**走：
+    #   能试错就说能试错，权重调成 0 才回到"无条件清仓"。
+    label = SENTIMENT_STAGES.get(stage, stage)
+    if stage == "ebb" and trial_only:
+        label = "退潮期 · 只做首板试错仓"
     return {
         "stage": stage,
-        "label": SENTIMENT_STAGES.get(stage, stage),
+        "label": label,
         "can_trade": can_trade,
         "trial_only": trial_only,             # True = 只允许试错仓，不能正常仓位
         "ebb_trial_weight": round(trial_w, 4),
