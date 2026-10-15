@@ -18,6 +18,7 @@ from datetime import datetime
 
 from . import fundstyle
 from . import indicators as ind
+from . import longterm
 from . import paths
 from . import regime
 from . import trading
@@ -314,6 +315,24 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
     checks = []
     # 节点（今日打法，单一出处 core/regime.py）—— 用来判「今天适不适合做长」
     rg = regime.classify(sentiment, volume)
+
+    # ★ 大金融中长线（用户 2026-10-15）：这类持仓**不走**短线卖出体系。
+    #   原因见 core/longterm.py 顶部：S1 退潮清仓是 critical 级别的"无条件
+    #   清仓"，套在打算拿 1~3 年的券商/银行仓上，会出现「市场退潮 → 叫你
+    #   清掉长线仓」这种自相矛盾的建议。
+    #   接入方式：先算一次中长线体检（含估值），命中的持仓走 longterm 的
+    #   信号，**不调用** trading.sell_signals。取不到估值时 longterm 会如实
+    #   说明"估值没取到"，仍然不出短线信号（宁可少给，也不给错口径的）。
+    lt_val = None
+    lt_rep = {}
+    if (cfg.get("E11_longterm") or {}).get("enabled", True):
+        try:
+            lt_val = longterm.valuation_view(holdings, cfg)
+            lt_rep = longterm.evaluate(holdings, lt_val, cfg)
+        except Exception:
+            lt_val, lt_rep = None, {}
+    lt_items = (lt_rep.get("items") or {})
+
     for h in holdings:
         code = h["code"]
         snap = snaps.get(code) or {}
@@ -336,16 +355,38 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
                   "price": price, "pct": _f(snap.get("pct")),
                   "turnover": _f(snap.get("turnover")),
                   "zt_boards": boards_now, "fund_style": fs}
-        sells = trading.sell_signals(pseudo, bars, sentiment, volume, cfg) if bars else []
-        if not bars:
-            sells = [{"type": "—", "name": "无K线数据", "priority": "C",
-                      "trigger": "未取到该股K线", "action": "手动核对", "urgency": "medium"}]
-        verdict, level = _verdict(sells, fs)
-        # 卖出参考价：把「该不该走」落成「到哪个价做什么」
-        exitp = exit_plan(bars, cost, price) if bars else {
-            "levels": [], "stop": None, "stop_pct": None,
-            "note": "没有K线数据，算不出参考价。"}
-        plain = plain_action(level, verdict, exitp)
+        # ★ 中长线分支：大金融持仓走 longterm，**不碰** trading.sell_signals。
+        lt_hit = lt_items.get(code)
+        if lt_hit:
+            sells = list(lt_hit.get("signals") or [])
+            verdict, level = lt_hit.get("verdict", "持有"), lt_hit.get("level", "hold")
+        else:
+            sells = trading.sell_signals(pseudo, bars, sentiment, volume, cfg) if bars else []
+            if not bars:
+                sells = [{"type": "—", "name": "无K线数据", "priority": "C",
+                          "trigger": "未取到该股K线", "action": "手动核对", "urgency": "medium"}]
+            verdict, level = _verdict(sells, fs)
+        # 卖出参考价：把「该不该走」落成「到哪个价做什么」。
+        # ★ 中长线持仓**不能**用短线的 exit_plan（那是破 5 日线/前低就走），
+        #   与"拿 1~3 年、宽幅止损"直接冲突 —— 会给出「跌破 X 必须走」而那个
+        #   X 只是几天的均线。中长线只给**宽幅灾难位**，其余交给估值。
+        if lt_hit:
+            lc = float(cost) if cost and cost > 0 else 0.0
+            sl = float(longterm.cfg_of(cfg).get("stop_loss", -0.25))
+            lv = []
+            if lc > 0:
+                lv.append({"label": "灾难位（-25%）", "tone": "red",
+                           "price": round(lc * (1 + sl), 2), "rel": "dn",
+                           "what": "中长线宽幅止损：跌破先复核基本面，逻辑坏才走"})
+            exitp = {"levels": lv, "stop": round(lc * (1 + sl), 2) if lc else None,
+                     "stop_pct": sl * 100 if lc else None,
+                     "note": ("中长线口径：不用短线均线止损（正常回撤有 -20%+），"
+                              "卖出主要看板块估值分位与基本面。")}
+        else:
+            exitp = exit_plan(bars, cost, price) if bars else {
+                "levels": [], "stop": None, "stop_pct": None,
+                "note": "没有K线数据，算不出参考价。"}
+        plain = (lt_hit.get("plain") if lt_hit else None) or plain_action(level, verdict, exitp)
         r3 = None
         if len(bars) >= 4:
             c0, c3 = _f(bars[-4].get("close")), _f(bars[-1].get("close"))
@@ -378,6 +419,10 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
             "plain": plain, "exit_plan": exitp,
             "signals": sells, "fund_style": fs.get("type", "unknown"),
             "r3": r3, "unwind": unwind, "swing_alert": swing_alert,
+            # 中长线标记：前端据此换口径展示（不显示短线止损/止损话术）
+            "longterm": bool(lt_hit),
+            "lt_reason": (lt_hit.get("reason") if lt_hit else ""),
+            "lt_valuation": (lt_hit.get("valuation") if lt_hit else {}),
         })
         if level in ("critical", "high"):
             checks.append({"level": "red" if level == "critical" else "yellow",
@@ -396,7 +441,24 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
                      "price": _f(s.get("price")), "pct": _f(s.get("pct")),
                      "turnover": _f(s.get("turnover"))})
 
+    # 板块估值状态（组合级，一次）——大金融中长线的核心锚，不逐票重复
+    lt_boards = lt_rep.get("board_notes") or []
+    for bn in lt_boards:
+        if bn.get("tone") in ("red", "org"):
+            checks.append({"level": "yellow" if bn.get("tone") == "org" else "red",
+                           "item": f"{bn['board']}板块估值：{bn['what']}",
+                           "action": bn.get("detail", "")})
+
     total_pnl = (tot_mv - tot_cost) if tot_cost else 0.0
+    n_lt = sum(1 for r in out if r.get("longterm"))
+    base_note = ("持仓体检复用 M3-M10 的卖出信号（退潮清仓/A字杀/机构加速/断板/庄股），"
+                 "纯本地记录，不构成投资建议。")
+    if n_lt:
+        base_note = (f"其中 {n_lt} 只按「大金融中长线（1~3 年）」口径体检："
+                     "卖出看板块估值分位与基本面，**不套用**退潮清仓等短线信号"
+                     "（短线情绪对这类票无效）。其余持仓仍用 M3-M10 短线体系。")
+        if lt_rep.get("note"):
+            base_note += " " + lt_rep["note"]
     return {
         "holdings": out, "watchlist": wout,
         "total_cost": round(tot_cost, 1), "total_mv": round(tot_mv, 1),
@@ -404,8 +466,10 @@ def evaluate(snaps: dict, kl: dict, sentiment: dict, volume: dict,
         "total_pnl_pct": round(total_pnl / tot_cost * 100, 2) if tot_cost else None,
         "checks": checks,
         "n_holdings": len(out), "n_watch": len(wout),
-        "note": "持仓体检复用 M3-M10 的卖出信号（退潮清仓/A字杀/机构加速/断板/庄股），"
-                "纯本地记录，不构成投资建议。",
+        "longterm_boards": lt_boards,
+        "longterm_sources": lt_rep.get("sources") or [],
+        "n_longterm": n_lt,
+        "note": base_note,
     }
 
 

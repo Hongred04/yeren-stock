@@ -3280,9 +3280,16 @@ function renderPort(){
           </div>`).join('');
         const pnlCls=(h.pnl_pct||0)>=0?'up':'dn';
         const lvlCls=h.level==='critical'?'critical':(h.level==='high'?'high':'');
+        // ★ 大金融中长线持仓：口语与卖出参考价都换成中长线口径
+        //   （用户 2026-10-15：这类票 1~3 年持有，别拿短线市场的判断给卖点）
+        const ltBadge=h.longterm
+          ? `<span class="pill gry" title="${esc(h.lt_reason||'')}">中长线</span>` : '';
+        const ltNote=h.longterm
+          ? `<div class="hc-note">中长线口径（1~3 年）：不用短线情绪/均线判卖点，看板块估值分位与基本面。${esc(h.lt_reason||'')}</div>`
+          : '';
         return `<div class="hcard ${lvlCls}" data-c="${h.code}">
           <div class="hc-h">
-            <b class="hc-nm">${esc(h.name||h.code)}</b>
+            <b class="hc-nm">${esc(h.name||h.code)}</b>${ltBadge}
             <span class="fl hc-cd">${h.code}</span>
             <span class="pill ${vc[h.verdict]||'gry'}">${esc(h.verdict)}</span>
             <span class="hc-sp"></span>
@@ -3297,8 +3304,9 @@ function renderPort(){
             ${e.last_close?`<span>收盘 <b>${f2(e.last_close)}</b></span>`:''}
             ${h.r3!=null?`<span>近3日 <b class="${h.r3>=0?'up':'dn'}">${h.r3>=0?'+':''}${f2(h.r3)}%</b></span>`:''}
           </div>
-          ${lv?`<div class="hc-sec"><div class="hc-st">卖出参考价 · 到什么价做什么</div>${lv}
+          ${lv?`<div class="hc-sec"><div class="hc-st">${h.longterm?'灾难位 · 只有这一条价格线':'卖出参考价 · 到什么价做什么'}</div>${lv}
             ${e.note?`<div class="hc-note">${esc(e.note)}</div>`:''}</div>`:''}
+          ${ltNote}
           ${sigs?`<div class="hc-sec"><div class="hc-st">卖出信号</div>${sigs}</div>`:''}
           ${h.unwind?`<div class="hc-warn org">${esc(h.unwind)}</div>`:''}
           ${h.swing_alert?`<div class="hc-warn org">⚠️ ${esc(h.swing_alert)}</div>`:''}

@@ -3222,6 +3222,244 @@ def _board_flow_em_dc(limit: int) -> list[dict]:
     return out[:limit]
 
 
+# ---------------------------------------------------------------- 估值（PE/PB）
+# 中长线（大金融 1~3 年）策略要用估值做锚，而估值不能跟短线资金流挤同一条
+# 风口 —— push2 是间歇性硬封的。所以这里走**另一条完全活着的路**：
+#
+#   datacenter-web.eastmoney.com/api/data/v1/get
+#     · RPT_VALUEANALYSIS_DET —— 个股估值（PE_TTM / PE_LAR / PB_MRQ / BOARD_NAME）
+#     · RPT_VALUEINDUSTRY_DET —— 行业估值（按 TRADE_DATE 的**日度序列**）
+#
+# 为什么不用别的路（都实测过，2026-10-15）：
+#   · push2 ulist.np 的 f9/f23 —— 走 _push2_json，push2 一封就整条没数；
+#   · data.eastmoney.com/dataapi/bkzj 的 f9 —— 板块 PE 可用（且要 /100），
+#     但 f23(PB) **全是 0**，且 code 只认 m:/b: 板块选择器，**点不到个股**。
+#   · 上面这条 datacenter 路：个股能点名、PB 是真的 PB_MRQ、还自带
+#     BOARD_NAME(所属行业) —— 一举三得，且与 push2 同一天的 PB 对得上
+#     （中国银河 push2 f23=1.09 / 本路 PB_MRQ=1.074，同源同口径）。
+#
+# ★ 只有这条路的 PB 可信。bkzj 的 f23 与 ulist 的个别量纲都不能归一，
+#   已经全部弃用 —— 宁可少给一个锚，也不给错数。
+#
+# ★ 行业序列是本策略**算历史分位**的基础：单看"PB=1.42"没有意义，要知道
+#   它在历史上处于什么位置。RPT_VALUEINDUSTRY_DET 按 TRADE_DATE 给日度值，
+#   实测 证券Ⅱ 共 **2372** 个交易日（约 9.5 年），翻页 500/页可取全。
+
+_EM_DC_VALUE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_EM_DC_VALUE_REF = "https://data.eastmoney.com/gzfx/"
+_REPORT_STOCK_VALUE = "RPT_VALUEANALYSIS_DET"      # 个股估值
+_REPORT_INDUSTRY_VALUE = "RPT_VALUEINDUSTRY_DET"   # 行业估值（日度序列）
+
+
+def _norm_board_name(n) -> str:
+    """板块名归一：去掉 Ⅱ/Ⅲ 罗马数字后缀。
+
+    为什么必须归一：实测「银行」与「银行Ⅱ」、「保险Ⅱ」与「保险Ⅲ」的值
+    逐位相同 —— 它们是同一指数的细分重复行。不归一去聚合，同一个板块会被
+    算两遍，大金融的"最贵板块"判定就会失真。
+    """
+    s = str(n or "").strip()
+    for suf in ("Ⅱ", "Ⅲ", "II", "III"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    return s.strip()
+
+
+# 归一后的板块名 → RPT_VALUEINDUSTRY_DET 里的**真名**。
+# 实测该报表的大金融板块只有 4 个：保险Ⅱ / 多元金融 / 证券Ⅱ / 银行Ⅱ。
+# 归一后不带后缀的名字（"证券"）在库里**查不到**（0 行），所以查询前必须
+# 用这张表还原成真名，否则 filter 永远匹配不上 —— 这是第一版踩过的坑。
+_VALUE_BOARD_ALIAS = {
+    "证券": "证券Ⅱ",
+    "银行": "银行Ⅱ",
+    "保险": "保险Ⅱ",
+    "多元金融": "多元金融",
+    # 细分行在报表里不存在，统一落到大类（不假装能取到更细的）
+    "股份制银行": "银行Ⅱ",
+    "国有大型银行": "银行Ⅱ",
+    "农商行": "银行Ⅱ",
+    "城商行": "银行Ⅱ",
+    "信托": "多元金融",
+}
+
+
+def _dc_value(report: str, filt: str = "", page_size: int = 500,
+              page: int = 1, columns: str = "ALL",
+              sort: str = "", sort_type: str = "-1",
+              tries: int = 3) -> dict:
+    """datacenter-web 取数封装（估值专用）+ 退避重试。
+
+    与 _bkzj_json 同风格：异常/空结果都算"这级不通"，退避后重试；
+    仍然不通则抛给调用方去降级。返回 {"result": {"data": [...], "count": N}}。
+    """
+    params = {"reportName": report, "columns": columns,
+              "pageSize": str(page_size), "pageNumber": str(page)}
+    if filt:
+        params["filter"] = filt
+    if sort:
+        params["sortColumns"] = sort
+        params["sortTypes"] = sort_type
+    url = _EM_DC_VALUE + "?" + urllib.parse.urlencode(params)
+    last = None
+    for i in range(tries):
+        try:
+            raw = _get(url, timeout=15, referer=_EM_DC_VALUE_REF)
+            js = json.loads(raw.decode("utf-8", errors="ignore"))
+            if (js.get("result") or {}).get("data") is not None:
+                return js
+            last = "empty"
+        except Exception as e:              # noqa: BLE001 —— 任何异常都只是"这级不通"
+            last = e
+        if i + 1 < tries:
+            time.sleep(0.4 * (i + 1))
+    if isinstance(last, Exception):
+        raise last
+    return {}
+
+
+def fetch_valuation(codes: list[str]) -> dict[str, dict]:
+    """个股估值 → {code: {pe, pe_ttm, pb, industry, mv}}。
+
+    codes 用仓库内的 6 位代码或带前缀代码都行（统一归一成 6 位去查）。
+    取不到就返回 {}，**不编数** —— 调用方要能把"没估值"当成一种事实展示。
+    """
+    bare = []
+    for c in (codes or []):
+        s = str(c or "").strip().lower()
+        for p in ("sh", "sz", "bj"):
+            if s.startswith(p):
+                s = s[len(p):]
+                break
+        if s.isdigit() and len(s) == 6:
+            bare.append(s)
+    if not bare:
+        return {}
+    flt = ("(SECURITY_CODE in (%s))"
+           % ",".join('"%s"' % c for c in sorted(set(bare))))
+    try:
+        js = _dc_value(_REPORT_STOCK_VALUE, flt,
+                       page_size=max(50, len(bare) * 2),
+                       columns=("SECURITY_CODE,SECURITY_NAME_ABBR,BOARD_NAME,"
+                                "PE_TTM,PE_LAR,PB_MRQ,TOTAL_MARKET_CAP,"
+                                "TRADE_DATE"))
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for it in ((js.get("result") or {}).get("data") or []):
+        c = str(it.get("SECURITY_CODE", "")).strip()
+        if not c:
+            continue
+        pe_ttm, pe_lar, pb = (_num(it.get("PE_TTM")), _num(it.get("PE_LAR")),
+                              _num(it.get("PB_MRQ")))
+        out[c] = {
+            "pe_ttm": pe_ttm if (pe_ttm and pe_ttm > 0) else None,
+            "pe": pe_lar if (pe_lar and pe_lar > 0) else None,
+            "pb": pb if (pb and pb > 0) else None,
+            "industry": _norm_board_name(it.get("BOARD_NAME")),
+            "mv": _num(it.get("TOTAL_MARKET_CAP")),
+            "date": str(it.get("TRADE_DATE") or "")[:10],
+        }
+    return out
+
+
+def fetch_board_valuation(board_names: list[str],
+                          days: int = 750) -> dict[str, list[dict]]:
+    """行业估值**日度序列** → {板块名: [{date, pe, pe_ttm, pb}, ...]}（新→旧）。
+
+    days 是**每个板块最多取多少个交易日**（不是总行数）：一次请求 500 行，
+    内部按页取到够为止。实测 证券Ⅱ 全史 2372 日，取 750 日 ≈ 3 年，足够算
+    "当前处于历史什么位置"，又不至于为了 9 年前的分位多打好几轮。
+
+    ★ 名称必须用**接口里的真名**去 filter：本报表只有
+      「保险Ⅱ / 多元金融 / 证券Ⅱ / 银行Ⅱ」这 4 个大金融板块，
+      **没有**不带后缀的「证券/银行/保险」（实测 0 行）。
+      传进来的名字先经 _VALUE_BOARD_ALIAS 映射成真名再查，
+      返回的 key 则用**传进来的原名**，调用方不用关心后缀细节。
+    """
+    alias = _VALUE_BOARD_ALIAS
+    want_map: dict[str, str] = {}           # 真名 -> 调用方原名
+    for n in (board_names or []):
+        n = str(n or "").strip()
+        if not n:
+            continue
+        real = alias.get(_norm_board_name(n), n)
+        want_map[real] = n
+    if not want_map:
+        return {}
+    flt = ("(BOARD_NAME in (%s))"
+           % ",".join('"%s"' % n for n in sorted(want_map)))
+    out: dict[str, list[dict]] = {orig: [] for orig in want_map.values()}
+    page, page_size = 1, 500
+    want = max(1, int(days))
+    while True:
+        try:
+            js = _dc_value(_REPORT_INDUSTRY_VALUE, flt, page_size=page_size,
+                           page=page,
+                           columns="BOARD_NAME,TRADE_DATE,PE_TTM,PE_LAR,PB_MRQ",
+                           sort="TRADE_DATE", sort_type="-1")
+        except Exception:
+            break                           # 取到多少算多少，已取的部分仍然有用
+        rows = (js.get("result") or {}).get("data") or []
+        if not rows:
+            break
+        for it in rows:
+            real = str(it.get("BOARD_NAME") or "").strip()
+            orig = want_map.get(real)
+            if orig is None:
+                continue
+            pe_ttm, pe_lar, pb = (_num(it.get("PE_TTM")), _num(it.get("PE_LAR")),
+                                  _num(it.get("PB_MRQ")))
+            out[orig].append({
+                "date": str(it.get("TRADE_DATE") or "")[:10],
+                "pe_ttm": pe_ttm if (pe_ttm and pe_ttm > 0) else None,
+                "pe": pe_lar if (pe_lar and pe_lar > 0) else None,
+                "pb": pb if (pb and pb > 0) else None,
+            })
+        # 全部板块都取够了就收工
+        if all(len(v) >= want for v in out.values()):
+            break
+        page += 1
+        if page > 12:                       # 安全阀：最多 6000 行
+            break
+    for n in out:
+        out[n] = out[n][:want]
+    return out
+
+
+def valuation_percentile(series: list[dict], field: str = "pb",
+                         window: int = 0) -> dict:
+    """把一条日度估值序列压成「当前值 + 历史分位」。
+
+    分位的意义：单看"券商 PB=1.42"没有决策价值 —— 要知道它历史上算高还是
+    算低。分位用**含当前值在内的全样本**算（<= 当前 的占比），样本不足
+    min_n 时**不给分位**（n 太小算出来的分位是噪声，宁可不给）。
+
+    ★ window > 0 时只取最近 window 个交易日算分位。
+    为什么需要它：实测「多元金融」的 PB 在 2023-02 是 **9.4**、2024 年降到
+    **1.1** —— 这是真实的重估（不是脏数据），但它意味着长窗口里跨了两个
+    估值制度，把 2023 的 9.4 和今天的 1.1 放进同一个样本算分位，得到的
+    分位没有决策意义。窗口越短越贴近当前制度，越长越稳 —— 这个取舍交给
+    调用方（默认 0 = 全样本，保持向后兼容）。
+    """
+    vals = [s.get(field) for s in (series or [])]
+    vals = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+    if window and window > 0:
+        vals = vals[: int(window)]          # 序列是新→旧，取头部 = 最近
+    if not vals:
+        return {"value": None, "n": 0, "pct": None,
+                "min": None, "max": None, "median": None}
+    cur = vals[0]                           # 序列是新→旧，首个 = 最新
+    n = len(vals)
+    srt = sorted(vals)
+    med = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2.0
+    pct = (sum(1 for v in vals if v <= cur) / n * 100.0) if n >= 60 else None
+    return {"value": cur, "n": n,
+            "pct": round(pct, 1) if pct is not None else None,
+            "min": round(min(vals), 3), "max": round(max(vals), 3),
+            "median": round(med, 3)}
+
+
 def _board_flow_em_ulist(limit: int) -> list[dict]:
     """降级：按自建板块清单逐个点名（原实现，clist 不可用时才走）。"""
     codes = fetch_board_codes()
