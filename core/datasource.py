@@ -2391,6 +2391,11 @@ _FLOW_FIELDS = "f2,f3,f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
 _FS_ALL_STOCK = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 _FS_ALL_BOARD = "m:90+t:2,m:90+t:3"      # t:2=行业板块、t:3=概念板块
 
+# 东财备用域：「板块资金」页 bkzj/hy.html 背后的数据接口（2026-10-15 新增）。
+# 与 push2 分属不同域名族，push2 被风控时这条仍通，且 f62 与 push2 同字段同口径。
+_EM_DC_BKZJ = "https://data.eastmoney.com/dataapi/bkzj/getbkzj"
+_EM_DC_BKZJ_REF = "https://data.eastmoney.com/bkzj/hy.html"
+
 
 def _mk_code(code: str) -> str:
     """纯 6 位代码 → 带市场前缀（sh/sz/bj）。clist 只给 f12 裸代码。"""
@@ -2504,12 +2509,72 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
     if out:
         return out                      # ulist.np 有货就收工，别再往下打 THS
 
+    # ②′ 东财备用域（2026-10-15 新增）：dataapi/bkzj/getbkzj，走不同的域名族。
+    #     实测 push2 被掐时这条 0.2 秒正常，且 f62 与 push2 是**同一个字段**，
+    #     所以 priority 排在 THS 之前 —— 同口径 > 近似口径。
+    #     代价：本接口硬顶 600 行（page/pz/limit 等参数一律无效），个股只能拿
+    #     到「主力净额前 600」。对候选股扫描够用（要看的票基本都在钱多的那头）。
+    dc = _dc_stock_moneyflow(want)
+    if dc:
+        return dc
+
     # ③ 同花顺页面降级（2026-10-14 新增）：data.10jqka.com.cn/funds/ggzjl/
     #    的「流入资金/流出资金/净额」表，105 页 × 50 行覆盖全市场。
     #    THS 反爬是**抖动式** 401/403（同一页重试几次就过，实测 20/20 成功），
     #    带退避重试即可。口径：THS 净额 ≈ 东财 f62 主力净额（同为超大+大单），
     #    但不是同一个数 —— source=ths 如实标注，调用方按"主力净额"使用。
     return _ths_stock_moneyflow(want)
+
+
+# bkzj 个股筛选：与 push2 的 _FS_ALL_STOCK 同一套写法（沪深主板/创业/科创/北交）。
+# 用逗号里的每个 key 各拉 600 行再合并 —— 这是绕过 600 硬顶的唯一办法：
+# 换排序字段就等于换了一批票。三个 key = 最多 1800 只（去重后）。
+_DC_STOCK_KEYS = ("f62", "f6", "f3")     # 主力净额 / 成交额 / 涨跌幅 各前 600
+# 个股路要的字段。f66/f72/f78/f84 就是超大/大/中/小单，必须显式写进 key ——
+# bkzj 只回 key 里点名的字段（不像 push2 可以 fields= 随便要）。
+_DC_STOCK_FIELDS = "f62,f184,f66,f72,f78,f84"
+
+
+def _dc_stock_moneyflow(want: set[str]) -> dict[str, dict]:
+    """东财备用域取个股主力资金流（2026-10-15 新增）。
+
+    `dataapi/bkzj/getbkzj` 吃个股筛选，字段与 push2 clist 完全一致
+    （f62/f184/f66/f72/f78/f84），所以直接复用 _flow_row 解析。
+
+    ★ 600 行硬顶：接口报 total=5923 却只回 600，且 page/pn/pageNumber/
+      pz/pageSize/limit 全部实测无效（固定给该 key 降序前 600）。所以这里
+      用**多个 key 各拉一次再合并**来扩大覆盖面：主力净额前 600 + 成交额
+      前 600 + 涨跌幅前 600，合并去重最多 1800 只，成本 3 个请求。
+      够不够用取决于调用方要哪些票 —— 拿不到就是拿不到，不编数。
+
+    ★ 与板块路同源的 ×100 陷阱：本域的比例字段（f184）是放大 100 倍的整数
+      （实测贵州茅台 1039 实为 10.39%），必须 /100。金额字段（f62/f66/
+      f72/f78/f84）是元、与 push2 一致。第一版这里漏了除法，界面会显示
+      「主力净占比 1039%」。
+    """
+    out: dict[str, dict] = {}
+    for sort_key in _DC_STOCK_KEYS:
+        # key 的第一个字段决定排序，其余字段只是"一起带回来"
+        try:
+            js = _bkzj_json(f"{sort_key},{_DC_STOCK_FIELDS}", _FS_ALL_STOCK, tries=2)
+        except Exception:
+            continue                        # 一个 key 挂了不影响别的 key
+        diff = (js.get("data") or {}).get("diff") or []
+        if not diff:
+            continue
+        for it in diff:
+            code = str(it.get("f12", ""))
+            if not code:
+                continue
+            k = _mk_code(code)
+            if k in want:
+                row = _flow_row(it)
+                row["main_pct"] = _bkzj_ratio(it.get("f184"))   # ×100 → %
+                row["source"] = "em"
+                out[k] = row
+        if len(out) >= len(want):
+            break                           # 要的票都齐了，别再打接口
+    return out
 
 
 _THS_GGZJL = ("http://data.10jqka.com.cn/funds/ggzjl/"
@@ -3017,7 +3082,8 @@ def fetch_board_moneyflow(limit: int = 30) -> list[dict]:
     if hit and now - _cache_ts.get(key, 0) < 600:      # 10 分钟：少打接口
         return hit
 
-    rows = (_board_flow_em(limit) or fetch_ths_board_moneyflow(limit)
+    rows = (_board_flow_em(limit) or _board_flow_em_dc(limit)
+            or fetch_ths_board_moneyflow(limit)
             or _board_flow_cls(limit) or _board_flow_sina(limit))
     if rows:
         _cache[key] = rows
@@ -3057,6 +3123,101 @@ def _board_flow_em(limit: int) -> list[dict]:
                         "source": "em"})
     if not saw_data:
         out = _board_flow_em_ulist(limit)
+    out.sort(key=lambda r: -(r["main"] or 0))
+    return out[:limit]
+
+
+def _bkzj_json(key: str, code: str, tries: int = 3) -> dict:
+    """dataapi/bkzj/getbkzj —— 东财「板块资金」页（bkzj/hy.html）背后的数据接口。
+
+    ★ 2026-10-15 新增，用来补 push2 被风控后的空缺。
+
+    发现的经过：`data.eastmoney.com/bkzj/hy.html` 是个 JS 壳，页面本身没有
+    数据；读它的 `bkzj/list.js` 才看到真正的调用
+    `webconfig.getWebPath("url") + "/dataapi/bkzj/getbkzj"`，参数只有
+    `key`（要哪个字段）和 `code`（板块范围）。
+
+    为什么它能用而 push2 不能：东财封的是 **push2 这个域名族**，不是我们的
+    IP。同期实测 push2.eastmoney.com 立刻 0 行，而 data.eastmoney.com
+    （本接口）与 datacenter-web.eastmoney.com 都是 0.1~0.4 秒正常返回。
+    代码里早写了「封的是 push2 这个族」这个结论，这里是把结论用起来：
+    既然别的族活着，就去别的族里找同一份数据。
+
+    口径：`f62` 主力净额与 push2 clist 的 f62 是**同一个字段**（不是相近
+    口径），所以沿用 source="em"，界面与 has_main 判定都不用改。
+
+    ★ 单位陷阱（实测 2026-10-15，务必按此解析，否则界面会显示「涨跌幅
+      -92%」）：本接口不认 push2 的 `fltt=2`，金额类字段（f62/f66/f72/f78/
+      f84）是**元**、与 push2 一致，但比例类字段（f3 涨跌幅、f184 主力净占
+      比）返回的是**放大 100 倍的整数** —— 医药生物 f3=-92 实为 -0.92%、
+      f184=154 实为 1.54%。实测 496 行无一例外（|f3| 最大 517 = 5.17%）。
+      所以 f3/f184 必须 /100，见 _bkzj_ratio。
+
+    ★ 多字段一次取：key 支持逗号分隔（key=f62,f184,f3 一次就回三个字段），
+      所以一个板块类只需 1 个请求。
+
+    ★ 硬上限 600 行：本接口 `total` 会如实报全量（个股 5923、行业+概念
+      1002），但返回**永远只有 600 行**，且 page/pn/pageNumber/pz/pageSize/
+      limit 全部试过都无效 —— 它就是固定给「按 key 降序的前 600」。行业
+      496、概念 506 各自都在 600 以内，所以两个板块类**必须分开查再合并**，
+      不能拼成一个 `m:90+t:2,m:90+t:3`（那样只回来 600，会截掉概念板块）。
+    """
+    url = (f"{_EM_DC_BKZJ}?key={key}&code={code}")
+    last = None
+    for i in range(tries):
+        try:
+            raw = _get(url, timeout=12, referer=_EM_DC_BKZJ_REF)
+            js = json.loads(raw.decode("utf-8", errors="ignore"))
+            if js.get("data") and (js["data"].get("diff") is not None):
+                return js
+            last = "empty"
+        except Exception as e:              # noqa: BLE001 —— 任何异常都只是"这级不通"
+            last = e
+        if i + 1 < tries:
+            time.sleep(0.4 * (i + 1))       # 反爬是抖动式的，退避重试即可
+    if isinstance(last, Exception):
+        raise last
+    return {}
+
+
+def _bkzj_ratio(v) -> float | None:
+    """bkzj 的比例类字段（f3/f184）→ 百分数。接口给的是 ×100 的整数。
+
+    实测 496 行全部如此；不做这个除法，界面会把 -0.92% 显示成 -92%。
+    """
+    n = _num(v)
+    return None if n is None else n / 100.0
+
+
+def _board_flow_em_dc(limit: int) -> list[dict]:
+    """东财备用域（data.eastmoney.com/dataapi/bkzj）的板块资金流。
+
+    与 _board_flow_em 返回**同构**的字段、同 coin 的口径（f62 主力净额），
+    只是换了域名族，用来在 push2 被风控时顶上 —— 比同花顺强的地方就在这：
+    THS 是净流入口径（"相近但不是同一个数"），这条是同一个数。
+
+    行业 + 概念分两次取再合并（见 _bkzj_json 里 600 行的说明）。
+    """
+    out = []
+    for code in ("m:90+t:2", "m:90+t:3"):        # 行业、概念分开查
+        try:
+            js = _bkzj_json("f62,f184,f3,f204,f205", code)
+        except Exception:
+            continue                            # 一类挂了不影响另一类
+        for it in ((js.get("data") or {}).get("diff") or []):
+            code_ = str(it.get("f12", ""))
+            if not code_:
+                continue
+            out.append({"code": code_,
+                        "name": it.get("f14", ""),
+                        "pct": _bkzj_ratio(it.get("f3")),
+                        "main": _num(it.get("f62")),
+                        "main_pct": _bkzj_ratio(it.get("f184")),
+                        # 概念板块这条路不回领涨股（实测 m:90+t:3 的 f204 全空），
+                        # 行业板块则 496/496 都有 —— 拿不到就留空，不编。
+                        "lead": it.get("f204", "") or "",
+                        "lead_code": it.get("f205", "") or "",
+                        "source": "em"})
     out.sort(key=lambda r: -(r["main"] or 0))
     return out[:limit]
 
@@ -3728,6 +3889,10 @@ SOURCE_REGISTRY: list[dict] = [
     {"key": "ths_hot", "group": "消息", "name": "同花顺人气榜", "vendor": "同花顺",
      "hosts": ["dq.10jqka.com.cn", "www.10jqka.com.cn"], "health": ["hot_rank"],
      "use": "散户关注度"},
+    {"key": "em_bkzj", "group": "资金", "name": "板块 / 个股资金流（备用域）", "vendor": "东财",
+     "hosts": ["data.eastmoney.com"],
+     "health": ["board_flow", "stock_flow"],
+     "use": "与 push2 同字段同口径的板块/个股主力净额 —— push2 族被风控时接管"},
     {"key": "ths_board", "group": "资金", "name": "板块 / 个股资金流（备用）", "vendor": "同花顺",
      "hosts": ["q.10jqka.com.cn", "data.10jqka.com.cn"],
      "health": ["board_flow", "stock_flow"],
