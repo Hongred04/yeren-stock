@@ -255,6 +255,56 @@ def main():
        "采样时刻差 40 分钟 > tol → 弃用（否则基准被压低→假放量）")
     ok(ds.intraday_baseline(55)["days"] == 1, "差 5 分钟 → 采信")
 
+    print("\n[9] 量能降档文案不得自相矛盾，也不得把同一个名字连读两遍")
+    # 背景（实测 20261014）：绝对值层与相对分位层各答各的问题，但原来拼在一句里
+    # 成了「成交额绝对值够（14144亿），但…相对近期明显偏低」—— 先说"够"再降档，
+    # 读的人只会困惑"到底够不够"。而绝对阈值 12000 亿在当前市场已长期不达标，
+    # 说"够"本身就是拿一个过期常量当结论。
+    #
+    # 另一处：rel_adj 结尾是「由量能舒适降为缩量存量」，紧跟的 advice 又以
+    # 「缩量存量，」开头 → 同一个档位名连着出现两次（像卡带）。
+    # 这两条都是**文案契约**，改措辞很容易再犯，钉在这里。
+    vcfg = {"M2_volume": {"enabled": True, "peak_threshold": 15000,
+                          "comfort_threshold": 12000, "shrink_threshold": 8000,
+                          "lookback": 20, "peak_pct": 0.80,
+                          "peak_trend_min": 1.00, "shrink_pct": 0.45}}
+    # 20 天高量 + 今天低量 → 绝对落"舒适"，相对分位极低 → 降档
+    _h = [{"date": "d%02d" % i, "open": 100, "high": 101, "low": 99,
+           "close": 100.5, "volume": 5.0e8} for i in range(20)]
+    _h.append({"date": "today", "open": 100, "high": 101, "low": 99,
+               "close": 100.5, "volume": 3.0e8})
+    _sess = {"phase": "after_close", "tmin": 240}
+    v_dn = engine.evaluate_volume(vcfg, 14144.0, _h, session=_sess)
+    ok(v_dn["mode"] == "shrink_short",
+       f"14144 亿绝对落舒适、相对分位 0% → 应降为缩量存量（得到 {v_dn['mode']}）")
+    ok("绝对值够" not in v_dn["advice"],
+       f"不得再说「绝对值够」（那是拿过期阈值当结论）：{v_dn['advice'][:80]}")
+    ok("降为缩量存量" in v_dn["advice"], "要如实说明是怎么降下来的")
+    # 档位名连读检查：降档句说明的档位名，不应紧接着出现在 advice 尾部
+    _after = v_dn["advice"].split("降为缩量存量", 1)[-1]
+    ok(not _after.lstrip("；;，, ").startswith("缩量存量"),
+       f"降档句后面不得再以同一个档位名开头：{_after.lstrip('；;，, ')[:40]}")
+    ok("资金撬不动大票" in v_dn["advice"], "去掉重复的档位名后，应对打法仍要保留")
+
+    # 峰值档同理：绝对过峰值线但相对分位低 → 降档，且不得说"达标"
+    _h2 = [{"date": "d%02d" % i, "open": 100, "high": 101, "low": 99,
+            "close": 100.5, "volume": 5.0e8} for i in range(20)]
+    _h2.append({"date": "today", "open": 100, "high": 101, "low": 99,
+                "close": 100.5, "volume": 3.0e8})
+    v_pk = engine.evaluate_volume(vcfg, 30000.0, _h2, session=_sess)
+    ok("绝对值达标" not in v_pk["advice"],
+       f"峰值档也不得说「绝对值达标」：{v_pk['advice'][:80]}")
+    ok("不构成峰值量能" in v_pk["advice"], "峰值档降下来要说明为何不算峰值")
+
+    # 不降档时，advice 必须自带档位名（信息完整，不能因为去重被削掉）
+    _h3 = [{"date": "d%02d" % i, "open": 100, "high": 101, "low": 99,
+            "close": 100.5, "volume": 3.0e8} for i in range(20)]
+    _h3.append({"date": "today", "open": 100, "high": 101, "low": 99,
+                "close": 100.5, "volume": 9.0e8})
+    v_up = engine.evaluate_volume(vcfg, 30000.0, _h3, session=_sess)
+    ok(v_up["mode"] == "peak_swing", f"相对也高 → 维持峰值档（得到 {v_up['mode']}）")
+    ok("降为" not in v_up["advice"], "没降档就不该出现降档措辞")
+
     print(f"\n===== {okc} 通过 / {badc} 失败 =====")
     return 1 if badc else 0
 

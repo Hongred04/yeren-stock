@@ -356,12 +356,38 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         if tier == 2 and rel <= shrink_pct:
             tier = 1
         if tier != _orig:
-            rel_adj = (f"成交额绝对值{'达标' if _orig == 3 else '够'}"
-                       f"（{amt:.0f}亿"
-                       + (f" ≥ {int(peak)}亿" if _orig == 3 else "")
-                       + f"），但仅处{_pos}{_tr} —— 相对近期明显偏低，"
-                       + ("不构成峰值量能，" if _orig == 3 else "")
-                       + f"由{_TIER_CN[_orig]}降为{_TIER_CN[tier]}")
+            # ★ 这里原来写的是「成交额绝对值够（14144亿），但仅处近19日的21%分位
+            #   —— 相对近期明显偏低，由量能舒适降为缩量存量」。实测 20261014
+            #   渲染出来是一句自相矛盾的话：先说"够"再降档，读的人只会困惑
+            #   "到底够不够"。
+            #
+            #   真相是两层各答各的问题，不该混成一句：
+            #     · 绝对档位（peak 15000 / comfort 12000 / shrink 8000）回答的是
+            #       "钱够不够撬动大票"这个**物理约束**，它的阀值是常量、不随市场
+            #       漂移 —— 这是刻意的（见 core/amount.py 顶部：按分位重标会让最近
+            #       15 天里 11 天判 dry 并建议空仓，同期涨停却有 32~101 只）。
+            #       代价是它在当前市场下长期停在"舒适"，阈值本身已经**过期**。
+            #     · 相对分位回答的是"这点钱相对最近是多是少"，它只降不升。
+            #
+            #   ★ 措辞要短，因为调用方已经把「两市成交 X亿，属于<档位名>」说在
+            #     前面了（web/index.html 决策步骤第 2 问）。这里再说一遍金额和
+            #     档位名，整句就变成「14144…属于缩量存量。成交额 14144亿…降为
+            #     缩量存量；缩量存量，资金撬不动大票」—— 同一句话里同一个数字
+            #     出现两次、同一个档位名出现三次（实测）。所以这一段只补
+            #     **调用方没说过的信息**：阈值已过期这件事，以及为什么此刻要靠
+            #     相对分位定档。
+            _why = []
+            if _orig == 3:
+                _why.append(f"绝对上已过峰值阈值 {int(peak)}亿")
+            elif _orig == 2:
+                _why.append(f"名义上仍高于绝对阈值 {int(comfort)}亿")
+            _expired = (f"绝对阈值是早期定下的，当前市场已长期低于它，"
+                        f"该档实际由相对分位决定") if _orig == 2 else ""
+            rel_adj = (
+                f"（{'，'.join(_why)}" + (f"；{_expired}" if _expired else "")
+                + f"）但仅处{_pos}{_tr} —— 相对近期明显偏低，"
+                + ("不构成峰值量能，" if _orig == 3 else "")
+                + f"由{_TIER_CN[_orig]}降为{_TIER_CN[tier]}")
 
     if tier == 3:
         mode = "peak_swing"
@@ -382,8 +408,19 @@ def evaluate_volume(cfg: dict, market_amount: float, hist: list[dict],
         advice = "极度缩量，量能不够说破大天都没用 —— 建议空仓等待量能恢复"
         short_only = True
 
+    # ★ 两种 advice 的写法（rel_adj 说没说「由X降为Y」）：
+    #   说了 → 档位名已经出现过，advice 只接**该怎么做**（去掉开头的档位名，
+    #          否则整句变成「…降为缩量存量；缩量存量，资金撬不动大票」）；
+    #   没说 → advice 自带档位名，信息完整。
+    #   实测 20261014 的渲染就是这个坑：rel_adj 结尾「降为缩量存量」后面紧跟
+    #   advice 开头的「缩量存量，」。同名字连读两遍，读起来像卡带。
     if rel_adj:
-        advice = f"{rel_adj}；{advice}"
+        _tail = advice
+        for _nm in ("缩量存量", "极度缩量", "量能舒适", "峰值量能"):
+            if _tail.startswith(_nm):
+                _tail = _tail[len(_nm):].lstrip("，,、 ")
+                break
+        advice = f"{rel_adj}；{_tail}"
 
     # 极致缩量还红盘
     red_flag = ""
