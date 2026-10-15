@@ -144,6 +144,10 @@ def _theme_flow(zt: list[dict] | None) -> list[dict]:
         f = flows.get(r.get("code"))
         if not f:
             continue
+        # ★ 2026-10-15 修：THS 降级行的 main 可能是 None（净额格解析不出，
+        #   datasource._ths_flow_row 返回 main=None），+= None 直接崩。
+        if f.get("main") is None:
+            continue
         sec = (r.get("sector") or "").strip() or "未分类"
         g = agg.setdefault(sec, {"sector": sec, "main": 0.0, "n": 0,
                                  "max_boards": 0})
@@ -309,13 +313,22 @@ def evaluate(cfg: dict | None = None, picks: list[dict] | None = None,
         flow_map = ds.fetch_stock_moneyflow([p["code"] for p in pics])
         for p in pics:
             f = flow_map.get(p["code"])
-            if f:
-                p["moneyflow"] = {
-                    "main": round(f["main"] / 1e8, 2),          # 亿
-                    "main_pct": round(f["main_pct"], 2),
-                    "super": round(f["super"] / 1e8, 2),
-                    "big": round(f["big"] / 1e8, 2),
-                }
+            if not f:
+                continue
+            # ★ 2026-10-15 修（TypeError: NoneType doesn't define __round__）：
+            #   THS 降级行（fetch_stock_moneyflow 第三级，source=ths）只有
+            #   main（净额），main_pct/super/big 恒为 None —— round(None)
+            #   直接炸掉整轮扫描。字段各自判空，None 原样透传（前端已按
+            #   null 显示 '—'），有值的才 round。
+            def _r(v, div=1.0):
+                return round(v / div, 2) if isinstance(v, (int, float)) else None
+            p["moneyflow"] = {
+                "main": _r(f.get("main"), 1e8),               # 亿
+                "main_pct": _r(f.get("main_pct")),
+                "super": _r(f.get("super"), 1e8),
+                "big": _r(f.get("big"), 1e8),
+                "source": f.get("source", ""),                # 界面如实标注
+            }
 
     # ③ 板块资金流排行（ulist.np，行业 + 概念一起排）
     # 取 200 行：底层本来就是全量取数、只是切片返回，顺带把归档做厚，

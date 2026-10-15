@@ -2424,36 +2424,41 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
     #   （代码写错、或那几只票当天没进排行），out 就是空的，于是白白翻满
     #   20 页之后、还要再往下降级打一轮 ulist.np。实测 20 次请求全废。
     #   接口返回了数据 = 链路是好的，没匹配上是用输入的问题，不该降级。
+    # ★ 2026-10-15 修：clist/ulist 抛异常（连不上/被掐）也不能把整轮扫描
+    #   带崩 —— 降级链的意义就是"这条不通就走下一条"。每段包 try。
     out: dict[str, dict] = {}
     saw_data = False
     page_size = 500
     max_pages = 20                      # 20 × 500 = 10000 只，覆盖全市场有余
     total = None                        # 接口报的全市场总数，用来判断是否翻到底
-    for pn in range(1, max_pages + 1):
-        js = _push2_json(
-            f"/api/qt/clist/get?pn={pn}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
-            f"&fid=f62&fs={_FS_ALL_STOCK}&fields={_FLOW_FIELDS}")
-        data = js.get("data") or {}
-        diff = data.get("diff") or []
-        if not diff:
-            break
-        saw_data = True
-        if total is None:
-            total = data.get("total")
-        for it in diff:
-            code = str(it.get("f12", ""))
-            if not code:
-                continue
-            key = _mk_code(code)
-            if key not in want:
-                continue
-            out[key] = _flow_row(it)
-        if len(out) >= len(want):
-            break                       # 要的票都齐了，不必再翻
-        # 已翻到最后一页就停 —— 不看 total 的话，某些镜像会把同一页
-        # 反复吐回来（或被 mock/缓存劫持），白翻满 max_pages 次。
-        if total and pn * page_size >= int(total):
-            break
+    try:
+        for pn in range(1, max_pages + 1):
+            js = _push2_json(
+                f"/api/qt/clist/get?pn={pn}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
+                f"&fid=f62&fs={_FS_ALL_STOCK}&fields={_FLOW_FIELDS}")
+            data = js.get("data") or {}
+            diff = data.get("diff") or []
+            if not diff:
+                break
+            saw_data = True
+            if total is None:
+                total = data.get("total")
+            for it in diff:
+                code = str(it.get("f12", ""))
+                if not code:
+                    continue
+                key = _mk_code(code)
+                if key not in want:
+                    continue
+                out[key] = _flow_row(it)
+            if len(out) >= len(want):
+                break                   # 要的票都齐了，不必再翻
+            # 已翻到最后一页就停 —— 不看 total 的话，某些镜像会把同一页
+            # 反复吐回来（或被 mock/缓存劫持），白翻满 max_pages 次。
+            if total and pn * page_size >= int(total):
+                break
+    except Exception:
+        out = {}                        # clist 崩了 → 清空往下降级
     if saw_data:
         return out                      # 链路通 —— 就算一只没匹配上也不降级
 
@@ -2469,12 +2474,15 @@ def fetch_stock_moneyflow(codes: list[str]) -> dict[str, dict]:
                 for it in ((js.get("data") or {}).get("diff") or [])
                 if it.get("f12")]
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for rows in pool.map(work, chunks):
-            for code, d in rows:
-                out[code] = d
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for rows in pool.map(work, chunks):
+                for code, d in rows:
+                    out[code] = d
+    except Exception:
+        pass
     if out:
-        return out
+        return out                      # ulist.np 有货就收工，别再往下打 THS
 
     # ③ 同花顺页面降级（2026-10-14 新增）：data.10jqka.com.cn/funds/ggzjl/
     #    的「流入资金/流出资金/净额」表，105 页 × 50 行覆盖全市场。
