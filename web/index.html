@@ -743,15 +743,38 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
    列数」），这里只保留 .pts 特有的补丁。原来只有 .pts 有自适应，带 data-n
    的 g6/g4 网格（方向推演 3 张、题材主线若干张）走的是固定列数 ——
    实测两处各白扔 369px，两屏合计 738px 纯空白。 */
-.pts[data-n="6"]{grid-template-columns:repeat(3,minmax(0,1fr))}
-.pts[data-n="5"]{grid-template-columns:repeat(3,minmax(0,1fr))}
-.pts[data-n="2"]{grid-template-columns:repeat(2,minmax(0,1fr))}
-.pts[data-n="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
-/* 带 data-n 的通用网格同样按张数铺满（g6/g4 与自定义列数都让位给张数） */
-.grid[data-n="1"]{grid-template-columns:1fr}
-.grid[data-n="2"]{grid-template-columns:repeat(2,minmax(0,1fr))}
-.grid[data-n="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
-.grid[data-n="5"]{grid-template-columns:repeat(3,minmax(0,1fr))}
+/* —— ③d 末行铺满：一行几张由 JS 算好，写进 --ptsn，CSS 只读它（v1.41.1）——
+   上一版（③b）把列数写死在 [data-n="N"] 上，漏了 7 张：「明日判断」的
+   points 是 7 条 → 落到兜底 4 列 → 排成 4+3，第二行右边空 361px（整行的
+   27%）纯空白，正是"留着一块竖着的空"。而张数是动态的，硬编码追不上。
+
+   ★ 两个 CSS Grid 的硬事实（都实测踩过）：
+   ① repeat(N,1fr) 的列数固定，7 张落进 4 列仍是 4+3，末行右边照样空；
+   ② auto-fit+minmax 只让**列轨**铺满行宽，末行不足的项目仍是固定宽；
+   ③ CSS Grid **没有"末行自动拉伸"**，末行要铺满只能让末行项目显式跨列。
+   所以必须知道「每行几张」这个数，才能既算列数、又算末行们的 span。
+
+   上一版想用纯 CSS（多层 :has + :nth-child span + 媒体查询）对齐这个数，
+   实测**不可靠**：root/1100/820 三组规则同时命中，中屏的 :nth-child(4){span 3}
+   与窄屏的 :nth-child(7){span 2} 会互相污染，760px 下算出 6.875px/648px/0px
+   的崩坏列宽（7 张排成 7 行）。根因是——列数和 span 是**耦合**的，分头维护必然失配。
+
+   改为：JS 按容器宽 + 卡片数算出「每行几张」perRow，只写一个 CSS 变量
+   --ptsn；列数与末行 span 都由 perRow 推出，唯一数据源，不可能失配。
+   列数与卡片张数都变时只需重算一次，且**窗口缩放会重算**（见 resize 钩子）。 */
+/* 用 !important 是被迫的：页面上有 .g4{repeat(4,1fr)}（0,1,0）和
+   .mgroup>.grid（0,2,0）等既有规则，而 .pts 单独一个类也是 0,1,0，
+   靠顺序未必赢；实测 .grid[data-n]（0,3,0）曾把列数盖成 7。
+   与其去猜谁在后面，不如明确声明"这个网格的列数由 --ptsn 独占"。
+   代价：必须保证 --ptsn 本身永远合法（见 layoutPts 的兜底）。 */
+.pts{--ptsn:4; grid-template-columns:repeat(var(--ptsn),minmax(0,1fr))!important}
+/* 末行不足一张整行的部分，由 .pt-tail 那几张按 span 补满 */
+.pts>.pt-tail{grid-column:span var(--ptspan,1)}
+/* ⚠️ 这里**不能**再写 .grid[data-n="N"]{grid-template-columns:...} ——
+   .grid[data-n="7"]（两类+属性，优先级 0,3,0）会盖掉 .pts{--ptsn}（0,1,0），
+   实测结果是 --ptsn 明明写了 6、真实列数却是 7，列数与 span 又失配。
+   按"唯一数据源"原则，列数一律只由 --ptsn 决定，data-n 规则全部删除。
+   保留 data-n 属性本身（是真实张数，别的逻辑可能在读）。 */
 /* 情景预案：「若 X」和「→ Y」原来是同一段里换行，条件和动作分不开。
    拆成上下两行并给条件加左侧色条，一眼看清"什么情况 → 干什么"。 */
 .sc{margin-top:4px;padding-left:6px;border-left:3px solid var(--line);
@@ -759,8 +782,10 @@ header{animation:slidedown var(--dur-slow) var(--ease) both}
 .sc+.sc{margin-top:6px}
 .sc-c{color:var(--tx2);font-weight:700}
 .sc-t{color:var(--tx);font-weight:800;margin-top:1px}
-@media(max-width:1100px){
-  .pts[data-n="5"],.pts[data-n="6"]{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:760px){
+  /* 极窄屏（手机竖屏）：一行 2 张，末行 1 张独占整行。列数由 JS 按容器宽算，
+     这里只兜底一个最小值，避免 JS 未跑时挤成一条。 */
+  .pts{--ptsn:2}
 }
 
 /* —— ⑥ 顶栏：标签收紧，不再一行挤九个 —— */
@@ -3634,6 +3659,61 @@ function renderSowing(){
   });
 }
 
+/* —— 末行铺满：算「一行几张」并给末行卡片打 span（v1.41.1）——
+   为什么不做成纯 CSS：CSS Grid 没有"末行自动拉伸"，末行要铺满只能让末行
+   项目显式跨列，而"谁是末行成员"取决于**每行几张**；列数与 span 是耦合的，
+   分头维护必然失配（实测纯 CSS 版在 760px 算出 6.875px/648px/0px 崩坏列宽）。
+   这里每行几张 perRow 由**容器实际宽**推出，列数(--ptsn)和末行 span(--ptspan)
+   都从它算，只有一个数据源。窗口缩放时重建一次。
+   卡片最小可读宽 150px：小于它中文标题会折成两行、正文挤成竖条。 */
+function layoutPts(){
+  const grids=document.querySelectorAll('.pts');
+  grids.forEach(g=>{
+    const n=g.children.length; if(!n) return;
+    // ⚠️ 取宽要挑**可靠的那个**：renderOutlook 刚插完 DOM 时 .pts 自身
+    // clientWidth 可能是 0（还没布局），此时退回父元素；父元素也为 0 就
+    // 用视口宽估一个，绝不让 avail 变成 0 —— 0 会让 perRow 也算成 0。
+    let avail=g.clientWidth;
+    if(!avail){ const p=g.parentElement; avail=(p&&p.clientWidth)||document.documentElement.clientWidth||1200; }
+    const gap=parseFloat(getComputedStyle(g).columnGap)||0;
+    const MIN=150;   // 卡片最小可读宽：再窄中文会折成竖条
+    // 不设人为上限，上限由"放得下几张"决定
+    let perRow=Math.max(1,Math.floor((avail+gap)/(MIN+gap)));
+    perRow=Math.min(perRow,n);
+    // 优先挑能整除 n 的列数（省掉末行缺口）；不能整除就用 perRow，末行补齐
+    let cols=perRow;
+    for(let c=Math.min(perRow,n);c>=2;c--){ if(n%c===0){ cols=c; break; } }
+    // 兜底：算完再验一次"cols 列真的放得下吗"，放不下就降列数。
+    // 这一步是 !important 强推列数的安全网 —— 宁可多几行，也不能溢出容器。
+    while(cols>1 && (avail-(cols-1)*gap)/cols<MIN) cols--;
+    // ── 末行补齐 ──
+    // 末行 rem 张要填满 cols 列，每张应占 cols/rem 列。cols/rem 常是分数
+    // （7 张 4 列 → 3 张要各占 4/3 列），而 grid-column:span 只吃整数，
+    // 所以把总列数按 rem 放大到 lcm 精度：每张占 base 列、末行占 base*cols/rem 列。
+    // 例：cols=4、rem=3 → lcm=12，普通张 span 3，末行 3 张各 span 4。
+    // 上一版用 Math.floor(cols/rem)=floor(4/3)=1，末行仍是原宽、只填 71%（实测）。
+    const rem=cols>1?n%cols:0;
+    let tailSpan=1, baseCols=cols;
+    if(rem){
+      const g2=(a,b)=>b?g2(b,a%b):a;
+      const lcm=cols/g2(cols,rem)*rem;      // 能被 cols 和 rem 同时整除的最小列数
+      baseCols=lcm; tailSpan=lcm/rem;       // 普通张占 lcm/cols，末行占 lcm/rem
+    }
+    g.style.setProperty('--ptsn',baseCols);
+    const normalSpan=rem?baseCols/cols:1;
+    // 末行成员：第 (n - rem + 1) 起（整除时无末行缺口，全部 span 1）
+    const tailStart=rem?n-rem+1:0;
+    [...g.children].forEach((c,i)=>{
+      c.classList.remove('pt-tail');
+      c.style.removeProperty('--ptspan');
+      if(tailStart&&i+1>=tailStart){ c.classList.add('pt-tail'); c.style.setProperty('--ptspan',tailSpan); }
+      else if(normalSpan!==1){ c.style.setProperty('--ptspan',normalSpan); c.classList.add('pt-tail'); }
+    });
+  });
+}
+let _ptsT=null;
+function layoutPtsSoon(){ clearTimeout(_ptsT); _ptsT=setTimeout(layoutPts,80); }
+
 function renderOutlook(){
   const el=$('outlook'); if(!el) return;
   const o=REPORT.outlook;
@@ -3702,6 +3782,7 @@ function renderOutlook(){
     </div>
     <div class="sub" style="margin-top:var(--s3);font-size:11.5px;color:var(--tx3)">${esc(o.note||'')}</div>
   </div>`;
+  layoutPts();   // 按容器宽算每行几张 + 末行补齐（见 layoutPts 注释）
 }
 
 // ── 信号胜率复盘（E4） ──
@@ -4603,6 +4684,9 @@ window.addEventListener('resize',()=>{
     const d=IDX_CACHE[IDX_CUR+':'+IDX_PERIOD];
     if(d) try{ bindIndexCrosshair(d); }catch(e){}
   }
+  // 「明日判断」的每行几张是按容器宽算的，窗口变了必须重算，
+  // 否则宽屏切窄屏还留着 6 列、卡片被压成一条。
+  layoutPtsSoon();
 });
 
 load();
