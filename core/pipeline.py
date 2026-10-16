@@ -775,12 +775,13 @@ def analyze(cfg: dict | None = None, date: str = "", kline_limit: int = 260,
                 #   连板的板块列出来**（如最高 5 板的饲料/影视院线），用户看到
                 #   "不接力"与"最高 5 板"同屏，会以为系统自相矛盾。这里点明
                 #   它们只是**信息展示**（板块热度/梯队），不是候选，避免误读。
-                bits.append(f"涨停名单里有 {pool_b2} 只 2 板以上的票 —— "
-                            "体系一律不接力，未列入候选（下方板块卡提到它们"
-                            "只是展示板块热度，不是买点建议）")
+                # v1.41.6 精简：原文 98 字把"只是展示板块热度，不是买点建议"
+                #   这一层解释写成了正文，用户读的是选股票不是读规则说明书；
+                #   压成一句主句 + 括号限定，字数减半、信息量不减。
+                bits.append(f"另有 {pool_b2} 只 2 板以上 —— 不接力，未列入候选"
+                            "（板块卡仍显示它们，只是热度，不是买点）")
             if excluded_n:
-                bits.append(f"另有 {excluded_n} 只打分靠前但今日没有可执行买点，"
-                            "也未列入")
+                bits.append(f"还有 {excluded_n} 只打分靠前但今日无可执行买点")
             picks_note = "；".join(bits) + "。"
 
         plan = trading.position_plan(cfg, picks, sentiment, volume, macro)
