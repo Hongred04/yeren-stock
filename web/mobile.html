@@ -797,12 +797,22 @@ function render(fromCache,ts){
   // v1.25.2 起 E1 的「退潮」只可能来自 M3 稳定器确认（sentiment_meter 不再
   // 拿原始亏钱面积/温度骤降强置 ebb）。
   // ★ v1.39.0 更正：下面原本写「两把尺子在数据层面已统一，同屏不会再出现
-  //   一句情绪高潮一句退潮」—— 这句是**错的**。实测 2026-10-15 仍然打架：
+  //   一句情绪高潮一句退潮」—— 那句是**错的**。实测 2026-10-15 仍然打架：
   //   当日沪指 -2.03%、跌 5122 家、跌停 22 家，M3 判「退潮」，E1 温度 57° 报
   //   「🌱 修复·启动」。根因是温度四项完全不含大盘涨跌与跌停家数。
   //   修法见 core/sentiment_meter._breadth_penalty（温度 57→39、档位 revive→ice）。
-  //   手机端这条修复**自动生效**（读的是同一个后端字段），此处只更正注释并
-  //   补渲染 market_note，让用户在手机上也能看到"为什么降分"。
+  //   手机端这条修复**自动生效**（读的是同一个后端字段）。
+  // ★ v1.41.2 二次更正（真正的根因，在 core 侧）：上面第 797 行说「E1 的退潮只
+  //   可能来自 M3 稳定器确认」—— 设计意图如此，**但代码从 v1.25.2 起就是坏的**：
+  //   core/sentiment_meter.py 里 `stab.peek(real_date, ready=not_ready)` 把参数
+  //   极性写反了（就绪闸门保证 not_ready 恒为 False，于是恒传 ready=False，
+  //   而 peek 在 ready=False 时无条件返回 confirmed=False）。结果是 M3 再怎么
+  //   确认退潮，E1 都收不到，stage 永远停在温度档位 —— 这才是「同屏两把尺子
+  //   给出相反指令」的真根因，_breadth_penalty 只挡住了"指数在跌"的日子，
+  //   而 2026-10-16 指数 +0.24%、惩罚为 0，退潮照样被漏掉（实测 M3=退潮、
+  //   E1=「🌱修复·启动·温度58°·轻仓试错只打最强」）。已修为 ready=True。
+  //   手机端本卡不受影响：cls 直接取 sen.can_trade（M3 权威口径），
+  //   温度计只作为第二屏的量化读数展示。
   const hist=d.history||{};
   const histNote=(hist.days!=null&&hist.days<8&&!fromCache)
     ? `<div class="notice">历史归档正在补齐（已 ${hist.days} 天${

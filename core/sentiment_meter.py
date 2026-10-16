@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 
 from . import datasource as ds
 from . import paths
@@ -210,7 +212,33 @@ def _load_hist() -> list[dict]:
         return []
 
 
+def _today_str() -> str:
+    """本机当天日期 YYYYMMDD。"""
+    return time.strftime("%Y%m%d")
+
+
 def _save_hist(real_date: str, row: dict) -> list[dict]:
+    """把当日温度写进共享温度曲线（sentiment_history.json）。
+
+    ★ 只接受「不晚于今天」的日期（v1.41.2 修）。
+    温度曲线是**实盘序列**，按日期字符串排序后最后一个点就是图上的末端。
+    任何用**未来日期或合成日期**调 build() 的脚本 / 测试 / 回测，都会把一行
+    永久插到曲线**末尾**，图上就出现"最后一天温度断崖"。实测踩过：
+      `tests/test_data_readiness.py` 用 real_date="20261106" 跑过一次，
+      该行（temperature 24、src 为实盘口径）留在库里，而当天是 20261016 ——
+      曲线末端变成 39(10-15) → 58(10-16) → 24(11-06)，
+      同屏标题却写"温度 58°（较上日 +19° 回暖）"，**看图是暴跌、看字是回暖**。
+    所以：未来日期一律拒绝落盘（返回现有历史，保持调用方语义不变），
+    并在 stderr 留一行警告 —— 静默吞掉会让下一个踩坑的人再查一遍。
+    """
+    if not (real_date or "").isdigit() or real_date > _today_str():
+        try:
+            sys.stderr.write(
+                f"[sentiment_meter] 拒绝把未来日期写进温度曲线："
+                f"real_date={real_date!r} > 今天 {_today_str()}（数据未落盘）\n")
+        except Exception:
+            pass
+        return _load_hist()
     hist = _load_hist()
     hist = [h for h in hist if h.get("date") != real_date]
     hist.append({"date": real_date, **row})
@@ -386,14 +414,23 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     stage = _stage_of(temp, prev_temp)
     # 退潮与否**以 M3 稳定器的确认为准**（E1 只用自己的温度决定非退潮时的档位）。
     # 两个页面各报一个阶段是"一会能出手一会退潮"的另一个来源，这里统一口径。
-    # ★ 就绪闸门：池子没取到时这里的 stage 也是拿空表/旧快照算的温度，一律不可信；
-    #   此时连"退潮确认"都不认（稳定器里躺着的是**上一轮**的结论，可能已经过期），
-    #   直接沿用温度分档，由前端按 data_ready=False 打叉说明数据没到手。
+    # ★ 就绪闸门：池子没取到时上面的 not_ready 分支已经直接 return（不给读数），
+    #   所以走到这里数据一定就绪 —— `stab.peek` 的 ready 参数语义是**数据是否
+    #   就绪**，这里恒为 True。
+    #   ★★ v1.41.2 修（同屏两把尺子打架的真根因）：此处原写作
+    #   `stab.peek(real_date, ready=not_ready)` —— **参数极性写反了**。
+    #   上面的闸门保证 not_ready 恒为 False，于是恒传 ready=False，而 peek 在
+    #   ready=False 时**无条件**返回 confirmed=False。结果就是：M3 无论怎么确认
+    #   退潮，E1 都永远收不到这个确认，stage 永远停在温度档位。
+    #   实测 2026-10-16：M3 = 退潮（亏钱面积 49%、跌停 10 家、炸板 49 只），
+    #   E1 = 「🌱 修复·启动 · 温度 58° · 出现破局板、赚钱效应萌芽 —— 轻仓试错，
+    #   只打最强」，同屏两把尺子给出**完全相反**的指令。这也解释了为什么
+    #   v1.39.0 加大盘惩罚只能挡住"指数在跌"的日子：那天指数 +0.24%，
+    #   惩罚项为 0，而退潮本就不需要大盘下跌。
     try:
-        v = stab.peek(real_date, ready=not_ready)
+        v = stab.peek(real_date, ready=True)
     except TypeError:
         # 兼容按旧签名打桩/包一层的老调用点（tests 里有 `stab.peek = lambda date:`）。
-        # 这一帧必然 not_ready=False —— 未就绪在上面已经返回，不会走到这里。
         v = stab.peek(real_date)
     if v["confirmed"]:
         stage = "ebb"
@@ -446,10 +483,16 @@ def build(zt: list[dict], dt: list[dict], zb: list[dict], snaps: dict,
     # ★ 曲线上限从 30 提到 120：归档回补后有近一年的数据（243 天），
     #   只画 30 天等于把补来的历史又丢掉。前端按需截取，这里给全。
     #   src 字段透传（"rebuild" = 由归档重建、缺炸板率，前端据此标注）。
+    # ★ v1.41.2：只画**不晚于今天**的点。历史库里可能已经躺着未来日期的
+    #   脏行（`_save_hist` 现在会拒绝新写入，但旧行还在），不滤掉的话曲线的
+    #   最后一个点就是那个未来日期，图上出现"末端断崖"、与标题的"回暖"打架。
+    #   过滤后曲线末端恒为真实的一天。
+    _today = _today_str()
     heat_series = [{"date": h.get("date"), "temperature": h.get("temperature"),
                     "limit_up": h.get("limit_up"), "max_boards": h.get("max_boards"),
                     "src": h.get("src") or "live"}
-                   for h in _load_hist()][-120:]
+                   for h in _load_hist()
+                   if (h.get("date") or "") <= _today][-120:]
 
     return {
         "enabled": True, "temperature": temp, "stage": stage,

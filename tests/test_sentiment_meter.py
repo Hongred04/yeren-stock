@@ -140,6 +140,44 @@ def main():
         m4 = sm.build(ZT, DT, ZB, {}, "20261012", {"E1_meter": {"enabled": False}})
         ok(m4["stage"] == "disabled" and m4["metrics"] == {},
            "enabled=False → disabled，空 metrics")
+
+        # ────────────────────────────────────────────────────────────────
+        # v1.41.2 回归：stab.peek 的 ready 参数极性
+        # ────────────────────────────────────────────────────────────────
+        # 上面 [2]/[4] 把 stab.peek 打成**单参数** lambda，于是 build() 走的是
+        # `except TypeError` 兼容分支（`stab.peek(real_date)`，不带 ready）。
+        # 那条路**证明不了极性对不对** —— 真实 peek 是
+        # `peek(date, ready=True)`，`ready=False` 时**无条件**返回 confirmed=False。
+        # 历史 bug：build() 里写的是 `stab.peek(real_date, ready=not_ready)`，
+        # 而上面的就绪闸门保证 not_ready 恒为 False → 恒传 ready=False →
+        # M3 无论怎么确认退潮，E1 都收不到，stage 永远停在温度档位。
+        # 实测 2026-10-16：M3="ebb 退潮"，E1="🌱 修复·启动 · 温度 58° ·
+        # 轻仓试错、只打最强" —— 同屏两把尺子给出完全相反的指令。
+        # 所以这里必须用**真实的 2 参数签名**跑一遍。
+        print("[6] ★ 真 peek 签名下：M3 确认退潮 → E1 必须跟着报退潮（极性回归）")
+        sm.stab.peek = _orig["peek"]          # 还原成真 peek（2 参数）
+        import tempfile as _tf
+        from core import stage_stabilizer as _stab
+        _stab.reset("20260601")
+        for _ in range(3):                    # 喂够确认次数
+            _stab.stabilize("20260601", True, 0.67, 0.30)
+        _real_true = _stab.peek("20260601", ready=True)
+        _real_false = _stab.peek("20260601", ready=False)
+        ok(_real_true["confirmed"] is True and _real_false["confirmed"] is False,
+           "前置确认：真 peek 在 ready=True 时 confirmed=True、ready=False 时恒为 False")
+        m5 = sm.build(ZT, DT, ZB, {}, "20260601", CFG)
+        ok(m5["stage"] == "ebb" and "退潮" in m5["label"],
+           f"★ M3 已确认退潮 → E1 stage={m5['stage']}（{m5['label']}），"
+           f"不再报「修复·启动 · 轻仓试错」")
+        ok(m5["advice"] == sm.STAGES["ebb"]["advice"],
+           "★ 建议同步走退潮档：空仓，别抄底、别幻想")
+
+        print("[7] M3 未确认退潮 → 真 peek 下 E1 仍按温度分档（不误伤）")
+        _stab.reset("20260602")
+        m6 = sm.build(ZT, DT, ZB, {}, "20260602", CFG)
+        ok(m6["stage"] == sm._stage_of(m6["temperature"], None),
+           f"未确认 → stage={m6['stage']} 严格跟随温度分档")
+        ok(m6["stage"] != "ebb", "未确认退潮时不得冒充 ebb")
     finally:
         _restore()
 

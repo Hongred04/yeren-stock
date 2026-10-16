@@ -3059,7 +3059,7 @@ function bindIndexCrosshair(d){
 
 // ── E1 情绪温度计 ──
 const STG={ice:['🧊','var(--blu)','冰点'],revive:['🌱','var(--grn)','修复·启动'],
-  ferment:['🔥','var(--org)','发酵'],climax:['🌋','var(--red)','高潮'],ebb:['🌊','var(--grn)','退潮']};
+  ferment:['🔥','var(--org)','发酵'],climax:['🌋','var(--red)','高潮'],ebb:['🌊','var(--red)','退潮']};
 function renderMeter(){
   // 盘中实时异动（打开涨停板 = 正在炸板）——仅交易时段有数据，收盘自动消失
   const iw=$('intradayWrap');
@@ -3078,6 +3078,10 @@ function renderMeter(){
   if(m.enabled===false||!m.metrics||!Object.keys(m.metrics).length){
     el.innerHTML='<div class="card fl" style="font-size:13px">情绪温度计已关闭或数据不足</div>'; return;}
   const mt=m.metrics, t=m.temperature||0, s=STG[m.stage]||STG.revive;
+  // ★ v1.41.2：档位不能只看温度。退潮（ebb）可以由 M3 稳定器在**任何温度**下确认，
+  //   旧写法 `t>=62?'go':(t<42?'stop':'hold')` 会在 ebb+温度 58 时给出**绿色「可以出手」**结论卡，
+  //   与同屏 M3「确认退潮」直接矛盾。退潮/冰点一律走 stop（红）。
+  const cls=(m.stage==='ebb'||m.stage==='ice')?'stop':(t>=62?'go':(t>=42?'hold':'stop'));
   // M3（能不能出手，权威口径）与 E1 温度计（量化温度）是两套阶段口径
   // （M3 与 E1 同词不同义）；v1.25.2 起 E1 的「退潮」只来自 M3 稳定器确认。
   // ★ v1.39.0 更正：原注释写「两把尺子在数据层面已统一，不再需要口径说明」
@@ -3087,7 +3091,12 @@ function renderMeter(){
   //   修法：给温度加「大盘惩罚」项（见 core/sentiment_meter._breadth_penalty），
   //   并把当日普跌时的 E1 建议换成防守口径 —— 温度 57→39、档位 revive→ice，
   //   与 M3 的退潮结论一致。惩罚明细由 m.market_note 渲染，用户能看到"为什么降分"。
-  const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'° '+(m.delta>=0?'回暖':'降温')+'）';
+  // ★ v1.41.2：退潮档下不能说「回暖」—— 温度数字可能确实比昨天高（今天 58° 比
+  //   昨天 39° 高 +9°），但阶段已由 M3 判定为退潮，同屏写「🌊 退潮 ·（较上日
+  //   +9° 回暖）」是自相矛盾的：看图是退潮、看字是回暖，正是用户报的
+  //   「市场的情况和文字不符」。退潮档只陈述变化量，不贴方向标签。
+  const dltWord=(m.stage==='ebb'||m.stage==='ice')?'':(m.delta>=0?'回暖':'降温');
+  const dlt=(m.delta==null)?'':'（较上日 '+(m.delta>=0?'+':'')+m.delta+'°'+(dltWord?' '+dltWord:'')+'）';
   const lad=(m.ladder||[]), mx=Math.max(1,...lad.map(x=>x.count));
   const ladHtml=lad.map(x=>`<div style="display:flex;align-items:center;gap:8px;margin:5px 0">
     <span style="min-width:46px;font-weight:700;font-size:12.5px;${x.boards>=4?'color:var(--red)':''}">${x.boards}板</span>
@@ -3140,7 +3149,7 @@ function renderMeter(){
      (m.space&&m.space.open?'g':'o'),(m.space&&m.space.note)||''],
     ['涨跌家数',(mt.breadth&&mt.breadth.total?mt.breadth.up+'/'+mt.breadth.down:'—'),mt.breadth&&mt.breadth.total?('涨跌比 '+mt.breadth.up_down_ratio):'数据不可用',mt.breadth&&mt.breadth.total&&mt.breadth.up>mt.breadth.down?'g':'o'],
   ];
-  el.innerHTML=`<div class="verdict ${t>=62?'go':(t<42?'stop':'hold')}" style="padding:16px 20px">
+  el.innerHTML=`<div class="verdict ${cls}" style="padding:16px 20px">
     <div class="hd2"><div class="ic" style="font-size:26px">${s[0]}</div>
       <div><div class="ti" style="font-size:19px">${s[2]} · 温度 ${t}° <span style="font-size:13px;font-weight:600">${dlt}</span></div>
       <div class="sub" style="font-size:12.5px;margin-top:4px">${esc(m.advice||'')}</div></div></div>
