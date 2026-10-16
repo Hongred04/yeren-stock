@@ -274,7 +274,7 @@ tbody tr:last-child td{border-bottom:none}
    才看得见，页面变成「表格 + 一屏半详情」两截。改成从右侧滑出的独立面板后，
    表格保持原样，详情也不再和候选表抢纵向空间。
    复用已有的 #mask 与 .panel 的交互约定（点遮罩/×/Esc 关闭），不另造一套。 */
-.dpanel{position:fixed;top:0;right:0;width:min(620px,100vw);height:100vh;z-index:100;
+.dpanel{position:fixed;top:0;right:0;width:min(860px,100vw);height:100vh;z-index:100;
   background:var(--bg);transform:translateX(100%);transition:transform .26s var(--ease);
   display:flex;flex-direction:column;box-shadow:-8px 0 34px rgba(0,0,0,.18)}
 .dpanel.on{transform:none}
@@ -2538,10 +2538,13 @@ function drawK(p){
   const pad=(mx-mn)*0.06||0.1; mn-=pad; mx+=pad;
   const rg=(mx-mn)||1;
   const maxVol=Math.max(...vols,1);
-  const X=i=>padL+i*iw/(n-1);
+  // ★ 见 drawIndexKL 里的长注释（v1.41.4）：宽度按「一格」算、X 取格子居中。
+  //   个股K线与指数K线是同一套几何，这里同步修正，否则个股图照样糊。
+  const slot=iw/n;
+  const bw=Math.max(2,Math.min(slot*0.62,26));
+  const X=i=>padL+(i+0.5)*slot;
   const Yp=v=>priceB-(v-mn)/rg*priceH;
   const Yv=v=>volB-v/maxVol*volH;
-  const bw=Math.max(1.6,Math.min(7,iw/n*0.62));
   const th=_limitThreshold(p.code);
   const prevC=i=>i>0?closes[i-1]:bars[i].open;
   const upOf=i=>bars[i].close>=prevC(i);
@@ -2553,7 +2556,11 @@ function drawK(p){
     const x=X(i), c=colOf(i);
     candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
     const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
-    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    // 十字星（开=收）实体高度为 0，Math.max(1,…) 只给 1 个 viewBox 单位 ≈ 0.82 CSS px，
+    // 细到与影线分不清，整根看着像「没有实体」。给 MINBODY=1.8 单位（≈1.5px）读成一根短横；
+    // 并且要从**上边缘往上撑**，否则下移会盖住下面那根影线的位置。
+    const bh=Math.max(1.8,y1-y0);
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${(y0+bh>y0?Math.min(y0,priceB-bh):y0).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${c}"/>`;
     const pc=prevC(i);
     if(i>0 && pc>0 && (b.close-pc)/pc*100>=th){
       marks+=`<circle cx="${x.toFixed(1)}" cy="${(Yp(b.high)-4).toFixed(1)}" r="2.1" fill="#d92d3f"/>`;
@@ -2866,11 +2873,27 @@ function drawIndexKL(d){
   const volH=46, priceH=H-padT-padB-volH-gap;
   const iw=W-padL-padR;
   const priceB=padT+priceH, volT=priceB+gap, volB=volT+volH;
-  const X=i=>padL+i*iw/(n-1);
   const Yp=v=>priceB-(v-mn)/rg*priceH;
   const maxVol=Math.max(...vols,1);
   const Yv=v=>volB-v/maxVol*volH;
-  const bw=Math.max(1.6,Math.min(7,iw/n*0.62));
+  // ★ 蜡烛宽度按「一格」算，不按绘图区窄度硬夹（v1.41.4 修「日K/月K 看不清」）
+  //
+  //   旧式：bw=Math.max(1.6,Math.min(7,iw/n*0.62))
+  //   `Math.min(7,…)` 把实体永久封在 7 个 viewBox 单位 —— 而面板 620px 减去内边距
+  //   是 594px，SVG 却按 W=720 画（viewBox 缩放 0.825），于是那「7 单位」实际上
+  //   只有 **5.77 CSS px**。实测两种相反的翻车：
+  //     · 日K 120 根 → 每根仅 4.9px，实体 2.8px、间隙 4.54px（**间隙比实体还宽**），
+  //       十字星又被 Math.max(1,…) 夹成 1px 细线，整体糊成一片；
+  //     · 月K 14 根 → 实体仍是封顶的 5.77px，而间隙 41.5px，
+  //       变成「14 根孤零零的小棍 + 578px 空白」，白/墨比约 7:1。
+  //   一根蜡烛该多宽取决于**它占的那一格有多大**，不是取决于整幅多窄：
+  //     slot = 每根的中心间距；实体取 62% 格子宽，下限 2 保证看得见，
+  //     上限 26 防止根数很少时（月K）实体胖成方块。
+  //   同时把 X 从「首尾均分」改为「格子居中」—— 原 X(i)=padL+i*iw/(n-1) 让首尾
+  //   贴边、中间按 n-1 等分，而宽度按 n 算，两者相差一格导致间隙不均。
+  const slot=iw/n;
+  const bw=Math.max(2,Math.min(slot*0.62,26));
+  const X=i=>padL+(i+0.5)*slot;
   const prevC=i=>i>0?closes[i-1]:bars[i].open;
   const colOf=i=>bars[i].close>=prevC(i)?'#d92d3f':'#0f9d58';
 
@@ -2879,7 +2902,11 @@ function drawIndexKL(d){
     const x=X(i), c=colOf(i);
     candle+=`<line x1="${x.toFixed(1)}" y1="${Yp(b.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Yp(b.low).toFixed(1)}" stroke="${c}" stroke-width="1"/>`;
     const y0=Yp(Math.max(b.open,b.close)), y1=Yp(Math.min(b.open,b.close));
-    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,y1-y0).toFixed(1)}" fill="${c}"/>`;
+    // 十字星（开=收）实体高度为 0，Math.max(1,…) 只给 1 个 viewBox 单位 ≈ 0.82 CSS px，
+    // 细到与影线分不清，整根看着像「没有实体」。给 MINBODY=1.8 单位（≈1.5px）读成一根短横；
+    // 并且要从**上边缘往上撑**，否则下移会盖住下面那根影线的位置。
+    const bh=Math.max(1.8,y1-y0);
+    candle+=`<rect x="${(x-bw/2).toFixed(1)}" y="${(y0+bh>y0?Math.min(y0,priceB-bh):y0).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${c}"/>`;
     const y=Yv(vols[i]);
     volBars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,volB-y).toFixed(1)}" fill="${c}" opacity=".55"/>`;
   });
@@ -2946,15 +2973,23 @@ function bindIndexCrosshair(d){
         svg=el.querySelector('svg');
   if(!hot||!vL||!hL||!tip||!svg) return;
   const W=720, padL=52, padR=14, iw=W-padL-padR;
+  // ★ X 口径必须与绘图函数逐字一致（v1.41.4）：K线用「格子居中」(i+.5)*slot，
+  //   分时用「首尾贴边」i*iw/(n-1)。光标是分时与K线**共用**的，两处不一致
+  //   竖线就会偏移半格 —— 与下面那条「必须与 drawIntraday 取值逐字一致」同一个坑。
+  const _isK = d.period && d.period !== 'min1';
+  const _slot = iw/n;
+  const Xof = _isK ? (i)=>padL+(i+0.5)*_slot : (i)=>padL+i*iw/(n-1);
   const hide=()=>{ vL.setAttribute('opacity','0'); hL.setAttribute('opacity','0'); tip.style.display='none'; };
   const move=(ev)=>{
     const r=svg.getBoundingClientRect();
     if(!r.width) return;                        // 未布局：别算出 NaN
     const vx=(ev.clientX-r.left)/r.width*W;
-    let i=Math.round((vx-padL)/(iw/(n-1)));
+    // 反算下标也要跟着口径走：格居中时「第 i 格」覆盖 [i*slot,(i+1)*slot)
+    let i = _isK ? Math.floor((vx-padL)/_slot)
+                 : Math.round((vx-padL)/(iw/(n-1)));
     i=Math.max(0,Math.min(n-1,i));
     const b=bars[i];
-    const x=padL+i*iw/(n-1);
+    const x=Xof(i);
     vL.setAttribute('x1',x.toFixed(1)); vL.setAttribute('x2',x.toFixed(1)); vL.setAttribute('opacity','.75');
     // 水平线贴在该点的收盘价上（分时与K线都一样：看的就是那一刻的价）
     const base=Number(d.prev_close)||0;

@@ -1830,11 +1830,24 @@ def fetch_kline(code: str, n: int = 70) -> list[dict]:
     通达信是软依赖，未装 / 连不上时自动退回腾讯/新浪（安卓包即走此路径）。
     """
     def producer():
+        # ★ 降级只许「往上换」，不许被空结果覆盖（v1.41.4 修数据源切换 bug）。
+        #   原式三行都是 `if len(bars) < 25: bars = 下一路` —— **无条件赋值**，
+        #   而 `_kline_from_tx` / `_kline_from_sina` 在彻底失败时返回 `[]`。
+        #   于是「通达信给了 24 根有效、腾讯超时空、新浪也空」会得到 **0 根**：
+        #   明明手里有 24 根，却被更差的源覆盖成没有。
+        #   实测（monkeypatch 三路）：tdx=24 / tx=[] / sina=[] → 0 根；
+        #   tdx=0 / tx=24 / sina=[] → 0 根。调用方随后 `if not bars` 会再试
+        #   一次新浪、仍空 → 跳过写缓存 + `_health_set("klines", False)`，
+        #   一次瞬时抖动被记成「K线整体不可用」。
+        #   正确写法是**比长度、不无条件覆盖**：只有新源真的拿到更多才换。
+        #   fetch_board_moneyflow 那边用的 `or` 是同一思路（空值不覆盖）。
         bars = _kline_from_tdx(code, n)
-        if len(bars) < 25:
-            bars = _kline_from_tx(code, n)
-        if len(bars) < 25:
-            bars = _kline_from_sina(code, n)
+        for _fn in (_kline_from_tx, _kline_from_sina):
+            if len(bars) >= 25:
+                break
+            alt = _fn(code, n)
+            if len(alt) > len(bars):
+                bars = alt
         return bars
     return cached(f"kline:{code}:{n}", 1800, producer)
 

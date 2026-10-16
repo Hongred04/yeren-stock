@@ -126,19 +126,68 @@ def _gap(price: float, prev: float) -> float | None:
     return (price - prev) / prev * 100.0
 
 
+def _limit_prices(snap: dict) -> tuple[float, float] | None:
+    """算出该股的涨停价 / 跌停价。优先用快照自带字段，缺了就按昨收推。
+
+    ★ 为什么必须能在**没有 limit_up 字段**时也算出来（v1.41.4 修数据源切换 bug）：
+      `pipeline.py` 的 snapshot 降级会在腾讯失败时**整块换成新浪**的
+      (`snapshots = fetch_snapshots_sina(...)`)。两家字段数不一样：
+      腾讯 21 个、新浪只有 7 个 —— **`limit_up`/`limit_down` 只有腾讯有**。
+      于是新浪路上 `snap.get("limit_up")` 是 None，`_f(None)==0.0`，
+      下面的 `lu > 0` 恒假 → `is_limit_up()` **永远返回 False** →
+        ① 每只竞价一字板都被 `band_of` 判成「高开≥5%」而不是「竞价涨停」；
+        ② 竞价涨停家数直接掉到 0，`bias` 从 risk_on(抢筹) 翻成 neutral(中性)。
+      实测同一市场、只换数据源：涨停家数 1→0、net +16.7%→+0.0%。
+      ——比这个函数注释里警告过的「写死 9.9%」更糟：那是漏掉 20cm 的票，
+      这是一只都不剩。降级路上「字段变少」不该被解读成「事实不同」。
+
+    推法用该股自己的涨跌停幅度（主板 10%、创业板/科创 20%、ST 5%）。
+    ⚠️ 不能拿 `indicators.limit_up_threshold` 当幅度用 —— 它返回的是
+    **判定用的下限**（主板 9.5、创业板 19.5，故意留了 0.5 的容差），
+    拿它算涨跌停价会把 600519 的 1444.27 算成 1437.70，偏 6.57 元 →
+    `abs(px-lu)<0.005` 这种严格比对必然判错。幅度要的是**真实比例**。
+    """
+    lu = _f(snap.get("limit_up"))
+    ld = _f(snap.get("limit_down"))
+    if lu > 0 and ld > 0:
+        return lu, ld
+    prev = _f(snap.get("prev_close"))
+    if prev <= 0:
+        return None
+    num = str(snap.get("code") or "")[2:]
+    if num.startswith(("300", "301", "688", "689")):
+        r = 0.20                      # 创业板 / 科创板
+    elif num.startswith(("43", "83", "87", "88", "92")):
+        r = 0.30                      # 北交所
+    else:
+        r = 0.10                      # 主板
+    # ST 股 5%：名称里带 ST 才成立，拿不到名称就按板块默认（宁严不宽）
+    nm = str(snap.get("name") or "").upper().replace(" ", "")
+    if "ST" in nm:
+        r = 0.05
+    return (round(prev * (1 + r), 2), round(prev * (1 - r), 2))
+
+
 def is_limit_up(snap: dict) -> bool:
     """竞价匹配价是否已经顶在涨停价上（竞价一字/准一字）。
 
     ★ 必须用该股自己的涨停价 [47] 判定：主板 10%、创业板/科创 20%、
       ST 5%，写死 9.9% 会把 20cm 的票全漏掉。
+    ★ 快照缺 limit_up（新浪降级路）时按昨收推算，见 `_limit_prices`。
     """
-    lu = _f(snap.get("limit_up"))
+    p = _limit_prices(snap)
+    if not p:
+        return False
+    lu, _ = p
     px = _f(snap.get("price"))
     return lu > 0 and px > 0 and abs(px - lu) < 0.005
 
 
 def is_limit_down(snap: dict) -> bool:
-    ld = _f(snap.get("limit_down"))
+    p = _limit_prices(snap)
+    if not p:
+        return False
+    _, ld = p
     px = _f(snap.get("price"))
     return ld > 0 and px > 0 and abs(px - ld) < 0.005
 
@@ -449,15 +498,26 @@ def evaluate(cfg: dict | None = None, snaps: dict | None = None,
     review = yesterday_review(snaps, prev_zt or [], top_n=top_prev)
     mv = movers(temp.get("_scored") or [], snaps, top_n=top_n, big_gap=big_gap)
 
-    # 快照时间戳（[30]，格式 YYYYMMDDHHMMSS）—— 让用户知道这份读数有多"新"
+    # 快照时间戳 —— 让用户知道这份读数有多"新"。
+    # ★ 两家给的时间格式**不一样**，只认 14 位会把新浪路的值全丢掉（v1.41.4）：
+    #   腾讯 time = "20261016161447"（14 位 YYYYMMDDHHMMSS）
+    #   新浪 time = "15:34:59"（8 位，已含冒号，见 datasource._parse_sina_line）
+    #   原式 `if len(t) >= 14` 对 8 位的新浪恒假 → snapshot_time 恒为空串，
+    #   而新浪正是腾讯失败时的降级路 —— 恰恰在最不可靠的时候把这个
+    #   「读数有多新」的提示抹掉了（实测 tx '16:15:00' vs sina ''）。
+    def _hhmmss(t: str) -> str:
+        if len(t) >= 14 and t[:14].isdigit():
+            return f"{t[8:10]}:{t[10:12]}:{t[12:14]}"
+        if len(t) == 8 and t[2] == ":" and t[5] == ":":
+            return t
+        return ""
+
     ts_raw = ""
     for s in snaps.values():
         t = str(s.get("time") or "")
-        if len(t) >= 14:
-            ts_raw = max(ts_raw, t) if ts_raw else t
-    snap_time = ""
-    if len(ts_raw) >= 14:
-        snap_time = f"{ts_raw[8:10]}:{ts_raw[10:12]}:{ts_raw[12:14]}"
+        if _hhmmss(t) and t > ts_raw:
+            ts_raw = t
+    snap_time = _hhmmss(ts_raw)
 
     parts = [temp["summary"]]
     if in_auction:

@@ -226,13 +226,26 @@ class Handler(BaseHTTPRequestHandler):
                 out["source"] = "sina-min"
                 out["trade_date"] = bars[-1]["date"] if bars else ""
             else:
-                daily = ds.fetch_kline(code, 260)
+                # ★ 窗口按周期给足（v1.41.4 修「日K/月K 看不清」）：
+                #   原来一律 fetch_kline(code, 260) 再 [-120:]。
+                #   · 月K 吃掉这个亏：260 个交易日 ≈ 12~13 个月，重采样后只有
+                #     **14 根**月K，而 MA20 需要 20 根 —— 月K 上 MA20 恒为 null
+                #     （图上那行图例直接写「MA20 —」），且 14 根挤在整幅宽度里
+                #     变成「14 根孤立小柱子 + 大片空白」。
+                #   · 日K 则是**太多**：120 根塞进 594px 面板 = 每根 4.9px，
+                #     蜡烛实体只有 2.8px 而间隙 4.5px（间隙比实体还宽），加上
+                #     十字星被夹成 1px 细线，整体糊成一片。
+                #   所以：日K 收窄到 90 根（每根 ≈6.6px），周K 给 104 根（两年），
+                #   月K 要 400 个交易日（≈19 个月）才能让 MA20 有值。
+                need = {"day": (260, 90), "week": (520, 104), "month": (400, 60)}
+                fetch_n, keep_n = need.get(period, (260, 120))
+                daily = ds.fetch_kline(code, fetch_n)
                 if period == "day":
-                    bars = daily[-120:]
+                    bars = daily[-keep_n:]
                     out["source"] = "kline"
                 else:
                     bars = ds.resample_kline(daily, period)
-                    bars = bars[-120:]
+                    bars = bars[-keep_n:]
                     out["source"] = "kline-aggregated"
             out["bars"] = bars or []
         except Exception as e:                                # noqa: BLE001

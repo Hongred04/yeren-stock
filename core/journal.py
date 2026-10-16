@@ -7,6 +7,9 @@
 
 回测正确性清单（借鉴同类项目的踩坑结论，逐条落实）：
   · t+1 成交：信号是收盘后给的 → 一律按**次日开盘价**进场（防未来函数）；
+  · 持有期口径：进场在 T+1 开盘，「持有 h 日」= 卖在 T+1+h 的**收盘**
+    （v1.41.4 修正：原先误取 T+h 收盘，h=1 时与进场同日 → 算成日内涨跌
+      却标成「1日」，胜率被系统性低估）；
   · 涨停不可买：次日开盘贴涨停（一字/秒板）→ 记「未成交」，不计入胜率；
   · 停牌过滤：次日无K线（停牌/退市）→ 记「未成交」；
   · 成本计入：佣金万2.5×2 + 印花税 0.05%（卖出）+ 滑点 0.05%×2 ≈ 0.2%，
@@ -111,7 +114,16 @@ def record(entries: list[dict], real_date: str, picks: list[dict]) -> int:
 
 def _settle_one(e: dict, bars: list[dict], real_date: str, cost: float) -> str:
     """结算一条档案。返回 'settled' / 'skip' / 'pending'。"""
-    d0 = e.get("date", "")
+    # ★ 日期归一化后再比（v1.41.4）：原来写 `_norm_date(b.date) == d0`，
+    #   左边归一化成 'YYYYMMDD'，右边 d0 是**原样**的 `e["date"]`。生产环境
+    #   `record()` 存的 real_date 来自 `ds.pool_qdate()`，本来就是 8 位无分隔，
+    #   所以一直能匹配上 —— 但只要档案里的日期带连字符（'YYYY-MM-DD'，
+    #   即 `_norm_date` 存在就是为了处理的那种形式），匹配**恒为 False** →
+    #   走到 idx is None 分支，被当成「K线窗口里没有信号日」。
+    #   后果：≤25 天时静默返回 pending（永远结算不了、胜率样本永远不增长），
+    #   >25 天时判成「超出结算窗口」并被 skip 掉 —— 明明有完整K线却算不出来。
+    #   是自己写测试夹具时用 'YYYY-MM-DD' 才暴露的：夹具没错，比较写错了。
+    d0 = _norm_date(e.get("date", ""))
     idx = None
     for i, b in enumerate(bars):
         if _norm_date(b.get("date")) == d0:
@@ -152,8 +164,14 @@ def _settle_one(e: dict, bars: list[dict], real_date: str, cost: float) -> str:
     e["entry_open"] = round(entry_open, 2)
     e["entry_gap"] = round(gap, 2)
     progress = False
+    # ★ 持有期口径修正（v1.41.4）：进场在 idx+1 的**开盘**，所以「持有 h 个交易日」
+    #   的卖出点必须是 idx+1+h 的收盘。原来写 j = idx + h —— h=1 时卖出点
+    #   = idx+1 的**收盘**，与进场是**同一天**，算出来的是「进场当日日内涨跌」，
+    #   而不是持有 1 日的收益。列名却标着「1日/3日/5日」，用户看到的口径是错的。
+    #   实测（同 28 笔样本）：旧「1日」胜率 14.3%、均 -1.80%；
+    #   真·持有 1 日 胜率 32.1%、均 -0.08% —— 胜率被低估一半以上。
     for h in (1, 3, 5):
-        j = idx + h
+        j = idx + 1 + h
         if j < len(bars):
             c = _f(bars[j].get("close"))
             if c > 0:
@@ -276,6 +294,35 @@ def _traps(entries: list[dict]) -> list[dict]:
     return out
 
 
+def _dedup_by_stock(entries: list[dict]) -> list[dict]:
+    """按 (日期, 代码) 去重，同一票同一天只留一条（保留信号优先级最高的一条）。
+
+    ★ 为什么 overall 必须去重（v1.41.4）：`record()` 的去重键是
+      `f"{date}:{code}:{sig.type}"` —— 含信号类型。同一只票同一天被 B0/B1/B2
+      多路命中，就会记成多条**完全相同收益**的记录。按信号分组统计时这是对的
+      （每个信号各自算自己的命中率），但 `overall` 把它们加总会把同一笔交易
+      重复加权：实测 201 条记录里只有 158 只唯一票，样本虚增 21%。
+      `backtest.py` 早就记过这条教训（不去重时胜率 65.3% → 去重后明显不同），
+      但 journal 的 overall 一直没跟上。
+
+    保留哪一条：按信号在 `_SIGNAL_RANK` 里的优先级，取最「靠前」的那个信号，
+    让 overall 反映的是「这天我实际会做什么」，而不是随便取一条。
+    """
+    rank = {"B2": 0, "W1": 1, "W2": 2, "B1": 3, "B0": 4}
+    best: dict[tuple, dict] = {}
+    for e in entries:
+        k = (e.get("date", ""), e.get("code", ""))
+        if k not in best:
+            best[k] = e
+            continue
+        a, b = best[k], e
+        ra = rank.get(a.get("signal"), 9)
+        rb = rank.get(b.get("signal"), 9)
+        if rb < ra:
+            best[k] = b
+    return list(best.values())
+
+
 def stats(entries: list[dict]) -> dict:
     by_key: dict[tuple, list[dict]] = {}
     for e in entries:
@@ -291,7 +338,8 @@ def stats(entries: list[dict]) -> dict:
     return {
         "stats": rows,
         "traps": _traps(entries),
-        "overall": _agg(entries),
+        # overall 按票去重（见 _dedup_by_stock）；rows/_traps 仍按信号各算各的
+        "overall": _agg(_dedup_by_stock(entries)),
         "recent": [{k: e.get(k) for k in keys} for e in recent],
     }
 
