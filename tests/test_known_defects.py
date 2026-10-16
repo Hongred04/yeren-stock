@@ -117,7 +117,20 @@ def test_traps():
     ok(len(tr) == 1, f"6 笔全亏 → 命中 1 类（实际 {len(tr)}）")
     ok(tr and tr[0]["recent_losses"] == 6, "亏损笔数统计正确")
     ok(tr and tr[0]["type"] == "B1", "信号类型带上")
-    ok(tr and "反复踩同一个坑" in tr[0]["note"], "文案说明是用它的方式在亏钱")
+    ok(tr and "反复踩同一个坑" not in tr[0]["note"] or tr and tr[0]["note"],
+       "note 非空")
+    # ★ 文案契约变了（v1.41.5）：旧文案一律写「反复踩同一个坑，先停用」，
+    #   但实测「最近 8 笔亏几笔」里**大部分是当日大盘的账** —— 20261009-1016
+    #   六个交易日有 4 天全市场均值为负（10-13 单日 -4.23%），那天闭着眼买
+    #   什么都亏。现在 note 必须带**扣掉大盘后的超额**，并给出停用/不停用判定，
+    #   否则会把被大盘拖累的信号（实测 B0 超额 +3.38%）一起错杀。
+    ok(tr and ("超额" in tr[0]["note"]), "文案给出扣掉大盘后的超额（不再只报绝对亏损）")
+    ok(tr and tr[0].get("verdict") in ("suspend", "market"),
+       f"给出停用/该修判定：{tr[0].get('verdict') if tr else None}")
+    # 这一组是「每天都跑输大盘」的构造：所有票同一天同收益 → 超额为 0，
+    # 既不跑赢也不跑输，按阈值（负超额才算该停用）应落在 market。
+    ok(tr and tr[0].get("verdict") == "market",
+       "全部同收益 → 无超额劣势 → 判 market（不是无脑停用）")
 
     # partial（1/3 日已出、5 日未到）也要参与 —— 它有 ret1
     part = [ent(i, "partial", -0.04) for i in range(1, 6)]

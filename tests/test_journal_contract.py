@@ -243,6 +243,105 @@ if os.path.exists(jp):
 else:
     print("  ..  无 data/signal_journal.json（运行期数据），跳过真实数据校验")
 
+# ================================================================ 第四节 D
+
+print()
+print("=" * 62)
+print("BUG D：踩坑雷达的分组键与「停用 vs 该修」判定")
+print("=" * 62)
+
+
+def _ent(sig, name, date, ret1, code="sh600000"):
+    return {"signal": sig, "signal_name": name, "date": date, "code": code,
+            "status": "settled", "ret1": ret1, "ret3": None, "ret5": None,
+            "id": f"{date}{code}{sig}"}
+
+
+# --- D1 分组键不能带 signal_name -------------------------------------------
+# 同一个 B0 在 trading.py 里有两种展示文案（已封板 / 未封板两条路径）。
+# 若按 (signal, signal_name) 分组，B0 会被劈成两组，雷达上冒出两行。
+_gs = [_ent("B0", "退潮试错仓", f"2026100{i}", -0.02) for i in range(1, 6)]
+_gs += [_ent("B0", "退潮试错仓 · 首板", f"2026101{i}", -0.02) for i in range(1, 6)]
+_t = journal._traps(_gs)
+print(f"  同一 B0 两种文案共 {len(_gs)} 笔 → 雷达 {len(_t)} 行")
+ok(len(_t) == 1, "同一 signal 的两种 signal_name 只出一行（不被劈开）")
+if _t:
+    print(f"  显示名 = {_t[0]['name']}（取组内出现最多的文案）")
+    ok(_t[0]["type"] == "B0", "行的 type 是 signal 而不是 name")
+    ok(_t[0]["recent_n"] == 8, "最近 8 笔按合并后的样本取（不是各取各的）")
+
+# --- D2 判定必须扣掉当日大盘 ------------------------------------------------
+# 造一个「信号本身正超额，但那几天大盘极差」的场景。
+# ★ 构造要点：陪跑票**必须挂别的 signal**。`_traps` 只对目标 signal 的样本取
+#   「最近 8 笔」，而 `_day_mean_ret` 用的是全档案的日横截面均值 —— 如果陪跑票
+#   和被测信号同 signal，它们会一起进「最近 8 笔」，把该组的超额拉回 0 附近，
+#   测试就变成自证（实测第一版就是这么写错的：9 笔陪跑把 3 笔目标淹掉）。
+#   正确构造：陪跑票独立成一组（样本不足 5 笔不会进雷达），只影响日均值。
+# 场景：三天，每天大盘均值约 -2.2%（3 笔陪跑 -3% + 2 笔目标 -1%），
+# 目标信号每天 -1% → 超额 +1.2%/天。陪跑组 Z9 有 9 笔（≥5）也会进雷达，
+# 所以断言必须**按 type 取行**，不能取 [0]（suspend 排序在前，[0] 是 Z9）。
+_good_sig = []
+for d in ("20261010", "20261011", "20261012"):
+    _good_sig += [_ent("Z9", "陪跑", d, -0.03, code=f"sh7000{i}") for i in "abc"]
+    _good_sig += [_ent("B9", "目标信号", d, -0.01, code=f"sh6000{i}") for i in "ab"]
+_t2 = journal._traps(_good_sig)
+print("  目标信号：6 笔全亏（-1%）；当日大盘均值 -2.2%（3 陪跑-3% + 2 目标-1%）")
+_g = [x for x in _t2 if x["type"] == "B9"]
+ok(len(_g) == 1, "全部亏损的信号仍会被雷达捞出来（该报的必须报）")
+if _g:
+    r = _g[0]
+    print(f"  判定 = {r['verdict']}  超额胜率 {r['exc_win']*100:.0f}%  "
+          f"超额均 {r['exc_avg']*100:+.2f}%")
+    ok(r["verdict"] == "market",
+       "跑赢大盘但绝对亏损 → 判定 market（不用停用），不被误杀")
+    ok(r["exc_avg"] > 0, "超额均值为正（扣掉大盘后是赚的）")
+    ok(r["exc_win"] > 0.5, "超额胜率过半（每天都跑赢）")
+
+# --- D3 真该停用的必须判 suspend -------------------------------------------
+# 场景：大盘 -1%（陪跑），目标信号 -4% → 超额 -3%/天，真该停用。
+_bad_sig = []
+for d in ("20261010", "20261011", "20261012"):
+    _bad_sig += [_ent("Z8", "陪跑", d, -0.01, code=f"sh7100{i}") for i in "abc"]
+    _bad_sig += [_ent("B8", "烂信号", d, -0.04, code=f"sh6100{i}") for i in "ab"]
+_t3 = journal._traps(_bad_sig)
+_g3 = [x for x in _t3 if x["type"] == "B8"]
+ok(len(_g3) == 1, "跑输大盘的信号也进雷达")
+if _g3:
+    r = _g3[0]
+    print(f"  判定 = {r['verdict']}  超额胜率 {r['exc_win']*100:.0f}%  "
+          f"超额均 {r['exc_avg']*100:+.2f}%")
+    ok(r["verdict"] == "suspend", "扣掉大盘后仍为负超额 → 判定 suspend（真该停用）")
+    ok(r["exc_avg"] < 0, "超额均值为负")
+
+# --- D4 suspend 排在前、样本不足 5 笔不进雷达 -----------------------------
+_mix_sig = _bad_sig + _good_sig
+_t4 = journal._traps(_mix_sig)
+if len(_t4) >= 2:
+    print(f"  排序：{[x['verdict'] for x in _t4]}")
+    ok(_t4[0]["verdict"] == "suspend", "suspend 判定排在最前（先看该停用的）")
+ok(len(journal._traps([_ent("B7", "太少", "20261010", -0.05)])) == 0,
+   "样本不足 5 笔不进雷达")
+# ★ 回归护栏：陪跑票自己（Z9/Z8）不得进雷达 —— 它们是被构造出来的背景噪声，
+#   若哪天 _traps 改成对全档案分组而不是只对目标信号取最近 8 笔，这里会先炸。
+ok(all(x["type"] not in ("Z9", "Z8") for x in _t4 if x["recent_n"] < 5),
+   "样本不足的陪跑组不进雷达（不靠猜）")
+
+# --- D5 真实档案上两种判定都存在（证明不是空转） ---------------------------
+if os.path.exists(jp):
+    with open(jp, "r", encoding="utf-8") as f:
+        real2 = (json.load(f) or {}).get("entries") or []
+    if real2:
+        rt = journal._traps(real2)
+        vs = [x["verdict"] for x in rt]
+        print(f"  真实档案：{len(rt)} 行，判定 = {vs}")
+        ok(all(v in ("suspend", "market") for v in vs),
+           "真实档案每行都有 verdict 字段")
+        ok(len(vs) == len(set(x["type"] for x in rt)),
+           "真实档案里同一 signal 只出现一行（分组键修复生效）")
+        _dm = journal._day_mean_ret(real2)
+        ok(len(_dm) > 0 and all(isinstance(v, float) for v in _dm.values()),
+           "_day_mean_ret 返回每日均值字典")
+
 # ================================================================ 汇总
 
 print()

@@ -261,8 +261,25 @@ def _traps(entries: list[dict]) -> list[dict]:
 
     对每类信号看最近 8 笔已结算样本（按时间倒序）：亏损 ≥5 笔（胜率≤37.5%）
     就标红 —— 这不是信号烂，是**你用它的方式在亏钱**，先停用、复盘、规避。
+
+    ★ 分组键只用 signal，**不能带 signal_name**（v1.41.5 修）。
+      原来写 `(e.get("signal"), e.get("signal_name"))`，而 signal_name 是
+      `core/trading.py` 各买点构造处写死的**展示文案**，同一个 signal 在不同
+      分支下会写出不同的名字 —— 实测 B0 有「退潮试错仓」和「退潮试错仓 · 首板」
+      两种（对应「退潮期已封板」与「退潮期未封板」两条路径）。
+      后果：B0 的样本被**劈成两半**（83 笔 + 36 笔），雷达上同一信号冒出**两行**，
+      每行各自取「最近 8 笔」—— 而两条路径的命中日期分布不同，抽出来的
+      8 笔根本不是同一批，于是两行给出的「亏几笔」互相矛盾、还都与合并后的
+      真实值不同（实测合并后最近 8 笔亏 5，拆开是 亏7 / 亏5）。
+      用户看到的 5 行里有两行其实是同一个信号。
+
+      signal（type）是**稳定契约**：`_SIGNAL_RANK`、`record()` 的去重键、
+      backtest 都按它走。name 是文案，随时会改 —— 拿它当分组键，
+      等于让改一句提示语就悄悄改变统计结果。
+
+      显示名取该组里出现次数最多的那个（最常用文案），保证可读性。
     """
-    by_key: dict[tuple, list[dict]] = {}
+    by_key: dict[str, list[dict]] = {}
     for e in entries:
         # ★ 状态口径修正（v1.28.0）：`_settle_one` 只会写
         #   open / settled / partial / skip —— 从来没有 win / loss（那是更早版本的
@@ -275,23 +292,81 @@ def _traps(entries: list[dict]) -> list[dict]:
             continue
         if e.get("ret1") is None:
             continue
-        by_key.setdefault((e.get("signal"), e.get("signal_name")), []).append(e)
+        sig = e.get("signal") or "?"
+        by_key.setdefault(sig, []).append(e)
     out = []
-    for (t, name), g in by_key.items():
+    for t, g in by_key.items():
+        # 显示名：组内出现最多的 signal_name（并列时取字典序，保证稳定）
+        names: dict[str, int] = {}
+        for e in g:
+            nm = e.get("signal_name") or ""
+            if nm:
+                names[nm] = names.get(nm, 0) + 1
+        name = min(names, key=lambda k: (-names[k], k)) if names else t
         g = sorted(g, key=lambda e: (e.get("date", ""), e.get("id", "")),
                    reverse=True)[:8]
         if len(g) < 5:
             continue
         losses = sum(1 for e in g if _f(e.get("ret1")) < 0)
         if losses >= 5:
+            # ★ 判定「停用 vs 该修」必须有基准（v1.41.5）。
+            #   只报「最近 8 笔亏 N 笔」会冤枉信号：实测 20261009-20261016 六个交易日里，
+            #   有 4 天全市场平均是负的（10-13 单日均值 -4.23%），**当天闭着眼买什么都亏**。
+            #   把「大盘当天整体涨跌」扣掉，才知道是信号烂还是日子烂：
+            #     超额 = 该笔收益 − 当日全体样本均值
+            #   实测（201 笔）：
+            #     B0 原始胜率29.4%/均-1.71% → 超额50.4%/+0.01%  ← 完全被大盘拖累，**不该停用**
+            #     B1 原始30.0%/-1.46%       → 超额50.0%/-0.20%
+            #     W2 原始23.8%/-0.79%       → 超额23.8%/-0.78%  ← 扣完大盘还是烂，**真该停用**
+            #     W1 原始58.3%/+1.52%       → 超额66.7%/+2.12%  ← 最好的信号，从没被标红
+            #   所以 note 分两种口径，不能一律喊「停用」。
+            day_mean = _day_mean_ret(entries)
+            exc = [e for e in g if e.get("date") in day_mean]
+            exc_avg = (sum(_f(e.get("ret1")) - day_mean[e["date"]] for e in exc) / len(exc)
+                       if exc else 0.0)
+            exc_win = (sum(1 for e in exc
+                           if _f(e.get("ret1")) - day_mean[e["date"]] > 0) / len(exc)
+                       if exc else 0.0)
+            # 阈值：扣掉大盘后仍是负超额、且超额胜率不到一半 → 真该停用。
+            if exc_avg < 0 and exc_win < 0.5:
+                verdict = "suspend"
+                note = (f"最近 {len(g)} 笔亏 {losses} 笔；扣掉当日大盘后仍是"
+                        f"负超额（超额胜率 {exc_win*100:.0f}%、均 {exc_avg*100:+.2f}%）—— "
+                        f"这个信号本身没有边际，**先停用**，别再用它开新仓")
+            else:
+                verdict = "market"
+                note = (f"最近 {len(g)} 笔亏 {losses} 笔，但扣掉当日大盘后"
+                        f"超额胜率 {exc_win*100:.0f}%、均 {exc_avg*100:+.2f}% —— "
+                        f"亏损主要来自大盘而非信号本身，**不用停用**；"
+                        f"该做的是减少在下跌日进场（这份记录里的亏损日大盘均值是负的）")
             out.append({
                 "type": t or "?", "name": name or t or "?",
                 "recent_n": len(g), "recent_losses": losses,
-                "note": f"最近 {len(g)} 笔亏 {losses} 笔 —— 反复踩同一个坑，"
-                        "先停用这个信号，想清楚为什么亏再碰",
+                "verdict": verdict,
+                "exc_win": round(exc_win, 3),
+                "exc_avg": round(exc_avg, 4),
+                "note": note,
             })
-    out.sort(key=lambda x: -x["recent_losses"])
+    out.sort(key=lambda x: (x["verdict"] != "suspend", -x["recent_losses"]))
     return out
+
+
+def _day_mean_ret(entries: list[dict]) -> dict[str, float]:
+    """每个交易日的全体样本平均 ret1 —— 当天大盘/风格的代理。
+
+    用途：踩坑雷达判定「信号烂」还是「日子烂」。不引入任何外部指数数据，
+    纯用档案自身做横截面基准，避免「信号一差就怪大盘、大盘一差就怪信号」
+    这类无法证伪的互相推诿 —— 基准与待判样本同源，可比。
+    """
+    by_day: dict[str, list[float]] = {}
+    for e in entries:
+        if e.get("ret1") is None:
+            continue
+        d = e.get("date")
+        if not d:
+            continue
+        by_day.setdefault(d, []).append(_f(e.get("ret1")))
+    return {d: sum(v) / len(v) for d, v in by_day.items() if v}
 
 
 def _dedup_by_stock(entries: list[dict]) -> list[dict]:

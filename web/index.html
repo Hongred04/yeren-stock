@@ -3805,9 +3805,19 @@ function renderJournal(){
     </div>
     ${(j.traps||[]).length?`<div class="card" style="margin-bottom:12px;border-left:4px solid var(--red);background:#fffbfb">
       <div style="font-size:13px;font-weight:800;color:var(--red);margin-bottom:8px">踩坑雷达 —— 反复亏钱的地方，先规避</div>
-      ${(j.traps||[]).map(t=>`<div style="font-size:12.5px;line-height:1.8;margin-bottom:4px">
-        <b>${esc(t.name)}</b>：${esc(t.note)}</div>`).join('')}
-      <div class="fl" style="font-size:11px">野人：打交割单，找出反复踩坑的那个点，一定规避掉 —— 样本不足 5 笔的不算</div>
+      ${(j.traps||[]).map(t=>{
+        // ★ 两种判定必须区分（v1.41.5）：标红「停用」和标黄「大盘拖累」是
+        //   完全不同的处置。只按「最近N笔亏几笔」一律喊停用，会把被大盘拖累的
+        //   信号（实测 B0 扣掉大盘后超额 +3.38%）也一起停掉，等于把好信号扔掉。
+        const sus=t.verdict==='suspend';
+        const c=sus?'var(--red)':'#b8860b';
+        const bg=sus?'#fffbfb':'#fffdf5';
+        return `<div style="font-size:12.5px;line-height:1.8;margin-bottom:6px;padding:6px 8px;border-radius:4px;background:${bg};border-left:3px solid ${c}">
+          <b>${esc(t.name)}</b>
+          <span style="font-size:11px;font-weight:800;color:${c};margin-left:6px">${sus?'停用':'不用停用 · 大盘拖累'}</span>
+          <div style="color:#555">${esc(t.note)}</div></div>`;
+      }).join('')}
+      <div class="fl" style="font-size:11px">野人：打交割单，找出反复踩坑的那个点，一定规避掉 —— 样本不足 5 笔的不算；判定已扣掉当日大盘（同一天闭着眼买什么都亏的日子不算信号的账）</div>
     </div>`:''}
     <div class="tbl"><table><thead><tr><th>信号</th><th class="num">样本</th><th class="num">结算状态</th>
       <th class="num">1日 胜率/均值</th><th class="num">3日 胜率/均值</th><th class="num">5日 胜率/均值</th></tr></thead>
