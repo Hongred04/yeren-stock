@@ -869,11 +869,10 @@ td{padding:6px var(--s3)}
              拿它承担"结论可信度"的告知会漏读。 -->
         <div id="degradedBar"></div>
       </div>
-      <div class="sec">
-        <div class="sh"><h2>三问速览</h2>
-          <span class="hint">能买吗 · 钱够不够 · 大家抢还是跑</span></div>
-        <div id="metrics"></div>
-      </div>
+      <!-- 「三问速览」整块已删除（用户口径：结论卡在它上面一屏，说的就是同一件事）：
+           那 9 张卡里，「今天的状态 / 目标总仓位 / 纪律检查」与结论卡的结论 + acts
+           逐字同义；「涨停跌停 / 亏钱占比 / 封板率」又原样复制在「题材主线」「涨停梯队」
+           两个页的指标卡里。同一组数字在相邻两屏报两遍，读者会以为看到了两块信息。 -->
       <div class="sec">
         <div class="sh"><h2>明日判断</h2>
           <span class="hint" id="olHint">明天开盘先看什么 · 什么情况能动手</span></div>
@@ -1142,7 +1141,7 @@ const VOL_CN={peak_swing:'峰值量能',comfort_short:'量能舒适',shrink_shor
 // ── 二级菜单：一级=大板块，二级=具体页面（一次只看一页） ──
 const NAV=[
   {k:'home',t:'今日总览',d:'今天能不能出手',subs:[
-    {k:'home-main',t:'今日结论',d:'一句话结论 + 三问速览'},
+    {k:'home-main',t:'今日结论',d:'一句话结论 + 该拿多少'},
     {k:'home-pos', t:'仓位计划',d:'该拿多少仓位 + 推演过程'},
   ]},
   {k:'mood',t:'市场情绪',d:'市场热不热',subs:[
@@ -1831,87 +1830,25 @@ function render(){
     }
   }
 
-  /* ── ② 关键指标（大白话标签） ── */
-  // 量能：**盘中只报"已成交"**（事实），全天成交额只在收盘后才是事实。
-  // 之前盘中给的是"拿平均曲线把几十分钟进度放大到全天"的外推值 —— 实测 10:29
-  // 已成交 7795 亿被外推成 28487 亿（比前一天全天还多 50%），这种数字没有把握，
-  // 不该出现在界面上。盘中改为报已成交额 + 与近期同期的节奏对比（都是事实）。
+  // 两市成交额的展示文本。★ 不要因为「三问速览」删了就连它一起删 ——
+  // 下面「决策链」还在用（"两市成交 X 亿，属于…"），删了就是 ReferenceError。
+  // 盘中只报"已成交"（事实）：全天成交额只在收盘后才是事实，此前"拿平均曲线把
+  // 几十分钟进度放大到全天"的实测是 10:29 已成交 7795 亿被外推成 28487 亿
+  // （比前一天全天还多 50%），这种数字没有把握，不该出现在界面上。
   const volAmtTxt = vol.amount!=null
       ? Math.round(vol.amount).toLocaleString()+'亿'
       : (vol.cum_amount ? Math.round(vol.cum_amount).toLocaleString()+'亿' : '—');
-  // 注意这是**字符串拼接**：`VOL_CN[vol.mode]||vol.label` 两边都缺时会拼出字面量
-  // "undefined"（esc 救不了已经拼进字符串里的文本），所以必须显式兜底成「—」
-  const volSub = (vol.amount!=null ? '' : '已成交（盘中累计）· ')
-      + (VOL_CN[vol.mode]||vol.label||'—')
-      + (vol.intraday && vol.pace_txt ? ' · '+vol.pace_txt : '')
-      // 相对量能读数（分位 / 相对中位数倍数）—— 让"为什么这么判"可见
-      + (vol.rel_txt ? ' · '+vol.rel_txt : '');
-  // 两市成交额的**跨月位置**：只报"缩量存量"没有体感，得让人看见现在处于
-  // 最近 N 天的什么水平、离峰值多远。数据来自 core/amount.py（同花顺真实
-  // 两市额），与上面 vol.amount 是**两个口径**：vol.amount 是当日快照，
-  // 这里给的是它在长序列里的位置。取不到就整句不显示，不编数字。
-  const ma = REPORT.market_amount || {};
-  const maTxt = (ma.ok && ma.latest!=null)
-      ? ('近'+n0(ma.days)+'日 '+n0(ma.pct_rank)+'% 分位'
-         + (ma.from_peak_pct!=null ? ' · 距峰值 '+f2(ma.from_peak_pct)+'%' : ''))
-      : '';
-  // 7 张指标卡原来是平铺成 4 列网格，谁轻谁重看不出来。按用户真正的问题顺序
-  // 分三档：① 能不能做 → ② 市场多热 → ③ 挑什么票。每档一行，读起来有先后。
-  const cardGroups=[
-    {t:'① 今天能不能做',cards:[
-      // sen.can_trade 缺失 → canTrade 会被算成 false 并**信心十足地**报「不能」，
-      // 那是拿缺数据当成"退潮期"。缺字段时明确说"数据不足"，别替市场下结论。
-      // 口径与结论卡保持一致：报「状态」而不是「能/不能」（理由见①那段长注释）。
-      // 标签从「今天能买吗」改成「今天的状态」—— 前者问的是一个开关，后者问的是冷热，
-      // 而系统实际能给的只有后者。变的是措辞，can_trade 的判定一个字没动。
-      // ★ 未就绪闸门必须同步落到这一格：结论卡打叉了、这里还报绿「可做」，
-      //   同一屏自相矛盾（首屏就是"上面打叉、下面勾选"）。复用既有「数据不足 /
-      //   情绪数据未就绪」那套写法，只是把判据从"字段缺失"扩到"后端说未就绪"。
-      //   注意不能写成 `notReady||sen.can_trade==null` 去合并分支 —— 两种情况的
-      //   文案不同（一个是"在等数据"，一个是"字段压根没有"），分开写更准确。
-      {t:'今天的状态',
-        v:notReady?'数据未就绪':(sen.can_trade==null?'数据不足':(canTrade?'可做':'先看戏')),
-        s:notReady?(notReadyReason||'关键数据仍在获取中，暂不判断')
-          :(sen.can_trade==null?'情绪数据未就绪':(!canTrade?'退潮期或极度缩量'
-            :(pos.chain_stage==='probe'?'可以试错':'按计划操作'))),
-        c:notReady?'':(sen.can_trade==null?'':(canTrade?'g':'r'))},
-      {t:'目标总仓位',v:p0(pos.target_total),
-        s:pos.target_total==null?'仓位数据未就绪':'最多拿这么多，不是必须拿满',
-        c:pos.target_total==null?'':(pos.target_total>=0.5?'g':(pos.target_total>0?'o':'r'))},
-      {t:'纪律检查',v:{green:'正常',yellow:'有注意',red:'有冲突'}[mt.status]||'—',
-        s:n0((mt.checks||[]).length)+' 项检查',
-        c:mt.status==='green'?'g':(mt.status==='yellow'?'o':(mt.status?'r':''))},
-    ]},
-    {t:'② 市场有多热',cards:[
-      {t:vol.amount!=null?'两市成交额':'两市已成交',v:volAmtTxt,
-        s:volSub + (maTxt ? ' · '+maTxt : ''),
-        c:vol.mode==='dry'?'r':(vol.short_only?'o':'b')},
-      // 这一组原来全是不设防的直接拼接：`mm.limit_up+' / '+mm.limit_down` 缺字段时
-      // 显示「undefined / undefined」，`mt.checks.length` 缺 checks 时**直接抛异常**
-      // 让整页渲染中断（try 里只有 finally，没有 catch，异常还会继续往外抛）。
-      {t:'涨停 / 跌停',v:n0(mm.limit_up)+' / '+n0(mm.limit_down),
-        s:'炸板 '+n0(mm.broken)+' 只',c:''},
-      {t:'亏钱的股票占比',v:p0(mm.hurt_area),
-        s:mm.hurt_area==null?'数据不足':((mm.hurt_area>=hurtTh?'超过':'低于')+hurtTxt+'警戒线'),
-        c:mm.hurt_area==null?'':(mm.hurt_area>=hurtTh?'r':'g')},
-      {t:'题材主线',v:(ml.status==='one_day'&&ml.streak>=2)?'容量有限':(ML_ST[ml.status]||'—'),
-        s:ml.theme?('最强题材：'+ml.theme+(ml.streak>=2?`（已连续${ml.streak}日活跃）`:'')):'五信号判定题材持续性',
-        c:ml.status==='confirmed'?'g':(ml.status==='one_day'?'r':(ml.status==='disabled'?'':'o'))},
-    ]},
-    {t:'③ 挑什么票',cards:[
-      {t:'入选股票',v:picks.length+' 只',
-        s:'从 '+n0(m.scanned)+' 只里筛出',c:picks.length?'g':''},
-      {t:'最高连板',v:n0(mm.max_boards)+' 板',
-        s:'情绪高度，越高越接近高潮',c:mm.max_boards>=5?'r':(mm.max_boards>=3?'o':'')},
-      {t:'封板率',v:p0(mm.seal_rate),
-        s:'涨停后没被砸开的比例',c:mm.seal_rate==null?'':(mm.seal_rate>=0.8?'g':(mm.seal_rate>=0.6?'o':'r'))},
-    ]},
-  ];
-  $('metrics').innerHTML=cardGroups.map(gr=>
-    `<div class="mgroup"><div class="mt">${gr.t}</div>
-      <div class="grid g6" data-n="${gr.cards.length}">${gr.cards.map(c=>
-        `<div class="mc ${c.c}"><div class="t">${c.t}</div><div class="v">${c.v}</div>
-         <div class="s">${esc(c.s)}</div></div>`).join('')}</div></div>`).join('');
+  /* ★「三问速览」整块已删除（含 cardGroups / volSub / maTxt 与 revx 里那 9 张卡）。
+     删的理由不是排版，是**同一组数字报两遍**：
+       · 「今天的状态」「目标总仓位」「纪律检查」三格 = 上面结论卡的结论 + acts
+         逐字同义（canTrade / pos.target_total / mt.status 都是同一批字段）；
+       · 「涨停 / 跌停」「亏钱占比」「封板率」原样出现在「题材主线」「涨停梯队」两页；
+       · 剩下「题材主线」「最高连板」等，正是那两个页面的标题。
+     一并说明：缠在那段上的注释（未就绪闸门、缺字段兜底）随之删掉；结论卡那套
+     未就绪闸门不受影响（notReady 仍在上面 ① 段定义并使用）。
+     ⚠️ volAmtTxt 与 VOL_CN **保留** —— 它们不只服务被删的那段：下面「决策链」
+     （本函数后半程）还要拿 volAmtTxt 报两市成交额，VOL_CN 在结论卡那句里也用。
+     删掉会直接把后面那块渲染打成 ReferenceError。 */
 
   renderMeter();
 
